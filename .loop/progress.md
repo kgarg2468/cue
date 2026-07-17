@@ -51,3 +51,13 @@ Status: blocked
 - Tested and reverted three hypotheses without resolution: AppDelegate activation, a single SwiftUI Window scene, and an explicit AppKit-owned NSWindow. Current source remains unchanged.
 - Marked M0-FOUNDATION-001 blocked while retaining its implementation evidence and recording the failed runtime verification. CTL-001, CTL-002, and M0-FOUNDATION-002 through M0-FOUNDATION-006 are verified with PR/merge/CI evidence.
 - M1 remains dependency-blocked; no milestone advancement was made.
+
+## Cycle 1 native-window environment investigation — 2026-07-17
+
+Status: blocked pending fresh GUI login
+
+- Confirmed the durable loop remains active as job `809366a7` and full non-UI parity passes from a clean exported checkout.
+- The unchanged app and a standalone AppKit control both alternated between observable windows and foreground zero-window processes during this long-lived GUI session. Binary hashes remained unchanged across Swift build/test commands.
+- Reverted all temporary lifecycle instrumentation and source hypotheses; product source is identical to `origin/main`.
+- Per systematic-debugging stop criteria, no fourth speculative source fix was attempted. Trustworthy re-verification requires a fresh interactive macOS login, which was not performed because it would disrupt the user.
+- M0 remains blocked and M1 remains dependency-blocked.

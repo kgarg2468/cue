@@ -2,7 +2,7 @@
   "status": "blocked",
   "cycle": 0,
   "active_milestone": "M0 Foundation",
-  "branch": "loop/m0-closeout",
+  "branch": null,
   "active_pr": null,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
@@ -29,9 +29,10 @@
         "single SwiftUI Window scene",
         "explicit AppKit-owned NSWindow"
       ],
-      "source_unchanged": true
+      "source_unchanged": true,
+      "next_required_verification": "Run scripts/verify-app-launch.sh repeatedly after a fresh interactive macOS login. The long-lived current GUI session became inconsistent: unchanged product and standalone AppKit controls alternated between observable windows and foreground zero-window processes, so further source hypotheses in this session are not trustworthy."
     }
   ],
-  "last_cycle_summary": "M0 Foundation is blocked at the post-merge runtime completion gate: PR #1 merged as 3e6cf85 and both CI runs passed, and scripts/verify-m0.sh passes locally, but scripts/verify-app-launch.sh failed 10/10 with CaptureDelegateApp foreground and visible yet zero windows. M1 remains dependency-blocked.",
+  "last_cycle_summary": "M0 remains blocked at the native-window runtime gate. This cycle proved product source is unchanged and full non-UI parity passes, but repeated GUI controls became inconsistent in the current long-lived macOS session. A fresh interactive login is required before trustworthy window re-verification; no source change or M1 advancement was made.",
   "updated_at": "2026-07-17"
 }

@@ -22,7 +22,7 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 
 ## Global release controls
 
-- The active branch is `loop/m0-closeout`; PR `#1` merged as `3e6cf85`, and there is no active milestone PR.
+- PR `#1` merged as `3e6cf85`; there is no active milestone branch or PR while M0 is blocked.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - M0 remains blocked: the post-merge native-window runtime gate is red even though PR #1 merged and both CI runs passed; do not advance to M1 until M0-FOUNDATION-001 is resolved and reverified.
