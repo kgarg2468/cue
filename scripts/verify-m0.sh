@@ -38,18 +38,18 @@ for identifier, cells in rows.items():
     implementation, verification, pr, status = cells[4], cells[5], cells[6], cells[7]
     if status not in valid_statuses:
         raise SystemExit(f"{identifier} has invalid status {status!r}")
-    if status in {"implemented", "verified"} and implementation == "—":
+    if status in {"implemented", "verified", "blocked"} and implementation == "—":
         raise SystemExit(f"{identifier} requires implementation evidence for status {status}")
-    if status in {"implemented", "verified"} and verification == "—":
-        raise SystemExit(f"{identifier} requires local verification evidence for status {status}")
-    if status == "verified" and (verification == "—" or pr == "—"):
-        raise SystemExit(f"{identifier} requires verification and PR evidence for verified status")
+    if status in {"implemented", "verified", "blocked"} and verification == "—":
+        raise SystemExit(f"{identifier} requires verification or blocker evidence for status {status}")
+    if status == "verified" and pr == "—":
+        raise SystemExit(f"{identifier} requires PR evidence for verified status")
 
 for identifier in expected_m0_ids:
     cells = rows[identifier]
-    if cells[7] not in {"in_progress", "implemented", "verified"}:
+    if cells[7] not in {"in_progress", "implemented", "verified", "blocked"}:
         raise SystemExit(
-            f"{identifier} must be in_progress, implemented, or verified; found {cells[7]!r}"
+            f"{identifier} must be in_progress, implemented, verified, or blocked; found {cells[7]!r}"
         )
 PY
 

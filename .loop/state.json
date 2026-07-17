@@ -1,9 +1,9 @@
 {
-  "status": "implemented",
+  "status": "blocked",
   "cycle": 0,
   "active_milestone": "M0 Foundation",
-  "branch": "loop/m0-foundation",
-  "active_pr": 1,
+  "branch": "loop/m0-closeout",
+  "active_pr": null,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-17",
@@ -19,7 +19,19 @@
     "expires_date": "2026-07-24",
     "auto_expires": true
   },
-  "blockers": [],
-  "last_cycle_summary": "Cycle 0 M0 Foundation is implemented and locally verified. PR #1 is open on loop/m0-foundation; GitHub CI and merge remain pending, so no M0 row is verified or merged.",
+  "blockers": [
+    {
+      "id": "M0-FOUNDATION-001-native-window",
+      "requirement": "M0-FOUNDATION-001",
+      "description": "CaptureDelegateApp is reported by LaunchServices/System Events as foreground and visible but has zero windows; CoreGraphics also reports no window. scripts/verify-app-launch.sh failed deterministically on 10/10 consecutive launches after PR #1 merged.",
+      "tested_reverted_hypotheses": [
+        "AppDelegate activation",
+        "single SwiftUI Window scene",
+        "explicit AppKit-owned NSWindow"
+      ],
+      "source_unchanged": true
+    }
+  ],
+  "last_cycle_summary": "M0 Foundation is blocked at the post-merge runtime completion gate: PR #1 merged as 3e6cf85 and both CI runs passed, and scripts/verify-m0.sh passes locally, but scripts/verify-app-launch.sh failed 10/10 with CaptureDelegateApp foreground and visible yet zero windows. M1 remains dependency-blocked.",
   "updated_at": "2026-07-17"
 }
