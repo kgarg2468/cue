@@ -41,3 +41,13 @@ Status: in review
 - Pushed `loop/m0-foundation` and opened PR `#1` against `main`.
 - Independent spec-compliance and code-quality reviews reported no blocking findings.
 - GitHub CI and merge remain pending; M0 traceability rows stay `implemented` until those gates pass.
+
+## Cycle 0 post-merge runtime audit — 2026-07-17
+
+Status: blocked
+
+- PR #1 merged as `3e6cf85`; both CI runs passed, and local `scripts/verify-m0.sh` still passes.
+- The post-merge completion gate is red: `scripts/verify-app-launch.sh` failed deterministically on 10/10 consecutive launches. LaunchServices/System Events reported CaptureDelegateApp foreground and visible with zero windows; CoreGraphics reported no window.
+- Tested and reverted three hypotheses without resolution: AppDelegate activation, a single SwiftUI Window scene, and an explicit AppKit-owned NSWindow. Current source remains unchanged.
+- Marked M0-FOUNDATION-001 blocked while retaining its implementation evidence and recording the failed runtime verification. CTL-001, CTL-002, and M0-FOUNDATION-002 through M0-FOUNDATION-006 are verified with PR/merge/CI evidence.
+- M1 remains dependency-blocked; no milestone advancement was made.
