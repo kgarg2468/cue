@@ -1,0 +1,2 @@
+request={"version":2,"type":"health"}
+response={"version":1,"type":"error","code":"incompatible_version"}

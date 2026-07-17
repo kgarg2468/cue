@@ -1,0 +1,2 @@
+name=CaptureDelegateApp; backgroundOnly=false; visible=true; windows=1; title=CaptureDelegateApp; position=306283; size=900450
+alive_after_observation=true
