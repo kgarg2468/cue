@@ -32,3 +32,12 @@ Status: implemented locally; independent final review, PR, CI, and merge pending
 - No implementation PR has been opened; no CI run, independent final review, merge, or verified/merged lifecycle status is claimed.
 
 Next cycle: obtain independent final review, open the single M0 PR, and attach CI/PR evidence before any verification or merge lifecycle advancement.
+
+## Cycle 0 PR delivery — 2026-07-17
+
+Status: in review
+
+- Committed the bounded M0 Foundation slice as `a89e3e1`.
+- Pushed `loop/m0-foundation` and opened PR `#1` against `main`.
+- Independent spec-compliance and code-quality reviews reported no blocking findings.
+- GitHub CI and merge remain pending; M0 traceability rows stay `implemented` until those gates pass.

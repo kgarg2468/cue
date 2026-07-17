@@ -3,7 +3,7 @@
   "cycle": 0,
   "active_milestone": "M0 Foundation",
   "branch": "loop/m0-foundation",
-  "active_pr": null,
+  "active_pr": 1,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-17",
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 0 M0 Foundation implementation and local verification completed: the ledger gate, full local parity suite, and runtime checks passed. Independent final review, PR creation, CI, and merge remain pending; no M0 row is verified or merged.",
+  "last_cycle_summary": "Cycle 0 M0 Foundation is implemented and locally verified. PR #1 is open on loop/m0-foundation; GitHub CI and merge remain pending, so no M0 row is verified or merged.",
   "updated_at": "2026-07-17"
 }

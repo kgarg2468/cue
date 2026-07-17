@@ -22,7 +22,7 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 
 ## Global release controls
 
-- The active branch is `loop/m0-foundation`; `active_pr` remains null until an implementation PR is opened.
+- The active branch is `loop/m0-foundation`; the single active milestone PR is `#1`.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - M14 may close only against the full specification, including positioning and qualitative success criteria.
