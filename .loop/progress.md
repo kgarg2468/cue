@@ -1,0 +1,43 @@
+# Development Loop Progress
+
+## Cycle 0 — 2026-07-17
+
+Status: initialized
+
+- Established durable loop state for recurring job `809366a7` (every 10 minutes; expires 2026-07-24).
+- Set `M0 Foundation` as the active milestone on `loop/m0-foundation`.
+- Recorded the approved M0–M14 delivery chain and its dependency gates.
+- Created full end-state requirements traceability for specification sections 1–21.
+- No product implementation, PR, runtime lock, or source change was made.
+
+Next cycle: implement only M0 requirements, attach implementation and verification evidence to the ledger, and keep one active milestone PR at a time.
+
+## Cycle 0 review remediation — 2026-07-17
+
+Status: in progress
+
+- Added regression coverage for bounded/concurrent Rust client handling, malformed and disconnected clients, newline framing, socket identity cleanup, Swift SIGPIPE suppression, and bounded response reads.
+- Aligned CI with the single `scripts/verify-m0.sh` parity gate and added ledger evidence-state validation.
+- Corrected M0 scope so persistence and migrations remain in M2; added explicit M0 foundation rows without changing the original requirement rows.
+- Scheduled recurring-job renewal for 2026-07-23 with an explicit `blocked_expired` failure transition.
+- Hardened the standalone handshake plan around a private runtime directory and backend liveness checks.
+- Remediation is not marked verified or merged; final parity verification and PR evidence remain outstanding.
+
+## Cycle 0 local implementation verification — 2026-07-17
+
+Status: implemented locally; independent final review, PR, CI, and merge pending
+
+- Completed the M0 Foundation implementation and recorded concrete source and local verification evidence for CTL-001, CTL-002, and M0-FOUNDATION-001 through M0-FOUNDATION-006.
+- Passed the ledger gate, full `scripts/verify-m0.sh` local parity suite, and the recorded native-app/backend runtime checks.
+- No implementation PR has been opened; no CI run, independent final review, merge, or verified/merged lifecycle status is claimed.
+
+Next cycle: obtain independent final review, open the single M0 PR, and attach CI/PR evidence before any verification or merge lifecycle advancement.
+
+## Cycle 0 PR delivery — 2026-07-17
+
+Status: in review
+
+- Committed the bounded M0 Foundation slice as `a89e3e1`.
+- Pushed `loop/m0-foundation` and opened PR `#1` against `main`.
+- Independent spec-compliance and code-quality reviews reported no blocking findings.
+- GitHub CI and merge remain pending; M0 traceability rows stay `implemented` until those gates pass.
