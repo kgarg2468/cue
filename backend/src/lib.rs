@@ -1260,11 +1260,19 @@ impl ActivityClock {
         self.last_activity_nanoseconds.load(Ordering::Acquire)
     }
 
-    fn quiet_for_milliseconds(&self, expected_activity: u64) -> Option<u64> {
+    fn quiet_for_milliseconds(
+        &self,
+        expected_activity: u64,
+        quiet_started_nanoseconds: u64,
+    ) -> Option<u64> {
         if self.snapshot() != expected_activity {
             return None;
         }
-        Some(self.elapsed_nanoseconds().saturating_sub(expected_activity) / 1_000_000)
+        Some(
+            self.elapsed_nanoseconds()
+                .saturating_sub(quiet_started_nanoseconds)
+                / 1_000_000,
+        )
     }
 
     fn elapsed_nanoseconds(&self) -> u64 {
@@ -1275,15 +1283,18 @@ impl ActivityClock {
 struct InputWaitEpisode {
     threshold_milliseconds: u64,
     activity_nanoseconds: u64,
+    quiet_started_nanoseconds: u64,
     cpu_at_activity_nanoseconds: Option<u64>,
     fired: bool,
 }
 
 impl InputWaitEpisode {
     fn new(threshold_milliseconds: u64, activity: &ActivityClock, pid: libc::pid_t) -> Self {
+        let activity_nanoseconds = activity.snapshot();
         Self {
             threshold_milliseconds,
-            activity_nanoseconds: activity.snapshot(),
+            activity_nanoseconds,
+            quiet_started_nanoseconds: activity_nanoseconds,
             cpu_at_activity_nanoseconds: process_cpu_time_nanoseconds(pid),
             fired: false,
         }
@@ -1299,6 +1310,20 @@ impl InputWaitEpisode {
         let cpu_at_activity_nanoseconds = process_cpu_time_nanoseconds(pid);
         if activity.snapshot() == current_activity {
             self.activity_nanoseconds = current_activity;
+            self.quiet_started_nanoseconds = current_activity;
+            self.cpu_at_activity_nanoseconds = cpu_at_activity_nanoseconds;
+        } else {
+            self.cpu_at_activity_nanoseconds = None;
+        }
+    }
+
+    fn rebaseline_after_pause(&mut self, activity: &ActivityClock, pid: libc::pid_t) {
+        let current_activity = activity.snapshot();
+        let cpu_at_activity_nanoseconds = process_cpu_time_nanoseconds(pid);
+        let quiet_started_nanoseconds = activity.elapsed_nanoseconds();
+        if activity.snapshot() == current_activity {
+            self.activity_nanoseconds = current_activity;
+            self.quiet_started_nanoseconds = quiet_started_nanoseconds;
             self.cpu_at_activity_nanoseconds = cpu_at_activity_nanoseconds;
         } else {
             self.cpu_at_activity_nanoseconds = None;
@@ -1617,6 +1642,7 @@ fn run_process(
         }
     };
 
+    let mut input_wait_was_paused = false;
     let (exit_code, error_code) = loop {
         let child_status = child.try_wait()?;
         match classify_process_supervision(
@@ -1654,21 +1680,37 @@ fn run_process(
                 } else {
                     registration.drain_stdin();
                 }
-                if let (Some(activity), Some(episode)) =
+                let mut disarm_input_wait = false;
+                if control.paused.load(Ordering::SeqCst) {
+                    input_wait_was_paused = true;
+                } else if let (Some(activity), Some(episode)) =
                     (activity.as_deref(), input_wait_episode.as_mut())
                 {
                     episode.refresh_after_activity(activity, pgid);
+                    if input_wait_was_paused {
+                        episode.rebaseline_after_pause(activity, pgid);
+                        input_wait_was_paused = false;
+                    }
                     if !episode.fired
                         && activity
-                            .quiet_for_milliseconds(episode.activity_nanoseconds)
+                            .quiet_for_milliseconds(
+                                episode.activity_nanoseconds,
+                                episode.quiet_started_nanoseconds,
+                            )
                             .is_some_and(|quiet| quiet >= episode.threshold_milliseconds)
                         && control.stdin_is_idle()
-                        && write_input_waiting_frame_if_quiet(
-                            &stream, &run_id, pgid, &control, activity, episode,
-                        )?
                     {
-                        episode.fired = true;
+                        match write_input_waiting_frame_if_quiet(
+                            &stream, &run_id, pgid, &control, activity, episode,
+                        ) {
+                            Ok(true) => episode.fired = true,
+                            Ok(false) => {}
+                            Err(_) => disarm_input_wait = true,
+                        }
                     }
+                }
+                if disarm_input_wait {
+                    input_wait_episode = None;
                 }
                 thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
             }
@@ -2038,9 +2080,11 @@ fn write_input_waiting_frame_if_quiet(
     activity: &ActivityClock,
     episode: &InputWaitEpisode,
 ) -> io::Result<bool> {
-    let mut stream = stream
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stream = match stream.try_lock() {
+        Ok(stream) => stream,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+    };
     if activity.snapshot() != episode.activity_nanoseconds {
         return Ok(false);
     }
@@ -2063,9 +2107,10 @@ fn write_input_waiting_frame_if_quiet(
     {
         return Ok(false);
     }
-    let Some(quiet_for_milliseconds) =
-        activity.quiet_for_milliseconds(episode.activity_nanoseconds)
-    else {
+    let Some(quiet_for_milliseconds) = activity.quiet_for_milliseconds(
+        episode.activity_nanoseconds,
+        episode.quiet_started_nanoseconds,
+    ) else {
         return Ok(false);
     };
     if quiet_for_milliseconds < episode.threshold_milliseconds {

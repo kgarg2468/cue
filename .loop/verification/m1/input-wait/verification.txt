@@ -51,3 +51,32 @@ feeds the section 18.17 "Needs input" notification surface (later milestone).
   "hello\n" accepted → echoed output → second quiet episode → second waiting
   frame; close_stdin → natural exit 0; exactly 2 waiting frames, none after
   run_exit; backend exits 0 and removes the socket.
+
+# Independent review dispositions (gpt-5.6-sol, high effort; report: review-report.md)
+
+- Blocker: supervision tick took a blocking writer lock in the emission path;
+  a drain thread wedged on a non-reading client would block supervision
+  forever (cancel unobservable, slot leaked) — CONFIRMED, FIXED: try_lock
+  with skip-and-retry per tick. Orchestrator-confirmed adjacent defect fixed
+  in the same pass: an emission write error propagated out of the supervision
+  loop mid-run via `?`, bypassing kill/metadata/exit — now the episode is
+  dropped and supervision continues. Regression test:
+  input_wait_backpressure_does_not_wedge_cancel.
+- Major: paused (SIGSTOPped) runs are quiet and CPU-flat, so detection fired
+  a spurious "needs input" frame — CONFIRMED, FIXED: evaluation skipped while
+  paused; first unpaused tick restarts the quiet window and resamples the CPU
+  baseline without clearing `fired`. Red evidence: input_wait_suppressed_while_paused
+  FAILED against pre-fix code (red-evidence.log tail). 
+- Minor: busy-silent negative test used a fixed 20M-iteration loop (machine-
+  speed dependent, could pass vacuously) — CONFIRMED, FIXED: wall-clock-bound
+  busy loop with a 900ms timeout; residual <30ms CPU-gate scheduling
+  dependence documented as accepted. Side effect: the lifecycle suite dropped
+  from ~44s to ~5s wall (that loop dominated the old runtime).
+- Reviewer notes confirmed sound: frame integrity/terminal ordering, stdin
+  double-check, episode once-per-quiet semantics, pid-reuse avoidance
+  (sampling only after try_wait reports running), mach timebase conversion,
+  validation and wire compatibility.
+
+Post-fix evidence: cargo-test-postfix.log (15+13+46),
+verify-m0-parity-postfix.log (exit 0), runtime-demo-postfix.log (behavior
+unchanged: 2 episodes, none after run_exit, clean shutdown).
