@@ -16,6 +16,12 @@ public enum ProcessExitErrorCode: String, Equatable {
     case spawnFailed = "spawn_failed"
     case capacityExhausted = "capacity_exhausted"
     case timedOut = "timed_out"
+    case cancelled = "cancelled"
+}
+
+public enum CancelProcessResult: Equatable {
+    case accepted
+    case notFound
 }
 
 public enum ProcessEvent: Equatable {
@@ -35,6 +41,17 @@ public enum IPCClient {
         try writeHealthRequest(to: descriptor)
         let response = try readBoundedResponseLine(from: descriptor)
         return try validateHealthResponse(response)
+    }
+
+    public static func cancelProcess(socketPath: String, runID: String) throws
+        -> CancelProcessResult
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCancelProcessRequest(runID: runID, to: descriptor)
+        return try decodeCancelProcessResponse(
+            readBoundedResponseLine(from: descriptor), expectedRunID: runID)
     }
 
     public static func startProcess(
@@ -82,6 +99,10 @@ public enum IPCClient {
         timeoutMilliseconds: Int
     ) -> String {
         "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),\"timeout_milliseconds\":\(timeoutMilliseconds)}\n"
+    }
+
+    public static func cancelProcessRequest(runID: String) -> String {
+        "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
     }
 
     public static func validateHealthResponse(_ response: String) throws -> Bool {
@@ -158,6 +179,11 @@ public enum IPCClient {
                     timeoutMilliseconds: timeoutMilliseconds
                 ).utf8
             ), to: descriptor)
+    }
+
+    static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(cancelProcessRequest(runID: runID).utf8), to: descriptor)
     }
 
     private static func write(_ bytes: [UInt8], to descriptor: Int32) throws {
@@ -305,6 +331,28 @@ public enum IPCClient {
             return .exit(runID: expectedRunID, exitCode: exitCode, errorCode: errorCode)
         default:
             throw IPCClientError.invalidProcessEvent
+        }
+    }
+
+    static func decodeCancelProcessResponse(
+        _ response: String,
+        expectedRunID: String
+    ) throws -> CancelProcessResult {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "cancel_response",
+            json["run_id"] as? String == expectedRunID,
+            let status = json["status"] as? String
+        else {
+            throw IPCClientError.invalidProcessEvent
+        }
+
+        switch status {
+        case "accepted": return .accepted
+        case "not_found": return .notFound
+        default: throw IPCClientError.invalidProcessEvent
         }
     }
 

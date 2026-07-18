@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -68,6 +69,80 @@ struct RunExitResponse<'a> {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct CancelResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    run_id: &'a str,
+    status: &'static str,
+}
+
+#[derive(Clone)]
+struct ActiveRuns {
+    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+impl ActiveRuns {
+    fn new() -> Self {
+        Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn register(&self, run_id: String) -> Result<RunRegistration, ()> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut runs = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if runs.contains_key(&run_id) {
+            return Err(());
+        }
+        runs.insert(run_id.clone(), Arc::clone(&cancelled));
+        Ok(RunRegistration {
+            runs: Arc::clone(&self.runs),
+            run_id,
+            cancelled,
+        })
+    }
+
+    fn cancel(&self, run_id: &str) -> bool {
+        let cancelled = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(run_id)
+            .cloned();
+        let Some(cancelled) = cancelled else {
+            return false;
+        };
+        cancelled.store(true, Ordering::Release);
+        true
+    }
+}
+
+struct RunRegistration {
+    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    run_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for RunRegistration {
+    fn drop(&mut self) {
+        let mut runs = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if runs
+            .get(&self.run_id)
+            .is_some_and(|cancelled| Arc::ptr_eq(cancelled, &self.cancelled))
+        {
+            runs.remove(&self.run_id);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -170,6 +245,7 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     let worker_slots = WorkerSlots::new(MAX_CONCURRENT_CLIENTS);
     let process_slots = WorkerSlots::new(MAX_CONCURRENT_PROCESSES);
+    let active_runs = ActiveRuns::new();
 
     loop {
         let worker_slot = worker_slots.acquire();
@@ -181,11 +257,12 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
             }
         };
         let process_slots = process_slots.clone();
+        let active_runs = active_runs.clone();
         if let Err(error) = thread::Builder::new()
             .name("capture-delegate-ipc".to_owned())
             .spawn(move || {
                 let _worker_slot = worker_slot;
-                let _ = handle_connection(stream, process_slots);
+                let _ = handle_connection(stream, process_slots, active_runs);
             })
         {
             eprintln!("IPC worker spawn error: {error}");
@@ -218,7 +295,11 @@ fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
     }
 }
 
-fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::Result<()> {
+fn handle_connection(
+    mut stream: UnixStream,
+    process_slots: WorkerSlots,
+    active_runs: ActiveRuns,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
 
@@ -288,6 +369,10 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
                     return write_protocol_error(&mut stream, "invalid_start_process");
                 };
                 let timeout = Duration::from_millis(timeout_milliseconds);
+                let registration = match active_runs.register(run_id.clone()) {
+                    Ok(registration) => registration,
+                    Err(()) => return write_protocol_error(&mut stream, "duplicate_run_id"),
+                };
                 let Some(process_slot) = process_slots.try_acquire() else {
                     let stream = Arc::new(Mutex::new(stream));
                     return write_json_frame(
@@ -302,7 +387,7 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
                     );
                 };
                 stream.set_write_timeout(None)?;
-                thread::Builder::new()
+                if let Err(error) = thread::Builder::new()
                     .name("capture-delegate-process".to_owned())
                     .spawn(move || {
                         let _ = run_process(
@@ -312,11 +397,33 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
                             arguments,
                             timeout,
                             process_slot,
+                            registration,
                         );
                     })
-                    .map_err(|error| {
-                        io::Error::other(format!("process worker spawn error: {error}"))
-                    })?;
+                {
+                    return Err(io::Error::other(format!(
+                        "process worker spawn error: {error}"
+                    )));
+                }
+            }
+            "cancel_process" => {
+                let Some(run_id) = request.run_id else {
+                    return write_protocol_error(&mut stream, "invalid_cancel_process");
+                };
+                let status = if active_runs.cancel(&run_id) {
+                    "accepted"
+                } else {
+                    "not_found"
+                };
+                let response = CancelResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "cancel_response",
+                    run_id: &run_id,
+                    status,
+                };
+                serde_json::to_writer(&mut stream, &response)?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
             }
             _ => write_protocol_error(&mut stream, "unknown_request_type")?,
         }
@@ -356,6 +463,7 @@ fn run_process(
     arguments: Vec<String>,
     timeout: Duration,
     _process_slot: WorkerSlot,
+    registration: RunRegistration,
 ) -> io::Result<()> {
     let stream = Arc::new(Mutex::new(stream));
     let timeout_started = Instant::now();
@@ -394,7 +502,7 @@ fn run_process(
         return Err(error);
     }
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::clone(&registration.cancelled);
     let stdout_writer = Arc::clone(&stream);
     let stdout_run_id = run_id.clone();
     let stdout_cancelled = Arc::clone(&cancelled);
@@ -461,7 +569,7 @@ fn run_process(
             }
             ProcessSupervision::Cancelled => {
                 let _ = child.kill();
-                break (child.wait()?.code(), None);
+                break (child.wait()?.code(), Some("cancelled"));
             }
             ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
         }
@@ -655,8 +763,8 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONCURRENT_PROCESSES, ProcessSupervision, SocketCleanup, SocketIdentity, WorkerSlots,
-        classify_process_supervision, drain_process_output, handle_connection,
+        ActiveRuns, MAX_CONCURRENT_PROCESSES, ProcessSupervision, SocketCleanup, SocketIdentity,
+        WorkerSlots, classify_process_supervision, drain_process_output, handle_connection,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -670,6 +778,27 @@ mod tests {
             classify_process_supervision(true, true, false),
             ProcessSupervision::Exited
         );
+    }
+
+    #[test]
+    fn completed_child_wins_over_a_pending_cancellation() {
+        assert_eq!(
+            classify_process_supervision(true, false, true),
+            ProcessSupervision::Exited
+        );
+    }
+
+    #[test]
+    fn active_run_registry_rejects_duplicates_and_releases_ids_on_teardown() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("run-1".to_owned())
+            .expect("first registration should succeed");
+        assert!(runs.cancel("run-1"));
+        assert!(runs.register("run-1".to_owned()).is_err());
+        drop(registration);
+        assert!(!runs.cancel("run-1"));
+        assert!(runs.register("run-1".to_owned()).is_ok());
     }
 
     #[test]
@@ -725,7 +854,11 @@ mod tests {
         fs::write(&existing_file, "present output\n").expect("existing fixture should be written");
         let (mut client, server) = UnixStream::pair().expect("socket pair should open");
         let worker = std::thread::spawn(move || {
-            handle_connection(server, WorkerSlots::new(MAX_CONCURRENT_PROCESSES))
+            handle_connection(
+                server,
+                WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
+                ActiveRuns::new(),
+            )
         });
         let request = serde_json::json!({
             "version": 1,
@@ -814,7 +947,11 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .expect("read timeout should configure");
         let worker = std::thread::spawn(move || {
-            handle_connection(server, WorkerSlots::new(MAX_CONCURRENT_PROCESSES))
+            handle_connection(
+                server,
+                WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
+                ActiveRuns::new(),
+            )
         });
         let request = serde_json::json!({
             "version": 1,
@@ -854,7 +991,8 @@ mod tests {
         client
             .set_read_timeout(Some(std::time::Duration::from_millis(750)))
             .expect("read timeout should configure");
-        let worker = std::thread::spawn(move || handle_connection(server, process_slots));
+        let worker =
+            std::thread::spawn(move || handle_connection(server, process_slots, ActiveRuns::new()));
         let request = serde_json::json!({
             "version": 1,
             "type": "start_process",
@@ -891,7 +1029,11 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .expect("read timeout should configure");
         let worker = std::thread::spawn(move || {
-            handle_connection(server, WorkerSlots::new(MAX_CONCURRENT_PROCESSES))
+            handle_connection(
+                server,
+                WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
+                ActiveRuns::new(),
+            )
         });
         let request = serde_json::json!({
             "version": 1,
