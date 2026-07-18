@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 7,
+  "cycle": 8,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 7 delivered the M1 process-group termination slice through PR #11, squash-merged as 8877242 after both required CI runs passed. Every run now spawns as the leader of its own process group and all supervision paths (cancel, timeout, natural leader exit, error paths) SIGKILL the whole group, so shell-spawned descendants cannot outlive a run. Implemented by a Codex gpt-5.6-terra worker within a three-file allowlist (its sandbox blocked socket binding, so all red-to-green, parity, and runtime verification ran in the workspace). Independent Codex sol review found no blockers; three confirmed findings were fixed pre-merge, the biggest being that natural leader exit skipped the group kill and leaked descendants even after an accepted cancel. Flagged follow-up M1 scope: backend shutdown does not yet terminate active run groups (dev Ctrl-C semantics), run stdin remains inherited pending waiting-input work, and the post-reap pgid-reuse window is inherent to pgid-based killing. M1 remains active and incomplete for PTYs, pause/resume, waiting-input detection, backend-shutdown group cleanup, redaction/metadata, durable state, and remaining cleanup.",
+  "last_cycle_summary": "Cycle 8 delivered the M1 backend-shutdown cleanup slice through PR #13, squash-merged as af7db55 after both required CI runs passed twice (initial commit and review-fix commit). SIGTERM/SIGINT now wake a dedicated shutdown thread via an async-signal-safe self-pipe; it cancels every active run (whose process groups the supervision paths then SIGKILL), waits up to 5s for drain, removes the socket only if it is still the bound inode, and exits 0. Implemented by a Codex gpt-5.6-sol worker (high effort) within a two-file allowlist; its sandbox blocked socket binding, so all red-to-green, parity, stress, and release-binary runtime verification ran in the workspace (runtime demo: grandchild dead 0.03s after SIGTERM, backend exit 0, socket removed). Independent Codex sol review returned 1 blocker / 2 major / 1 minor, all verified and fixed pre-merge by a second sol worker: an atomic shutdown-admission gate ({runs, shutting_down} under one mutex; drain-window start_process now gets a cancelled terminal instead of an orphanable group), FD_CLOEXEC on both self-pipe fds, O_NONBLOCK on the write end, and a pthread_sigmask bracket closing the pre-install signal window. M1 remains active and incomplete for PTYs, pause/resume, waiting-input detection and run stdin, redaction/metadata, durable state, budget expiry, and temporary/worktree cleanup.",
   "updated_at": "2026-07-18"
 }
