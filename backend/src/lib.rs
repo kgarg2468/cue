@@ -374,6 +374,7 @@ fn handle_connection(
                     Err(()) => return write_protocol_error(&mut stream, "duplicate_run_id"),
                 };
                 let Some(process_slot) = process_slots.try_acquire() else {
+                    drop(registration);
                     let stream = Arc::new(Mutex::new(stream));
                     return write_json_frame(
                         &stream,
@@ -475,6 +476,7 @@ fn run_process(
     {
         Ok(child) => child,
         Err(_) => {
+            drop(registration);
             return write_json_frame(
                 &stream,
                 &RunExitResponse {
@@ -581,6 +583,9 @@ fn run_process(
     let stderr_result = stderr_drain
         .join()
         .map_err(|_| io::Error::other("stderr drain thread panicked"))?;
+    // The run id must be released before the terminal frame is written so a
+    // client that observes run_exit can immediately reuse the id.
+    drop(registration);
     write_json_frame(
         &stream,
         &RunExitResponse {
