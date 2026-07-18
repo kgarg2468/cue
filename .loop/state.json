@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 6,
+  "cycle": 7,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 6 recovered cycle 5's orphaned lock (its session died with an uncommitted 463-line cancel slice), adopted and verified that slice, and delivered it through PR #9, squash-merged as ea02d67 after both required CI runs passed. Versioned cancel_process/cancel_response, ActiveRuns registry with duplicate-run-id rejection and immediate id reuse after run_exit, typed cancelled terminals preserving prior output, and Swift cancelProcess are merged. Independent Codex review had no blockers; two confirmed findings (terminal-before-release id reuse race, race-test flakiness) were fixed pre-merge, inherent cancel/timeout/exit attribution races and the pre-existing non-reading-client stall were flagged as pending M1 work. The loop now runs under durable job a8a4fe0a in session 1bbeeb14; superseded job 809366a7 died with the prior session. M1 remains active and incomplete for PTYs, pause/resume, descendant process groups, waiting-input detection, redaction/metadata, durable state, and remaining cleanup.",
+  "last_cycle_summary": "Cycle 7 delivered the M1 process-group termination slice through PR #11, squash-merged as 8877242 after both required CI runs passed. Every run now spawns as the leader of its own process group and all supervision paths (cancel, timeout, natural leader exit, error paths) SIGKILL the whole group, so shell-spawned descendants cannot outlive a run. Implemented by a Codex gpt-5.6-terra worker within a three-file allowlist (its sandbox blocked socket binding, so all red-to-green, parity, and runtime verification ran in the workspace). Independent Codex sol review found no blockers; three confirmed findings were fixed pre-merge, the biggest being that natural leader exit skipped the group kill and leaked descendants even after an accepted cancel. Flagged follow-up M1 scope: backend shutdown does not yet terminate active run groups (dev Ctrl-C semantics), run stdin remains inherited pending waiting-input work, and the post-reap pgid-reuse window is inherent to pgid-based killing. M1 remains active and incomplete for PTYs, pause/resume, waiting-input detection, backend-shutdown group cleanup, redaction/metadata, durable state, and remaining cleanup.",
   "updated_at": "2026-07-18"
 }
