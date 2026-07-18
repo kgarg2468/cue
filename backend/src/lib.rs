@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -45,6 +46,8 @@ struct Request {
     arguments: Option<Vec<String>>,
     #[serde(default)]
     timeout_milliseconds: Option<serde_json::Value>,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -103,10 +106,17 @@ struct ActiveRunsState {
     shutting_down: bool,
 }
 
+struct RunStdinState {
+    buffer: Vec<u8>,
+    closed: bool,
+    handle: Option<std::process::ChildStdin>,
+}
+
 struct RunControl {
     cancelled: AtomicBool,
     paused: AtomicBool,
     pgid: AtomicI32,
+    stdin: Mutex<RunStdinState>,
 }
 
 impl RunControl {
@@ -115,8 +125,101 @@ impl RunControl {
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             pgid: AtomicI32::new(0),
+            stdin: Mutex::new(RunStdinState {
+                buffer: Vec::new(),
+                closed: false,
+                handle: None,
+            }),
         }
     }
+
+    fn send_input(&self, data: &[u8]) -> bool {
+        let mut state = self
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return false;
+        }
+        state.buffer.extend_from_slice(data);
+        true
+    }
+
+    fn close_stdin(&self) {
+        self.stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closed = true;
+    }
+
+    fn publish_stdin(&self, child_stdin: std::process::ChildStdin) -> io::Result<()> {
+        let fd = child_stdin.as_raw_fd();
+        // SAFETY: ChildStdin owns a valid open pipe descriptor; fcntl changes only its status
+        // flags and does not retain the descriptor or access Rust-managed memory.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        self.stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handle = Some(child_stdin);
+        Ok(())
+    }
+
+    fn drain_stdin(&self) {
+        let mut state = self
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        while state.handle.is_some() && !state.buffer.is_empty() {
+            let write_result = {
+                let RunStdinState { buffer, handle, .. } = &mut *state;
+                handle
+                    .as_mut()
+                    .expect("published stdin handle should be present")
+                    .write(buffer)
+            };
+            match write_result {
+                Ok(0) => {
+                    state.closed = true;
+                    state.buffer.clear();
+                    state.handle.take();
+                }
+                Ok(written) => {
+                    state.buffer.drain(..written);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    state.closed = true;
+                    state.buffer.clear();
+                    state.handle.take();
+                }
+            }
+        }
+
+        if state.closed && state.buffer.is_empty() {
+            state.handle.take();
+        }
+    }
+
+    fn teardown_stdin(&self) {
+        let mut state = self
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.closed = true;
+        state.buffer.clear();
+        state.handle.take();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendInputStatus {
+    Accepted,
+    NotFound,
+    Closed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -204,6 +307,40 @@ impl ActiveRuns {
         true
     }
 
+    fn send_input(&self, run_id: &str, data: &str) -> SendInputStatus {
+        let control = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .runs
+            .get(run_id)
+            .cloned();
+        let Some(control) = control else {
+            return SendInputStatus::NotFound;
+        };
+
+        if control.send_input(data.as_bytes()) {
+            SendInputStatus::Accepted
+        } else {
+            SendInputStatus::Closed
+        }
+    }
+
+    fn close_stdin(&self, run_id: &str) -> bool {
+        let control = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .runs
+            .get(run_id)
+            .cloned();
+        let Some(control) = control else {
+            return false;
+        };
+        control.close_stdin();
+        true
+    }
+
     fn begin_shutdown(&self) {
         let mut state = self
             .state
@@ -242,6 +379,14 @@ struct RunRegistration {
 }
 
 impl RunRegistration {
+    fn publish_stdin(&self, stdin: std::process::ChildStdin) -> io::Result<()> {
+        self.control.publish_stdin(stdin)
+    }
+
+    fn drain_stdin(&self) {
+        self.control.drain_stdin();
+    }
+
     fn publish_pgid(&self, pgid: libc::pid_t) {
         let _state = self
             .state
@@ -255,6 +400,7 @@ impl RunRegistration {
     }
 
     fn retire(&self) {
+        self.control.teardown_stdin();
         let _state = self
             .state
             .lock()
@@ -265,6 +411,7 @@ impl RunRegistration {
 
 impl Drop for RunRegistration {
     fn drop(&mut self) {
+        self.control.teardown_stdin();
         let mut state = self
             .state
             .lock()
@@ -759,6 +906,47 @@ fn handle_connection(
                 stream.write_all(b"\n")?;
                 stream.flush()?;
             }
+            "send_input" => {
+                let (Some(run_id), Some(data)) = (
+                    request.run_id.filter(|run_id| !run_id.is_empty()),
+                    request.data,
+                ) else {
+                    return write_protocol_error(&mut stream, "invalid_send_input");
+                };
+                let status = match active_runs.send_input(&run_id, &data) {
+                    SendInputStatus::Accepted => "accepted",
+                    SendInputStatus::NotFound => "not_found",
+                    SendInputStatus::Closed => "closed",
+                };
+                let response = CancelResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "input_response",
+                    run_id: &run_id,
+                    status,
+                };
+                serde_json::to_writer(&mut stream, &response)?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
+            }
+            "close_stdin" => {
+                let Some(run_id) = request.run_id.filter(|run_id| !run_id.is_empty()) else {
+                    return write_protocol_error(&mut stream, "invalid_close_stdin");
+                };
+                let status = if active_runs.close_stdin(&run_id) {
+                    "accepted"
+                } else {
+                    "not_found"
+                };
+                let response = CancelResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "close_stdin_response",
+                    run_id: &run_id,
+                    status,
+                };
+                serde_json::to_writer(&mut stream, &response)?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
+            }
             _ => write_protocol_error(&mut stream, "unknown_request_type")?,
         }
     }
@@ -818,6 +1006,7 @@ fn run_process(
     let mut child = match Command::new(executable)
         .args(arguments)
         .process_group(0)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -837,6 +1026,14 @@ fn run_process(
             );
         }
     };
+    if let Err(error) =
+        registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"))
+    {
+        kill_process_group(&mut child);
+        let _ = child.wait();
+        return Err(error);
+    }
+    registration.drain_stdin();
     let pgid = child.id() as libc::pid_t;
     registration.publish_pgid(pgid);
     let stdout = child
@@ -931,7 +1128,10 @@ fn run_process(
                 registration.retire();
                 break (child.wait()?.code(), Some("cancelled"));
             }
-            ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
+            ProcessSupervision::Running => {
+                registration.drain_stdin();
+                thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+            }
         }
     };
     control.cancelled.store(true, Ordering::Release);
@@ -1126,15 +1326,17 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRuns, MAX_CONCURRENT_PROCESSES, ProcessSupervision, RegisterRunError, SocketCleanup,
-        SocketIdentity, WorkerSlots, classify_process_supervision, drain_process_output,
-        handle_connection,
+        ActiveRuns, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision,
+        RegisterRunError, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
+        classify_process_supervision, drain_process_output, handle_connection,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1176,6 +1378,50 @@ mod tests {
         assert!(runs.pause("run-1"));
         assert!(registration.control.paused.load(Ordering::SeqCst));
         assert_eq!(registration.control.pgid.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn input_buffered_before_stdin_is_published_is_delivered_in_order() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("cat should spawn");
+
+        assert_eq!(
+            runs.send_input("run-1", "first\n"),
+            SendInputStatus::Accepted
+        );
+        assert_eq!(
+            runs.send_input("run-1", "second\n"),
+            SendInputStatus::Accepted
+        );
+        assert!(runs.close_stdin("run-1"));
+        registration
+            .publish_stdin(child.stdin.take().expect("stdin should be piped"))
+            .expect("stdin should publish");
+        while registration.control.stdin.lock().unwrap().handle.is_some() {
+            registration.drain_stdin();
+            thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+        }
+
+        let output = child.wait_with_output().expect("cat should exit naturally");
+        assert_eq!(output.stdout, b"first\nsecond\n");
+    }
+
+    #[test]
+    fn closing_stdin_rejects_later_input() {
+        let runs = ActiveRuns::new();
+        let _registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+
+        assert!(runs.close_stdin("run-1"));
+        assert_eq!(runs.send_input("run-1", "after\n"), SendInputStatus::Closed);
     }
 
     #[test]
