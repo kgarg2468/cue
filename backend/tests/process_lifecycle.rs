@@ -76,6 +76,180 @@ fn start_backend() -> BackendProcess {
     panic!("backend did not accept socket connections");
 }
 
+fn run_frames(backend: &BackendProcess, request: serde_json::Value) -> Vec<serde_json::Value> {
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    BufReader::new(stream)
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect()
+}
+
+#[test]
+fn run_metadata_frame_precedes_run_exit_with_process_details() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "metadata-run",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "echo done"],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+
+    let output_index = frames
+        .iter()
+        .rposition(|frame| frame["type"] == "run_output")
+        .expect("run should emit output");
+    let metadata_indexes: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| (frame["type"] == "run_metadata").then_some(index))
+        .collect();
+    assert_eq!(metadata_indexes.len(), 1);
+    let metadata_index = metadata_indexes[0];
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert!(output_index < metadata_index);
+    assert_eq!(metadata_index + 1, exit_index);
+
+    let metadata = &frames[metadata_index];
+    assert!(metadata["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert_eq!(metadata["pgid"], metadata["pid"]);
+    assert_eq!(metadata["executable"], "/bin/sh");
+    assert_eq!(
+        metadata["arguments"],
+        serde_json::json!(["-c", "echo done"])
+    );
+    assert!(
+        metadata["working_directory"]
+            .as_str()
+            .is_some_and(|directory| !directory.is_empty())
+    );
+    assert!(metadata["started_at"].as_str() <= metadata["finished_at"].as_str());
+    assert!(
+        metadata["duration_ms"]
+            .as_u64()
+            .is_some_and(|duration| duration < 2_000)
+    );
+    assert!(
+        metadata["environment_variable_names"]
+            .as_array()
+            .is_some_and(|names| names.iter().any(|name| name == "PATH"))
+    );
+    assert_eq!(metadata["redactions"], 0);
+}
+
+#[test]
+fn oversized_run_metadata_is_truncated_before_run_exit() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "oversized-metadata-run",
+            "executable": "/bin/echo",
+            "arguments": ["x".repeat(7_904)],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+
+    let metadata_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_metadata")
+        .expect("run should emit metadata");
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert_eq!(metadata_index + 1, exit_index);
+
+    let metadata = &frames[metadata_index];
+    assert_eq!(metadata["run_id"], "oversized-metadata-run");
+    assert!(metadata["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert_eq!(metadata["executable"], "/bin/echo");
+    assert!(metadata["working_directory"].as_str().is_some());
+    assert!(metadata["started_at"].as_str().is_some());
+    assert!(metadata["finished_at"].as_str().is_some());
+    assert!(metadata["duration_ms"].as_u64().is_some());
+    assert_eq!(
+        metadata["environment_variable_names"],
+        serde_json::json!([])
+    );
+    assert_eq!(metadata["arguments"], serde_json::json!([]));
+
+    assert_eq!(frames[exit_index]["exit_code"], 0);
+}
+
+#[test]
+fn secrets_are_redacted_from_streamed_output() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "redaction-run",
+            "executable": "/bin/sh",
+            "arguments": [
+                "-c",
+                "printf 'token=abcd1234efgh\\n'; printf 'AKIAABCDEFGHIJKLMNOP\\n' >&2",
+            ],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+    let collect_output = |stream_name: &str| -> String {
+        frames
+            .iter()
+            .filter(|frame| frame["type"] == "run_output" && frame["stream"] == stream_name)
+            .filter_map(|frame| frame["output"].as_str())
+            .collect()
+    };
+    let stdout = collect_output("stdout");
+    let stderr = collect_output("stderr");
+
+    assert!(stdout.contains("token=[REDACTED]"));
+    assert!(!stdout.contains("abcd1234efgh"));
+    assert!(stderr.contains("[REDACTED]"));
+    assert!(!stderr.contains("AKIAABCDEFGHIJKLMNOP"));
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("run should emit metadata");
+    assert_eq!(metadata["redactions"], 2);
+}
+
+#[test]
+fn spawn_failure_emits_no_metadata_frame() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "metadata-spawn-failure",
+            "executable": "/definitely/does/not/exist/capture-delegate",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert_eq!(frames[0]["error_code"], "spawn_failed");
+}
+
 #[test]
 fn cat_streams_output_before_one_terminal_exit_frame() {
     let backend = start_backend();
@@ -308,10 +482,11 @@ fn cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_te
         .lines()
         .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
         .collect();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0]["type"], "run_exit");
-    assert!(frames[0]["exit_code"].is_null());
-    assert_eq!(frames[0]["error_code"], "cancelled");
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0]["type"], "run_metadata");
+    assert_eq!(frames[1]["type"], "run_exit");
+    assert!(frames[1]["exit_code"].is_null());
+    assert_eq!(frames[1]["error_code"], "cancelled");
 
     assert_eq!(
         cancel_process(&backend.socket_path, "cancel-run")["status"],
@@ -498,6 +673,10 @@ fn send_input_and_close_stdin_drive_a_cat_run_to_natural_exit() {
     assert_eq!(close_response["type"], "close_stdin_response");
     assert_eq!(close_response["run_id"], "stdin-cat-run");
     assert_eq!(close_response["status"], "accepted");
+
+    let metadata = read_json_frame(&mut reader);
+    assert_eq!(metadata["type"], "run_metadata");
+    assert_eq!(metadata["run_id"], "stdin-cat-run");
 
     let terminal = read_json_frame(&mut reader);
     assert_eq!(terminal["type"], "run_exit");

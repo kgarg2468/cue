@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -8,10 +9,10 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
@@ -74,6 +75,24 @@ struct RunOutputResponse<'a> {
     run_id: &'a str,
     stream: &'static str,
     output: String,
+}
+
+#[derive(Serialize)]
+struct RunMetadataResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    run_id: &'a str,
+    pid: u32,
+    pgid: u32,
+    executable: &'a str,
+    arguments: &'a [String],
+    working_directory: String,
+    started_at: String,
+    finished_at: String,
+    duration_ms: u64,
+    environment_variable_names: Vec<String>,
+    redactions: usize,
 }
 
 #[derive(Serialize)]
@@ -991,6 +1010,132 @@ fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
     let _ = unsafe { libc::kill(-pgid, signal) };
 }
 
+struct SecretPatterns {
+    complete_pem: Regex,
+    unterminated_pem: Regex,
+    bearer: Regex,
+    assignment: Regex,
+    direct: Vec<Regex>,
+}
+
+fn secret_patterns() -> &'static SecretPatterns {
+    static PATTERNS: OnceLock<SecretPatterns> = OnceLock::new();
+    PATTERNS.get_or_init(|| SecretPatterns {
+        complete_pem: Regex::new(
+            r"(?s)-----BEGIN [^\r\n]*PRIVATE KEY-----.*?-----END [^\r\n]*PRIVATE KEY-----",
+        )
+        .expect("complete PEM regex should compile"),
+        unterminated_pem: Regex::new(r"(?s)-----BEGIN [^\r\n]*PRIVATE KEY-----.*\z")
+            .expect("unterminated PEM regex should compile"),
+        bearer: Regex::new(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
+            .expect("bearer regex should compile"),
+        assignment: Regex::new(
+            r#"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization)\b(\s*[=:]\s*)(?:\"([^\s\"']{4,})\"|([^\s\"']{4,}))"#,
+        )
+        .expect("assignment regex should compile"),
+        direct: [
+            r"AKIA[0-9A-Z]{16}",
+            r"gh[pousr]_[A-Za-z0-9]{36,}",
+            r"github_pat_[A-Za-z0-9_]{22,}",
+            r"xox[baprs]-[A-Za-z0-9-]{10,}",
+            r"sk-[A-Za-z0-9_-]{20,}",
+        ]
+        .into_iter()
+        .map(|pattern| Regex::new(pattern).expect("secret regex should compile"))
+        .collect(),
+    })
+}
+
+// Redaction is frame-local: a secret split across two read chunks may escape detection.
+fn redact_output(output: &str) -> (String, usize) {
+    let patterns = secret_patterns();
+    let mut redacted = output.to_owned();
+    let mut count = 0;
+
+    for pattern in [&patterns.complete_pem, &patterns.unterminated_pem] {
+        let matches = pattern.find_iter(&redacted).count();
+        if matches > 0 {
+            redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
+            count += matches;
+        }
+    }
+
+    let bearer_matches = patterns.bearer.find_iter(&redacted).count();
+    if bearer_matches > 0 {
+        redacted = patterns
+            .bearer
+            .replace_all(&redacted, "${1}[REDACTED]")
+            .into_owned();
+        count += bearer_matches;
+    }
+
+    let assignment_matches = patterns.assignment.find_iter(&redacted).count();
+    if assignment_matches > 0 {
+        redacted = patterns
+            .assignment
+            .replace_all(&redacted, |captures: &regex::Captures<'_>| {
+                let key = captures
+                    .get(1)
+                    .expect("assignment key capture should exist")
+                    .as_str();
+                let separator = captures
+                    .get(2)
+                    .expect("assignment separator capture should exist")
+                    .as_str();
+                if captures.get(3).is_some() {
+                    format!(r#"{key}{separator}"[REDACTED]""#)
+                } else {
+                    format!("{key}{separator}[REDACTED]")
+                }
+            })
+            .into_owned();
+        count += assignment_matches;
+    }
+
+    for pattern in &patterns.direct {
+        let matches = pattern.find_iter(&redacted).count();
+        if matches > 0 {
+            redacted = pattern.replace_all(&redacted, "[REDACTED]").into_owned();
+            count += matches;
+        }
+    }
+
+    (redacted, count)
+}
+
+fn system_time_as_rfc3339(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (seconds / 86_400) as i64;
+    let seconds_in_day = seconds % 86_400;
+    let hour = seconds_in_day / 3_600;
+    let minute = (seconds_in_day % 3_600) / 60;
+    let second = seconds_in_day % 60;
+    let (year, month, day) = civil_date_from_unix_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_date_from_unix_days(days: i64) -> (i64, i64, i64) {
+    let shifted_days = days + 719_468;
+    let era = if shifted_days >= 0 {
+        shifted_days
+    } else {
+        shifted_days - 146_096
+    } / 146_097;
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
 fn run_process(
     stream: UnixStream,
     run_id: String,
@@ -1003,8 +1148,16 @@ fn run_process(
     let stream = Arc::new(Mutex::new(stream));
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
-    let mut child = match Command::new(executable)
-        .args(arguments)
+    let wall_clock_started = SystemTime::now();
+    let working_directory = std::env::current_dir()
+        .map(|directory| directory.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut environment_variable_names: Vec<String> = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    environment_variable_names.sort();
+    let mut child = match Command::new(&executable)
+        .args(&arguments)
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1013,6 +1166,7 @@ fn run_process(
     {
         Ok(child) => child,
         Err(_) => {
+            // A failed spawn has no process metadata and emits only its terminal frame.
             drop(registration);
             return write_json_frame(
                 &stream,
@@ -1052,9 +1206,11 @@ fn run_process(
     }
 
     let control = Arc::clone(&registration.control);
+    let redactions = Arc::new(AtomicUsize::new(0));
     let stdout_writer = Arc::clone(&stream);
     let stdout_run_id = run_id.clone();
     let stdout_control = Arc::clone(&control);
+    let stdout_redactions = Arc::clone(&redactions);
     let stdout_drain = match thread::Builder::new()
         .name("capture-delegate-stdout".to_owned())
         .spawn(move || {
@@ -1064,6 +1220,7 @@ fn run_process(
                 stdout_run_id,
                 "stdout",
                 stdout_control,
+                stdout_redactions,
             )
         }) {
         Ok(drain) => drain,
@@ -1076,6 +1233,7 @@ fn run_process(
     let stderr_writer = Arc::clone(&stream);
     let stderr_run_id = run_id.clone();
     let stderr_control = Arc::clone(&control);
+    let stderr_redactions = Arc::clone(&redactions);
     let stderr_drain = match thread::Builder::new()
         .name("capture-delegate-stderr".to_owned())
         .spawn(move || {
@@ -1085,6 +1243,7 @@ fn run_process(
                 stderr_run_id,
                 "stderr",
                 stderr_control,
+                stderr_redactions,
             )
         }) {
         Ok(drain) => drain,
@@ -1134,6 +1293,8 @@ fn run_process(
             }
         }
     };
+    let wall_clock_finished = SystemTime::now();
+    let duration_ms = u64::try_from(timeout_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     control.cancelled.store(true, Ordering::Release);
     let stdout_result = stdout_drain
         .join()
@@ -1141,10 +1302,37 @@ fn run_process(
     let stderr_result = stderr_drain
         .join()
         .map_err(|_| io::Error::other("stderr drain thread panicked"))?;
+    let mut metadata = RunMetadataResponse {
+        version: PROTOCOL_VERSION,
+        response_type: "run_metadata",
+        run_id: &run_id,
+        pid: pgid as u32,
+        pgid: pgid as u32,
+        executable: &executable,
+        arguments: &arguments,
+        working_directory,
+        started_at: system_time_as_rfc3339(wall_clock_started),
+        finished_at: system_time_as_rfc3339(wall_clock_finished),
+        duration_ms,
+        environment_variable_names,
+        redactions: redactions.load(Ordering::Relaxed),
+    };
+    let metadata_result = (|| {
+        let frame_is_too_large = |response: &RunMetadataResponse<'_>| -> io::Result<bool> {
+            Ok(serde_json::to_vec(response)?.len() + 1 >= MAX_REQUEST_BYTES)
+        };
+        if frame_is_too_large(&metadata)? {
+            metadata.environment_variable_names.clear();
+        }
+        if frame_is_too_large(&metadata)? {
+            metadata.arguments = &[];
+        }
+        write_json_frame(&stream, &metadata)
+    })();
     // The run id must be released before the terminal frame is written so a
     // client that observes run_exit can immediately reuse the id.
     drop(registration);
-    write_json_frame(
+    let run_exit_result = write_json_frame(
         &stream,
         &RunExitResponse {
             version: PROTOCOL_VERSION,
@@ -1157,7 +1345,9 @@ fn run_process(
             },
             error_code,
         },
-    )?;
+    );
+    metadata_result?;
+    run_exit_result?;
     stdout_result?;
     stderr_result
 }
@@ -1175,6 +1365,7 @@ fn drain_process_output<R: Read>(
         run_id,
         output_stream,
         Arc::new(RunControl::new()),
+        Arc::new(AtomicUsize::new(0)),
     )
 }
 
@@ -1184,6 +1375,7 @@ fn drain_process_output_until_cancelled<R: Read>(
     run_id: String,
     output_stream: &'static str,
     control: Arc<RunControl>,
+    redactions: Arc<AtomicUsize>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; MAX_OUTPUT_CHUNK_BYTES];
     let mut utf8_carry = Vec::with_capacity(3);
@@ -1204,6 +1396,8 @@ fn drain_process_output_until_cancelled<R: Read>(
         }
         let output = decode_output_chunk(&mut utf8_carry, &buffer[..bytes_read]);
         if !output.is_empty() {
+            let (output, redaction_count) = redact_output(&output);
+            redactions.fetch_add(redaction_count, Ordering::Relaxed);
             let response = RunOutputResponse {
                 version: PROTOCOL_VERSION,
                 response_type: "run_output",
@@ -1218,12 +1412,14 @@ fn drain_process_output_until_cancelled<R: Read>(
         }
     }
     if !control.cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
+        let (output, redaction_count) = redact_output(&String::from_utf8_lossy(&utf8_carry));
+        redactions.fetch_add(redaction_count, Ordering::Relaxed);
         let response = RunOutputResponse {
             version: PROTOCOL_VERSION,
             response_type: "run_output",
             run_id: &run_id,
             stream: output_stream,
-            output: String::from_utf8_lossy(&utf8_carry).into_owned(),
+            output,
         };
         write_json_frame(&stream, &response).inspect_err(|_| {
             control.cancelled.store(true, Ordering::Release);
@@ -1328,7 +1524,7 @@ mod tests {
     use super::{
         ActiveRuns, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision,
         RegisterRunError, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
-        classify_process_supervision, drain_process_output, handle_connection,
+        classify_process_supervision, drain_process_output, handle_connection, redact_output,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1353,6 +1549,52 @@ mod tests {
             classify_process_supervision(true, false, true),
             ProcessSupervision::Exited
         );
+    }
+
+    #[test]
+    fn secret_pattern_classes_are_redacted_and_counted() {
+        let input = concat!(
+            "AKIAABCDEFGHIJKLMNOP\n",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789\n",
+            "github_pat_abcdefghijklmnopqrstuv\n",
+            "xoxb-1234567890\n",
+            "sk-abcdefghijklmnopqrst\n",
+            "Bearer abcdefgh\n",
+            "api_key=abcd1234\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nprivate-data\n-----END RSA PRIVATE KEY-----\n",
+            "-----BEGIN EC PRIVATE KEY-----\nunterminated-private-data",
+        );
+
+        let (redacted, count) = redact_output(input);
+
+        assert_eq!(count, 9);
+        assert_eq!(redacted.matches("[REDACTED]").count(), 9);
+        assert!(redacted.contains("Bearer [REDACTED]"));
+        assert!(redacted.contains("api_key=[REDACTED]"));
+        for secret in [
+            "AKIAABCDEFGHIJKLMNOP",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "github_pat_abcdefghijklmnopqrstuv",
+            "xoxb-1234567890",
+            "sk-abcdefghijklmnopqrst",
+            "abcdefgh",
+            "abcd1234",
+            "private-data",
+            "unterminated-private-data",
+        ] {
+            assert!(!redacted.contains(secret), "secret leaked: {secret}");
+        }
+    }
+
+    #[test]
+    fn benign_output_is_not_changed_by_redaction() {
+        let input = concat!(
+            "monotonic deadline token bucket\n",
+            "https://example.com/releases/v1.2.3\n",
+            "commit deadbeef0123456789abcdef0123456789abcdef\n",
+        );
+
+        assert_eq!(redact_output(input), (input.to_owned(), 0));
     }
 
     #[test]
