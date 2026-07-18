@@ -1,0 +1,45 @@
+# M1 PTY slice — verification record
+
+Slice: optional `pty: true` on start_process (protocol v1, backward compatible).
+Spec: section 10 responsibilities — "launches processes/PTYs"; prerequisite for
+waiting-input detection (S10-009). Traceability: S10-001 (PTY portion).
+
+Behavior: openpty before spawn; child pre_exec does setsid + TIOCSCTTY + dup2
+slave onto fds 0/1/2 (no process_group(0) on the pty branch — setsid already
+creates the group, pgid == pid as before, so pause/resume/cancel/kill machinery
+is unchanged). Slave termios: ECHO cleared, everything else default (ONLCR on →
+CRLF endings). Parent closes slave post-spawn; single nonblocking master fd is
+shared (Arc) between the poll(50ms)-based output drain thread (EOF/EIO = end of
+output) and the existing stdin queue machinery (nonblocking writes, stop on
+WouldBlock — no thread blocks holding the stdin mutex). close_stdin on a pty
+run delivers buffered bytes then writes VEOF (0x04); master stays open for
+output; later send_input → "closed". Output always streams as "stdout" (stderr
+inherently merged); redaction, 1KiB chunking, shared redaction counter, and
+run_metadata semantics unchanged. Non-pty path behaviorally unchanged.
+
+Provenance: implemented by a Codex gpt-5.6-sol worker (high effort,
+workspace-write sandbox) within a 4-file allowlist; diff gate clean (+661/−84).
+Orchestrator made one post-worker lint fix (split an overlong Swift request-
+string line). The worker could not run socket-binding tests in its sandbox;
+all socket-based verification below ran unsandboxed on the dev machine.
+
+Also in this PR: .loop/traceability.md S10-010 status corrected done→verified.
+The parity script's ledger validator rejects 'done' (valid: todo, in_progress,
+implemented, verified, blocked, rejected); the closeout PR #20 introduced the
+invalid status while CI was unstartable, leaving main red under the ADR-007
+gate. Lesson recorded: run parity locally on closeout PRs too.
+
+Evidence (this directory):
+- red-evidence.log — all 5 new pty integration tests FAIL against origin/main's
+  backend (pty field ignored there; behavioral test -t guards), regression
+  guard non_pty_stderr_stays_separate excluded by design.
+- cargo-test.log — full suite green: 15 lib + 13 health_socket + 37
+  process_lifecycle (31 prior + 6 new).
+- verify-m0-parity.log — scripts/verify-m0.sh exit 0 (fmt, clippy -D warnings,
+  all Rust tests, 21 Swift tests incl. new "Swift starts a PTY process and
+  observes tty-marked output", swiftlint, release builds, ledger validation).
+- runtime-demo.log — release binary over a real socket: (1) child sees tty on
+  fds 0/2, stderr merged onto stdout stream, CRLF; (2) send_input accepted →
+  exactly one 'hello-pty\r\n' (echo off), close_stdin accepted → VEOF → cat
+  exits 0 naturally; (3) AKIA key redacted under pty, metadata redactions=1,
+  frame order [run_metadata, run_exit]; SIGTERM → exit 0, socket removed.

@@ -1,0 +1,6 @@
+demo1 tty+merge: output='all-tty\r\nerr-line\r\n' streams=['stdout'] exit=0
+demo2 send: accepted
+demo2 close: accepted
+demo2 round-trip: output='hello-pty\r\n' exit=0
+demo3 redaction: output='[REDACTED]\r\n' redactions=1 order_tail=['run_metadata', 'run_exit']
+backend exit: 0 socket removed: True
