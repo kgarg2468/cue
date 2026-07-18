@@ -48,6 +48,7 @@ public enum CloseStdinResult: Equatable {
 public enum ProcessEvent: Equatable {
     case output(runID: String, stream: ProcessOutputStream, output: String)
     case metadata(runID: String, pid: Int, durationMilliseconds: Int, redactions: Int)
+    case inputWaiting(runID: String, quietForMilliseconds: Int)
     case exit(runID: String, exitCode: Int?, errorCode: ProcessExitErrorCode? = nil)
 }
 
@@ -441,6 +442,12 @@ public enum IPCClient {
             return .metadata(
                 runID: expectedRunID, pid: pid,
                 durationMilliseconds: durationMilliseconds, redactions: redactions)
+        case "run_input_waiting":
+            guard let quietForMilliseconds = json["quiet_for_milliseconds"] as? Int else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            return .inputWaiting(
+                runID: expectedRunID, quietForMilliseconds: quietForMilliseconds)
         case "run_exit":
             let exitCode: Int?
             if json["exit_code"] is NSNull {

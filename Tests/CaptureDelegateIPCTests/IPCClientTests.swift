@@ -337,6 +337,34 @@ func timeoutExitDecodes() throws {
         ])
 }
 
+@Test("run input waiting decodes before the terminal frame")
+func inputWaitingDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    try writeAll(
+        Array(
+            ("{\"version\":1,\"type\":\"run_input_waiting\",\"run_id\":\"wait-run\","
+                + "\"quiet_for_milliseconds\":750}\n"
+                + "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"wait-run\",\"exit_code\":0}\n")
+                .utf8),
+        to: descriptors.writer
+    )
+    let collector = ProcessEventCollector()
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "wait-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .inputWaiting(runID: "wait-run", quietForMilliseconds: 750),
+            .exit(runID: "wait-run", exitCode: 0, errorCode: nil),
+        ])
+}
+
 private final class ProcessEventCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [ProcessEvent] = []
