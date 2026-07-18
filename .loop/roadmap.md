@@ -23,7 +23,8 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 ## Global release controls
 
 - M0 is verified: M0-FOUNDATION-001 passed fresh-login native-window re-verification, and PR `#1` remains merged as `3e6cf85`.
-- M1 remains active after PR #5 merged as `9f40024` and PR #7 merged as `3058370`. The direct-process/streaming and per-run timeout slices are verified; later M1 lifecycle slices remain pending.
+- M1 is complete through PR #29 (`6f7d647`): process/PTY launch, bounded event streaming and admission, timeout/cancel/pause/resume, process-tree and shutdown cleanup, stdin delivery and waiting-input detection, secret-redacted metadata, isolated worktrees, termination durability, a 1 MiB pending-stdin cap, and authenticated crash-orphan worktree recovery all pass the ADR-007 gate.
+- M2 Domain/persistence is the next dependency-ready milestone, but it has not started. The autonomous loop is paused at the user's requested hands-on test checkpoint and must not resume without an explicit user instruction.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - M14 may close only against the full specification, including positioning and qualitative success criteria.
