@@ -3,6 +3,55 @@ import Testing
 
 @testable import CaptureDelegateIPC
 
+@Test("Swift process events redact secrets and report metadata before exit")
+func redactedOutputAndMetadata() throws {
+    guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
+    else {
+        throw NSError(domain: "CaptureDelegateIntegrationTests", code: 1)
+    }
+
+    let directory = URL(filePath: "/private/tmp")
+        .appending(
+            path: "capture-delegate-redaction-\(UUID().uuidString)",
+            directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = directory.appending(path: "backend.sock")
+    let backend = try startBackend(binary: backendBinary, socket: socket)
+    defer {
+        if backend.isRunning { backend.terminate() }
+        backend.waitUntilExit()
+    }
+
+    var events: [ProcessEvent] = []
+    try IPCClient.startProcess(
+        socketPath: socket.path(), runID: "swift-redaction-run", executable: "/bin/sh",
+        arguments: ["-c", "echo password=hunter2secret"], timeoutMilliseconds: 2_000
+    ) { event in
+        events.append(event)
+    }
+
+    let output = events.compactMap { event -> String? in
+        if case .output(_, _, let output) = event { return output }
+        return nil
+    }.joined()
+    #expect(output.contains("password=[REDACTED]"))
+    #expect(!output.contains("hunter2secret"))
+    let metadataIndex = events.firstIndex { event in
+        if case .metadata(_, _, _, 1) = event { return true }
+        return false
+    }
+    let exitIndex = events.firstIndex { event in
+        if case .exit(_, 0, _) = event { return true }
+        return false
+    }
+    #expect(metadataIndex != nil)
+    #expect(exitIndex != nil)
+    if let metadataIndex, let exitIndex {
+        #expect(metadataIndex < exitIndex)
+    }
+}
+
 @Test("Swift process API receives cat output before one terminal event")
 func processLifecycle() throws {
     guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
@@ -139,10 +188,14 @@ func timedOutProcess() throws {
             return false
         })
     #expect(
-        events == [
-            .output(runID: "timeout-run", stream: .stdout, output: "before-timeout"),
-            .exit(runID: "timeout-run", exitCode: nil, errorCode: .timedOut),
-        ])
+        events.first
+            == .output(runID: "timeout-run", stream: .stdout, output: "before-timeout"))
+    #expect(
+        events.contains { event in
+            if case .metadata(let runID, _, _, _) = event { return runID == "timeout-run" }
+            return false
+        })
+    #expect(events.last == .exit(runID: "timeout-run", exitCode: nil, errorCode: .timedOut))
 }
 
 @Test("Swift cancels a running process over a separate typed connection")

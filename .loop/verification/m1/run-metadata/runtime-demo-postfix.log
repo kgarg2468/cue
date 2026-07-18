@@ -1,0 +1,9 @@
+output[stdout]: 'export AWS_KEY=[REDACTED]\ndone\n'
+output[stderr]: 'password=[REDACTED]\n'
+metadata: pid=50331 pgid=50331 exe=/bin/sh dur=15ms redactions=2 env_names=63 wd=/Users/krishgarg/conductor/workspaces/cue/moroni
+started_at=2026-07-18T11:25:46Z finished_at=2026-07-18T11:25:47Z
+frame order ok: True
+terminal: {'version': 1, 'type': 'run_exit', 'run_id': 'meta-demo', 'exit_code': 0}
+7000B arg: env_names=0 arguments_kept=1 exit=0
+7904B arg: env_names=0 arguments=0 exe=/bin/echo pid=50333 exit=0
+backend exit: 0 socket removed: True
