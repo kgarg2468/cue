@@ -1,0 +1,10 @@
+send_input -> {'version': 1, 'type': 'input_response', 'run_id': 'demo', 'status': 'accepted'}
+echo latency 0.03s
+close_stdin -> {'version': 1, 'type': 'close_stdin_response', 'run_id': 'demo', 'status': 'accepted'}
+post-close send -> {'version': 1, 'type': 'input_response', 'run_id': 'demo', 'status': 'closed'}
+terminal: {'version': 1, 'type': 'run_exit', 'run_id': 'demo', 'exit_code': 0}
+pause -> {'version': 1, 'type': 'pause_response', 'run_id': 'full', 'status': 'accepted'}
+100x7KB send_input on paused run: all accepted in 0.35s
+cancel -> {'version': 1, 'type': 'cancel_response', 'run_id': 'full', 'status': 'accepted'} in 0.00s
+terminal: {'version': 1, 'type': 'run_exit', 'run_id': 'full', 'exit_code': None, 'error_code': 'cancelled'}
+backend exit: 0 socket removed: True

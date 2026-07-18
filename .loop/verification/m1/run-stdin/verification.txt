@@ -42,3 +42,29 @@ Waiting-input DETECTION remains pending (expected on the PTY slice).
 - runtime-demo.log — release binary: send_input accepted → echo 0.02s,
   close_stdin accepted → run_exit exit_code 0 (no error_code), post-exit send_input
   not_found, SIGTERM exit 0 with socket removed.
+
+## Independent review dispositions (Codex gpt-5.6-sol, high; /tmp/worker-stdin/review/)
+- [blocker] send_input blocked in write_all holding the per-run stdin mutex; 8 concurrent
+  senders on a full pipe (paused child) could consume every IPC worker slot and wedge the
+  service including cancel. CONFIRMED. Fixed: senders only enqueue under the mutex; all
+  pipe writes moved to the run's supervision thread.
+- [blocker] publish_stdin flushed the pending buffer synchronously on the supervision
+  thread before publish_pgid; a full pipe blocked timeout/cancel forever. CONFIRMED.
+  Fixed: publication only stores a non-blocking handle; drain_stdin runs right after
+  publication and on every supervision tick, stopping on WouldBlock.
+- [major] accepted was returned when delivery was knowably impossible (after an
+  acknowledged close, or after EPIPE on a live child). CONFIRMED. Fixed: input_response
+  gains status "closed"; hard pipe errors close the boundary, clear undeliverable bytes,
+  and drop the handle; Swift SendInputResult adds .closed.
+- [major] close_stdin while pending did not stop later sends from appending, so close was
+  not a stable input boundary. CONFIRMED. Fixed: closed rejects all later sends with
+  "closed" while already-buffered bytes still drain before EOF.
+Fix worker: second/third Codex sol dispatch (/tmp/worker-stdin-fix/, /tmp/worker-stdin-fix2/),
+diff-gated. Regression tests: close_stdin_establishes_a_stable_input_boundary,
+cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full, plus unit tests for
+buffer-then-close-then-publish ordering and close-rejects-later-input.
+Post-fix evidence: cargo-test-postfix.log (13 lib + 13 + 27 integration; stdin tests 8/8
+stress), verify-m0-parity-postfix.log (green, 19 Swift tests), runtime-demo-postfix.log
+(echo 0.03s; post-close send -> closed; 700 KiB enqueued on a paused run in 0.35s, cancel
+accepted 0.00s with cancelled terminal; SIGTERM exit 0, socket removed).
+Known limitation (flagged, future work): the per-run stdin queue is unbounded.

@@ -37,6 +37,7 @@ public enum ResumeProcessResult: Equatable {
 public enum SendInputResult: Equatable {
     case accepted
     case notFound
+    case closed
 }
 
 public enum CloseStdinResult: Equatable {
@@ -518,6 +519,7 @@ public enum IPCClient {
         switch status {
         case "accepted": return .accepted
         case "not_found": return .notFound
+        case "closed": return .closed
         default: throw IPCClientError.invalidProcessEvent
         }
     }

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -105,17 +106,17 @@ struct ActiveRunsState {
     shutting_down: bool,
 }
 
-enum RunStdin {
-    Pending { buffer: Vec<u8>, closed: bool },
-    Open(std::process::ChildStdin),
-    Closed,
+struct RunStdinState {
+    buffer: Vec<u8>,
+    closed: bool,
+    handle: Option<std::process::ChildStdin>,
 }
 
 struct RunControl {
     cancelled: AtomicBool,
     paused: AtomicBool,
     pgid: AtomicI32,
-    stdin: Mutex<RunStdin>,
+    stdin: Mutex<RunStdinState>,
 }
 
 impl RunControl {
@@ -124,65 +125,101 @@ impl RunControl {
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             pgid: AtomicI32::new(0),
-            stdin: Mutex::new(RunStdin::Pending {
+            stdin: Mutex::new(RunStdinState {
                 buffer: Vec::new(),
                 closed: false,
+                handle: None,
             }),
         }
     }
 
-    fn send_input(&self, data: &[u8]) {
-        let mut stdin = self
+    fn send_input(&self, data: &[u8]) -> bool {
+        let mut state = self
             .stdin
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &mut *stdin {
-            RunStdin::Pending { buffer, .. } => buffer.extend_from_slice(data),
-            RunStdin::Open(stdin) => {
-                let _ = stdin.write_all(data);
-            }
-            RunStdin::Closed => {}
+        if state.closed {
+            return false;
         }
+        state.buffer.extend_from_slice(data);
+        true
     }
 
     fn close_stdin(&self) {
-        let mut stdin = self
+        self.stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closed = true;
+    }
+
+    fn publish_stdin(&self, child_stdin: std::process::ChildStdin) -> io::Result<()> {
+        let fd = child_stdin.as_raw_fd();
+        // SAFETY: ChildStdin owns a valid open pipe descriptor; fcntl changes only its status
+        // flags and does not retain the descriptor or access Rust-managed memory.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        self.stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handle = Some(child_stdin);
+        Ok(())
+    }
+
+    fn drain_stdin(&self) {
+        let mut state = self
             .stdin
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &mut *stdin {
-            RunStdin::Pending { closed, .. } => *closed = true,
-            RunStdin::Open(_) => *stdin = RunStdin::Closed,
-            RunStdin::Closed => {}
+
+        while state.handle.is_some() && !state.buffer.is_empty() {
+            let write_result = {
+                let RunStdinState { buffer, handle, .. } = &mut *state;
+                handle
+                    .as_mut()
+                    .expect("published stdin handle should be present")
+                    .write(buffer)
+            };
+            match write_result {
+                Ok(0) => {
+                    state.closed = true;
+                    state.buffer.clear();
+                    state.handle.take();
+                }
+                Ok(written) => {
+                    state.buffer.drain(..written);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    state.closed = true;
+                    state.buffer.clear();
+                    state.handle.take();
+                }
+            }
+        }
+
+        if state.closed && state.buffer.is_empty() {
+            state.handle.take();
         }
     }
 
-    fn publish_stdin(&self, mut child_stdin: std::process::ChildStdin) {
-        let mut stdin = self
+    fn teardown_stdin(&self) {
+        let mut state = self
             .stdin
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = std::mem::replace(&mut *stdin, RunStdin::Closed);
-        *stdin = match previous {
-            RunStdin::Pending { buffer, closed } => {
-                let _ = child_stdin.write_all(&buffer);
-                if closed {
-                    RunStdin::Closed
-                } else {
-                    RunStdin::Open(child_stdin)
-                }
-            }
-            RunStdin::Open(stdin) => RunStdin::Open(stdin),
-            RunStdin::Closed => RunStdin::Closed,
-        };
+        state.closed = true;
+        state.buffer.clear();
+        state.handle.take();
     }
+}
 
-    fn teardown_stdin(&self) {
-        *self
-            .stdin
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = RunStdin::Closed;
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SendInputStatus {
+    Accepted,
+    NotFound,
+    Closed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -270,7 +307,7 @@ impl ActiveRuns {
         true
     }
 
-    fn send_input(&self, run_id: &str, data: &str) -> bool {
+    fn send_input(&self, run_id: &str, data: &str) -> SendInputStatus {
         let control = self
             .state
             .lock()
@@ -279,13 +316,14 @@ impl ActiveRuns {
             .get(run_id)
             .cloned();
         let Some(control) = control else {
-            return false;
+            return SendInputStatus::NotFound;
         };
 
-        // A full pipe blocks only this requesting client's connection thread; the registry
-        // mutex has already been released, so other run controls remain responsive.
-        control.send_input(data.as_bytes());
-        true
+        if control.send_input(data.as_bytes()) {
+            SendInputStatus::Accepted
+        } else {
+            SendInputStatus::Closed
+        }
     }
 
     fn close_stdin(&self, run_id: &str) -> bool {
@@ -341,8 +379,12 @@ struct RunRegistration {
 }
 
 impl RunRegistration {
-    fn publish_stdin(&self, stdin: std::process::ChildStdin) {
-        self.control.publish_stdin(stdin);
+    fn publish_stdin(&self, stdin: std::process::ChildStdin) -> io::Result<()> {
+        self.control.publish_stdin(stdin)
+    }
+
+    fn drain_stdin(&self) {
+        self.control.drain_stdin();
     }
 
     fn publish_pgid(&self, pgid: libc::pid_t) {
@@ -871,10 +913,10 @@ fn handle_connection(
                 ) else {
                     return write_protocol_error(&mut stream, "invalid_send_input");
                 };
-                let status = if active_runs.send_input(&run_id, &data) {
-                    "accepted"
-                } else {
-                    "not_found"
+                let status = match active_runs.send_input(&run_id, &data) {
+                    SendInputStatus::Accepted => "accepted",
+                    SendInputStatus::NotFound => "not_found",
+                    SendInputStatus::Closed => "closed",
                 };
                 let response = CancelResponse {
                     version: PROTOCOL_VERSION,
@@ -984,7 +1026,14 @@ fn run_process(
             );
         }
     };
-    registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"));
+    if let Err(error) =
+        registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"))
+    {
+        kill_process_group(&mut child);
+        let _ = child.wait();
+        return Err(error);
+    }
+    registration.drain_stdin();
     let pgid = child.id() as libc::pid_t;
     registration.publish_pgid(pgid);
     let stdout = child
@@ -1079,7 +1128,10 @@ fn run_process(
                 registration.retire();
                 break (child.wait()?.code(), Some("cancelled"));
             }
-            ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
+            ProcessSupervision::Running => {
+                registration.drain_stdin();
+                thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+            }
         }
     };
     control.cancelled.store(true, Ordering::Release);
@@ -1274,9 +1326,9 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRuns, MAX_CONCURRENT_PROCESSES, ProcessSupervision, RegisterRunError, SocketCleanup,
-        SocketIdentity, WorkerSlots, classify_process_supervision, drain_process_output,
-        handle_connection,
+        ActiveRuns, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision,
+        RegisterRunError, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
+        classify_process_supervision, drain_process_output, handle_connection,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1284,6 +1336,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1339,13 +1392,36 @@ mod tests {
             .spawn()
             .expect("cat should spawn");
 
-        assert!(runs.send_input("run-1", "first\n"));
-        assert!(runs.send_input("run-1", "second\n"));
+        assert_eq!(
+            runs.send_input("run-1", "first\n"),
+            SendInputStatus::Accepted
+        );
+        assert_eq!(
+            runs.send_input("run-1", "second\n"),
+            SendInputStatus::Accepted
+        );
         assert!(runs.close_stdin("run-1"));
-        registration.publish_stdin(child.stdin.take().expect("stdin should be piped"));
+        registration
+            .publish_stdin(child.stdin.take().expect("stdin should be piped"))
+            .expect("stdin should publish");
+        while registration.control.stdin.lock().unwrap().handle.is_some() {
+            registration.drain_stdin();
+            thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+        }
 
         let output = child.wait_with_output().expect("cat should exit naturally");
         assert_eq!(output.stdout, b"first\nsecond\n");
+    }
+
+    #[test]
+    fn closing_stdin_rejects_later_input() {
+        let runs = ActiveRuns::new();
+        let _registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+
+        assert!(runs.close_stdin("run-1"));
+        assert_eq!(runs.send_input("run-1", "after\n"), SendInputStatus::Closed);
     }
 
     #[test]
