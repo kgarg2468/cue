@@ -168,23 +168,32 @@ fn slow_reader_does_not_lose_frames() {
         "type": "start_process",
         "run_id": "slow-reader-run",
         "executable": "/usr/bin/seq",
-        "arguments": ["1", "10000"],
-        "timeout_milliseconds": 10_000,
+        "arguments": ["1", "2000"],
+        "timeout_milliseconds": 5_000,
     });
     stream
         .write_all(format!("{request}\n").as_bytes())
         .expect("request should write");
 
     let mut frames = Vec::new();
-    for line in BufReader::new(stream).lines() {
+    for line in BufReader::with_capacity(32, stream).lines() {
         frames.push(
             serde_json::from_str::<serde_json::Value>(&line.expect("frame should read"))
                 .expect("every slow-read frame should be complete JSON"),
         );
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(5));
     }
 
-    assert!(frames.iter().any(|frame| frame["type"] == "run_output"));
+    let output: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+    let expected_output = (1..=2_000)
+        .map(|number| format!("{number}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(output, expected_output);
     assert_eq!(
         frames.last().expect("slow run should terminate")["type"],
         "run_exit"

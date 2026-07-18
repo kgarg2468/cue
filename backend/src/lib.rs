@@ -1222,6 +1222,31 @@ fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+type DrainJoinResult = io::Result<io::Result<()>>;
+
+fn teardown_process_and_drains(
+    child: &mut std::process::Child,
+    control: &RunControl,
+    stdout_drain: thread::JoinHandle<io::Result<()>>,
+    stderr_drain: Option<thread::JoinHandle<io::Result<()>>>,
+    kill_and_reap: bool,
+) -> (DrainJoinResult, Option<DrainJoinResult>) {
+    control.cancelled.store(true, Ordering::Release);
+    if kill_and_reap {
+        kill_process_group(child);
+        let _ = child.wait();
+    }
+    let stdout_result = stdout_drain
+        .join()
+        .map_err(|_| io::Error::other("stdout drain thread panicked"));
+    let stderr_result = stderr_drain.map(|drain| {
+        drain
+            .join()
+            .map_err(|_| io::Error::other("stderr drain thread panicked"))
+    });
+    (stdout_result, stderr_result)
+}
+
 fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
     // SAFETY: a negative process ID targets the registered run's process group; kill retains no
     // Rust-managed pointers.
@@ -2032,10 +2057,7 @@ fn run_process_inner(
             }) {
             Ok(drain) => Some(drain),
             Err(error) => {
-                control.cancelled.store(true, Ordering::Release);
-                kill_process_group(&mut child);
-                let _ = child.wait();
-                let _ = stdout_drain.join();
+                let _ = teardown_process_and_drains(&mut child, &control, stdout_drain, None, true);
                 return Err(error);
             }
         }
@@ -2046,8 +2068,13 @@ fn run_process_inner(
         let child_status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
-                kill_process_group(&mut child);
-                let _ = child.wait();
+                let _ = teardown_process_and_drains(
+                    &mut child,
+                    &control,
+                    stdout_drain,
+                    stderr_drain,
+                    true,
+                );
                 return Err(error);
             }
         };
@@ -2073,12 +2100,36 @@ fn run_process_inner(
             ProcessSupervision::TimedOut => {
                 kill_process_group(&mut child);
                 terminal.registration().retire();
-                break (child.wait()?.code(), Some("timed_out"));
+                match child.wait() {
+                    Ok(status) => break (status.code(), Some("timed_out")),
+                    Err(error) => {
+                        let _ = teardown_process_and_drains(
+                            &mut child,
+                            &control,
+                            stdout_drain,
+                            stderr_drain,
+                            true,
+                        );
+                        return Err(error);
+                    }
+                }
             }
             ProcessSupervision::Cancelled => {
                 kill_process_group(&mut child);
                 terminal.registration().retire();
-                break (child.wait()?.code(), Some("cancelled"));
+                match child.wait() {
+                    Ok(status) => break (status.code(), Some("cancelled")),
+                    Err(error) => {
+                        let _ = teardown_process_and_drains(
+                            &mut child,
+                            &control,
+                            stdout_drain,
+                            stderr_drain,
+                            true,
+                        );
+                        return Err(error);
+                    }
+                }
             }
             ProcessSupervision::Running => {
                 if let Some(activity) = activity.as_deref() {
@@ -2129,14 +2180,11 @@ fn run_process_inner(
     };
     let wall_clock_finished = SystemTime::now();
     let duration_ms = u64::try_from(timeout_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    control.cancelled.store(true, Ordering::Release);
-    let stdout_result = stdout_drain
-        .join()
-        .map_err(|_| io::Error::other("stdout drain thread panicked"))?;
-    let stderr_result = if let Some(stderr_drain) = stderr_drain {
-        stderr_drain
-            .join()
-            .map_err(|_| io::Error::other("stderr drain thread panicked"))?
+    let (stdout_result, stderr_result) =
+        teardown_process_and_drains(&mut child, &control, stdout_drain, stderr_drain, false);
+    let stdout_result = stdout_result?;
+    let stderr_result = if let Some(stderr_result) = stderr_result {
+        stderr_result?
     } else {
         Ok(())
     };
@@ -2565,14 +2613,50 @@ mod tests {
     fn client_writer_stops_after_the_first_failed_frame_write() {
         let (stream, mut peer) = UnixStream::pair().expect("socket pair should open");
         stream
-            .set_write_timeout(Some(std::time::Duration::from_millis(20)))
+            .set_write_timeout(Some(std::time::Duration::from_millis(200)))
             .expect("write timeout should configure");
-        let writer = ClientWriter::new(stream);
-        let frame = vec![b'x'; 4 * 1024];
+        let writer = Arc::new(ClientWriter::new(stream));
+        let frame = vec![b'x'; 8 * 1024 * 1024];
+        let first_writer = Arc::clone(&writer);
+        let first_write = thread::spawn(move || first_writer.write_frame_bytes(&frame));
 
-        let first_error = (0..100_000).find_map(|_| writer.write_frame_bytes(&frame).err());
+        let lock_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            assert!(
+                std::time::Instant::now() < lock_deadline,
+                "first writer should acquire the stream lock"
+            );
+            match writer.stream.try_lock() {
+                Ok(stream) => drop(stream),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => drop(poisoned.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => break,
+            }
+            thread::yield_now();
+        }
 
-        let first_error = first_error.expect("a full socket should reject a bounded write");
+        let sentinel = b"second-writer-sentinel\n".to_vec();
+        let second_writer = Arc::clone(&writer);
+        let second_sentinel = sentinel.clone();
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::channel();
+        let second_write = thread::spawn(move || {
+            second_started_tx
+                .send(())
+                .expect("second writer start should be observable");
+            second_writer.write_frame_bytes(&second_sentinel)
+        });
+        second_started_rx
+            .recv()
+            .expect("second writer should start while the first holds the lock");
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            !second_write.is_finished(),
+            "second writer should be waiting on the stream lock"
+        );
+
+        let first_error = first_write
+            .join()
+            .expect("first writer should not panic")
+            .expect_err("a full socket should reject a bounded write");
         assert!(matches!(
             first_error.kind(),
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -2581,16 +2665,35 @@ mod tests {
 
         peer.set_nonblocking(true)
             .expect("peer should become nonblocking");
+        let mut received = Vec::new();
         let mut buffer = [0_u8; 16 * 1024];
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             match peer.read(&mut buffer) {
                 Ok(0) => break,
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Ok(bytes_read) => received.extend_from_slice(&buffer[..bytes_read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if second_write.is_finished() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < drain_deadline,
+                        "second writer should finish once the peer drains"
+                    );
+                    thread::yield_now();
+                }
                 Err(error) => panic!("buffered bytes should drain: {error}"),
             }
         }
 
+        let second_result = second_write.join().expect("second writer should not panic");
+        assert!(
+            !received
+                .windows(sentinel.len())
+                .any(|window| window == sentinel),
+            "a writer queued before client death must not write after acquiring the lock"
+        );
+        assert!(second_result.is_err());
         assert!(writer.write_frame_bytes(b"must-not-be-written\n").is_err());
         assert!(matches!(
             peer.read(&mut buffer),
@@ -2627,6 +2730,49 @@ mod tests {
         assert_eq!(frame["run_id"], "internal-run");
         assert!(frame["exit_code"].is_null());
         assert_eq!(frame["error_code"], "internal_error");
+        let mut extra = String::new();
+        assert!(matches!(
+            reader.read_line(&mut extra),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+        ));
+    }
+
+    #[test]
+    fn typed_terminal_frame_suppresses_the_internal_error_fallback() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("typed-terminal-run".to_owned())
+            .expect("run should register");
+        let (stream, peer) = UnixStream::pair().expect("socket pair should open");
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .expect("read timeout should configure");
+        let writer = Arc::new(ClientWriter::new(stream));
+        let mut terminal = RunTerminal::new(
+            Arc::clone(&writer),
+            "typed-terminal-run".to_owned(),
+            registration,
+        );
+
+        let result = run_with_internal_error_terminal(&mut terminal, |terminal| {
+            terminal.emit(None, Some("cancelled"))?;
+            Err(std::io::Error::other("failure after typed terminal"))
+        });
+
+        assert!(result.is_err());
+        let mut reader = BufReader::new(peer);
+        let mut frame = String::new();
+        reader
+            .read_line(&mut frame)
+            .expect("typed terminal frame should be readable");
+        let frame: serde_json::Value =
+            serde_json::from_str(&frame).expect("typed terminal frame should be JSON");
+        assert_eq!(frame["type"], "run_exit");
+        assert_eq!(frame["run_id"], "typed-terminal-run");
+        assert_eq!(frame["error_code"], "cancelled");
         let mut extra = String::new();
         assert!(matches!(
             reader.read_line(&mut extra),
