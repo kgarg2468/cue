@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 8,
+  "cycle": 9,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 8 delivered the M1 backend-shutdown cleanup slice through PR #13, squash-merged as af7db55 after both required CI runs passed twice (initial commit and review-fix commit). SIGTERM/SIGINT now wake a dedicated shutdown thread via an async-signal-safe self-pipe; it cancels every active run (whose process groups the supervision paths then SIGKILL), waits up to 5s for drain, removes the socket only if it is still the bound inode, and exits 0. Implemented by a Codex gpt-5.6-sol worker (high effort) within a two-file allowlist; its sandbox blocked socket binding, so all red-to-green, parity, stress, and release-binary runtime verification ran in the workspace (runtime demo: grandchild dead 0.03s after SIGTERM, backend exit 0, socket removed). Independent Codex sol review returned 1 blocker / 2 major / 1 minor, all verified and fixed pre-merge by a second sol worker: an atomic shutdown-admission gate ({runs, shutting_down} under one mutex; drain-window start_process now gets a cancelled terminal instead of an orphanable group), FD_CLOEXEC on both self-pipe fds, O_NONBLOCK on the write end, and a pthread_sigmask bracket closing the pre-install signal window. M1 remains active and incomplete for PTYs, pause/resume, waiting-input detection and run stdin, redaction/metadata, durable state, budget expiry, and temporary/worktree cleanup.",
+  "last_cycle_summary": "Cycle 9 delivered the M1 pause/resume slice through PR #15, squash-merged as 9291f52 after both required CI runs passed on both commits. Versioned pause_process/resume_process requests SIGSTOP/SIGCONT the run's whole process group (spec adapter API pause(runId)/resume(runId)); the registry value became RunControl {cancelled, paused, pgid} and Swift IPCClient gained pauseProcess/resumeProcess mirroring cancelProcess. The timeout deadline deliberately keeps ticking while paused. Implemented by a Codex gpt-5.6-sol worker (high effort) in a four-file allowlist; the orchestrator relocated its Swift real-backend test into the existing integration harness after the worker correctly flagged a wrong allowlist path rather than exceeding its fence. Independent Codex sol review found 1 blocker/1 major/3 minor: the SeqCst handshake ordered memory but not signals (a stalled post-spawn SIGSTOP could land after a resume) and control requests could signal a reaped, reusable pgid. Fixed pre-merge by a second sol worker: all {pgid, paused} transitions and their signals now serialize under the registry mutex, and terminal branches retire the published pgid before reaping; test hardening for zombie states and slow CI. Runtime demo: grandchild S-to-T 0.00s after pause, back to S on resume, group dead 0.01s after cancel. M1 remains active and incomplete for PTYs, waiting-input detection and run stdin, redaction/metadata, durable state, budget expiry, and temporary/worktree cleanup.",
   "updated_at": "2026-07-18"
 }
