@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 13,
+  "cycle": 14,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,7 +20,7 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 13: delivered M1 PTY slice (PR #21, merged 8e58f7d under ADR-007 gate). openpty + setsid/TIOCSCTTY controlling terminal, echo-off canonical input, merged stdout/stderr drain with poll-based nonblocking reads, VEOF close (double VEOF after a partial line, per sol review Major 1), redaction/metadata/cancel/timeout parity; Swift IPCClient pty:true opt-in pinned on the wire. Red evidence, cargo 15+13+39 green, verify-m0 parity exit 0 pre- and post-fix, four runtime demos. Sol review: 0 blockers; Major 2 (drain-thread spawn failure => zero terminal frames) accepted as the pre-existing pipe-path limitation class, deferred to a durability slice. Next cycle: waiting-input detection (S10-009, now unlocked by PTY) or durable run state.",
+  "last_cycle_summary": "Cycle 14: delivered M1 waiting-input detection (S10-009; PR #23, merged 1ad2785 under ADR-007 gate). Opt-in input_wait_detect_milliseconds on start_process; at most one run_input_waiting frame per quiet episode (output idle past threshold + empty stdin queue + CPU-quiescent child via proc_pidinfo); pipe and PTY runs; Swift parameter + .inputWaiting decode case. Sol review found 1 blocker (blocking writer lock could wedge supervision under client backpressure), 1 major (paused runs fired spurious frames), 1 minor (flaky busy test) \u2014 all confirmed and fixed pre-merge; emission is now try_lock with error-disarm, paused runs are suppressed with resume rebaseline. Lifecycle suite 46 tests, ~5s wall (old 20M-iteration test dominated at ~44s). Next cycle: durable run state or temp/worktree cleanup (S10-001 remainder); deferred durability slice covers zero-terminal-frame resource errors.",
   "updated_at": "2026-07-18",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
