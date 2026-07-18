@@ -2722,6 +2722,23 @@ fn branch_exists(repository: &Path, branch: &str) -> bool {
         .success()
 }
 
+fn worktree_branches(repository: &Path) -> Vec<String> {
+    String::from_utf8_lossy(
+        &git_command(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/capture-delegate/",
+            ],
+        )
+        .stdout,
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
 fn wait_for_worktree_cleanup(repository: &Path, worktree: &Path, branch: &str) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -2762,7 +2779,7 @@ fn worktree_run_executes_in_an_isolated_worktree_and_cleans_up() {
         "type": "start_process",
         "run_id": "isolated/worktree",
         "executable": "/bin/sh",
-        "arguments": ["-c", "pwd; git rev-parse --abbrev-ref HEAD; touch scratch.txt"],
+        "arguments": ["-c", "pwd; git rev-parse --abbrev-ref HEAD; stat -f %Lp \"$PWD\"; touch scratch.txt"],
         "timeout_milliseconds": 2_000,
         "worktree_repository": repository.path,
     });
@@ -2790,22 +2807,15 @@ fn worktree_run_executes_in_an_isolated_worktree_and_cleans_up() {
     let output = stdout_text(&frames);
     let output_lines: Vec<_> = output.lines().collect();
 
-    assert!(worktree_path.starts_with(std::env::temp_dir().join("capture-delegate-worktrees")));
-    assert_ne!(worktree_path, repository.path);
-    // `pwd` resolves the macOS /var -> /private/var symlink while metadata reports the
-    // temp_dir()-based path; compare through the canonicalized managed root, which
-    // outlives run-directory cleanup.
-    let canonical_worktree = std::env::temp_dir()
+    let canonical_root = std::env::temp_dir()
         .join("capture-delegate-worktrees")
         .canonicalize()
-        .expect("managed worktree root should canonicalize")
-        .join(
-            worktree_path
-                .file_name()
-                .expect("worktree path should end in a run directory"),
-        );
-    assert_eq!(output_lines.first().copied(), canonical_worktree.to_str());
+        .expect("managed worktree root should canonicalize");
+    assert!(worktree_path.starts_with(&canonical_root));
+    assert_ne!(worktree_path, repository.path);
+    assert_eq!(output_lines.first().copied(), worktree_path.to_str());
     assert_eq!(output_lines.get(1).copied(), Some(branch));
+    assert_eq!(output_lines.get(2).copied(), Some("700"));
     assert!(branch.starts_with("capture-delegate/run-isolated-worktree-"));
     assert!(
         branch
@@ -2859,6 +2869,63 @@ fn worktree_cancel_still_cleans_up() {
 }
 
 #[test]
+fn worktree_timeout_still_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "worktree-timeout",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "sleep 30"],
+            "timeout_milliseconds": 100,
+            "worktree_repository": repository.path,
+        }),
+    );
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("timed-out worktree run should emit metadata");
+    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
+    let branch = metadata["worktree_branch"].as_str().unwrap();
+
+    assert_eq!(frames.last().unwrap()["error_code"], "timed_out");
+    assert!(metadata.get("worktree_path").is_some());
+    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
+}
+
+#[test]
+fn worktree_spawn_failure_still_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let before_entries = worktree_root_entries();
+    let before_branches = worktree_branches(&repository.path);
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "worktree-spawn-failure",
+            "executable": "/definitely/does/not/exist/capture-delegate",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+            "worktree_repository": repository.path,
+        }),
+    );
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert_eq!(frames[0]["error_code"], "spawn_failed");
+    assert_eq!(worktree_root_entries(), before_entries);
+    assert_eq!(worktree_count(&repository.path), 1);
+    assert_eq!(worktree_branches(&repository.path), before_branches);
+}
+
+#[test]
 fn concurrent_worktree_runs_get_distinct_branches() {
     let _guard = worktree_test_guard();
     let repository = ScratchGitRepository::new();
@@ -2882,8 +2949,8 @@ fn concurrent_worktree_runs_get_distinct_branches() {
             .expect("request should write");
         stream
     };
-    let first_stream = start("same-concurrent-id-a");
-    let second_stream = start("same-concurrent-id-b");
+    let first_stream = start("collide/a");
+    let second_stream = start("collide:a");
     let first_frames = read_through_terminal(&mut BufReader::new(first_stream));
     let second_frames = read_through_terminal(&mut BufReader::new(second_stream));
     let first_metadata = first_frames

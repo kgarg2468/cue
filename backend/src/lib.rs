@@ -24,6 +24,8 @@ const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INPUT_WAIT_CPU_QUIET_NANOSECONDS: u64 = 30_000_000;
 const WORKTREE_ROOT_DIRECTORY_NAME: &str = "capture-delegate-worktrees";
 const MAX_SANITIZED_RUN_ID_BYTES: usize = 48;
+const WORKTREE_ADD_TIMEOUT: Duration = Duration::from_secs(30);
+const WORKTREE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -146,6 +148,7 @@ struct ActiveRuns {
 struct ActiveRunsState {
     runs: HashMap<String, Arc<RunControl>>,
     shutting_down: bool,
+    cleanup_blockers: usize,
 }
 
 struct RunStdinState {
@@ -329,6 +332,7 @@ impl ActiveRuns {
             state: Arc::new(Mutex::new(ActiveRunsState {
                 runs: HashMap::new(),
                 shutting_down: false,
+                cleanup_blockers: 0,
             })),
         }
     }
@@ -450,15 +454,14 @@ impl ActiveRuns {
     fn wait_until_empty(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if self
+            let state = self
                 .state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .runs
-                .is_empty()
-            {
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.runs.is_empty() && state.cleanup_blockers == 0 {
                 return true;
             }
+            drop(state);
             if Instant::now() >= deadline {
                 return false;
             }
@@ -473,7 +476,22 @@ struct RunRegistration {
     control: Arc<RunControl>,
 }
 
+struct CleanupBlocker {
+    state: Arc<Mutex<ActiveRunsState>>,
+}
+
 impl RunRegistration {
+    fn acquire_cleanup_blocker(&self) -> CleanupBlocker {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.cleanup_blockers += 1;
+        CleanupBlocker {
+            state: Arc::clone(&self.state),
+        }
+    }
+
     fn publish_stdin(&self, stdin: std::process::ChildStdin) -> io::Result<()> {
         self.control.publish_stdin(stdin)
     }
@@ -509,6 +527,17 @@ impl RunRegistration {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.control.pgid.store(0, Ordering::SeqCst);
+    }
+}
+
+impl Drop for CleanupBlocker {
+    fn drop(&mut self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(state.cleanup_blockers > 0);
+        state.cleanup_blockers = state.cleanup_blockers.saturating_sub(1);
     }
 }
 
@@ -1266,6 +1295,7 @@ struct RunWorktree {
     repository: PathBuf,
     path: PathBuf,
     branch: String,
+    delete_branch: bool,
     cleaned: bool,
 }
 
@@ -1275,6 +1305,9 @@ struct WorktreeSetupError {
 
 impl RunWorktree {
     fn create(repository: PathBuf, run_id: &str) -> Result<Self, WorktreeSetupError> {
+        let repository = repository
+            .canonicalize()
+            .map_err(|_| WorktreeSetupError { worktree: None })?;
         let root = worktree_root().map_err(|_| WorktreeSetupError { worktree: None })?;
         let sanitized_run_id = sanitize_run_id(run_id);
         let nonce = worktree_nonce();
@@ -1282,11 +1315,12 @@ impl RunWorktree {
         let path = root.join(directory_name);
         fs::create_dir(&path).map_err(|_| WorktreeSetupError { worktree: None })?;
         let branch = format!("capture-delegate/run-{sanitized_run_id}-{nonce}");
-        let worktree = Self {
+        let mut worktree = Self {
             root,
             repository,
             path,
             branch,
+            delete_branch: false,
             cleaned: false,
         };
         if fs::set_permissions(&worktree.path, fs::Permissions::from_mode(0o700)).is_err() {
@@ -1294,7 +1328,30 @@ impl RunWorktree {
                 worktree: Some(worktree),
             });
         }
-        let added = Command::new("git")
+        let branch_reference = format!("refs/heads/{}", worktree.branch);
+        let mut verify_branch = Command::new("git");
+        verify_branch
+            .arg("-C")
+            .arg(&worktree.repository)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(&branch_reference)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match run_command_with_timeout(&mut verify_branch, WORKTREE_CLEANUP_TIMEOUT) {
+            Ok(status) if status.success() => {
+                return Err(WorktreeSetupError {
+                    worktree: Some(worktree),
+                });
+            }
+            Ok(status) if status.code() == Some(1) => worktree.delete_branch = true,
+            _ => {
+                return Err(WorktreeSetupError {
+                    worktree: Some(worktree),
+                });
+            }
+        }
+        let mut add_worktree = Command::new("git");
+        add_worktree
             .arg("-C")
             .arg(&worktree.repository)
             .args(["worktree", "add"])
@@ -1303,9 +1360,8 @@ impl RunWorktree {
             .arg(&worktree.branch)
             .arg("HEAD")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
+            .stderr(Stdio::null());
+        let added = command_succeeds_within(&mut add_worktree, WORKTREE_ADD_TIMEOUT);
         if !added {
             return Err(WorktreeSetupError {
                 worktree: Some(worktree),
@@ -1320,34 +1376,64 @@ impl RunWorktree {
         }
         self.cleaned = true;
 
-        let removed = Command::new("git")
+        let mut remove_worktree = Command::new("git");
+        remove_worktree
             .arg("-C")
             .arg(&self.repository)
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !removed && self.path.parent() == Some(self.root.as_path()) {
+            .stderr(Stdio::null());
+        let removed = command_succeeds_within(&mut remove_worktree, WORKTREE_CLEANUP_TIMEOUT);
+        let path_is_managed_directory = self.path.parent() == Some(self.root.as_path())
+            && fs::symlink_metadata(&self.path)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+        if !removed && path_is_managed_directory {
             let _ = fs::remove_dir_all(&self.path);
-            let _ = Command::new("git")
+            let mut prune_worktrees = Command::new("git");
+            prune_worktrees
                 .arg("-C")
                 .arg(&self.repository)
                 .args(["worktree", "prune"])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+                .stderr(Stdio::null());
+            let _ = command_succeeds_within(&mut prune_worktrees, WORKTREE_CLEANUP_TIMEOUT);
         }
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.repository)
-            .args(["branch", "-D"])
-            .arg(&self.branch)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if self.delete_branch {
+            let mut delete_branch = Command::new("git");
+            delete_branch
+                .arg("-C")
+                .arg(&self.repository)
+                .args(["branch", "-D"])
+                .arg(&self.branch)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let _ = command_succeeds_within(&mut delete_branch, WORKTREE_CLEANUP_TIMEOUT);
+        }
     }
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<std::process::ExitStatus> {
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "command timed out"));
+        }
+        thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+    }
+}
+
+fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
+    run_command_with_timeout(command, timeout).is_ok_and(|status| status.success())
 }
 
 impl Drop for RunWorktree {
@@ -1364,7 +1450,7 @@ fn worktree_root() -> io::Result<PathBuf> {
         return Err(io::Error::other("worktree root is not a directory"));
     }
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    Ok(root)
+    root.canonicalize()
 }
 
 fn sanitize_run_id(run_id: &str) -> String {
@@ -1608,10 +1694,15 @@ fn run_process(
         worktree_repository,
     } = options;
     let stream = Arc::new(Mutex::new(stream));
+    let cleanup_blocker;
     let mut worktree = match worktree_repository {
         Some(repository) => match RunWorktree::create(repository, &run_id) {
             Ok(worktree) => Some(worktree),
             Err(error) => {
+                let cleanup_blocker = error
+                    .worktree
+                    .as_ref()
+                    .map(|_| registration.acquire_cleanup_blocker());
                 drop(registration);
                 let terminal_result = write_json_frame(
                     &stream,
@@ -1626,11 +1717,15 @@ fn run_process(
                 if let Some(mut worktree) = error.worktree {
                     worktree.cleanup();
                 }
+                drop(cleanup_blocker);
                 return terminal_result;
             }
         },
         None => None,
     };
+    cleanup_blocker = worktree
+        .as_ref()
+        .map(|_| registration.acquire_cleanup_blocker());
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
     let wall_clock_started = SystemTime::now();
@@ -1651,7 +1746,7 @@ fn run_process(
             Ok(terminal) => terminal,
             Err(_) => {
                 drop(registration);
-                return write_json_frame(
+                let terminal_result = write_json_frame(
                     &stream,
                     &RunExitResponse {
                         version: PROTOCOL_VERSION,
@@ -1661,6 +1756,11 @@ fn run_process(
                         error_code: Some("spawn_failed"),
                     },
                 );
+                if let Some(worktree) = worktree.as_mut() {
+                    worktree.cleanup();
+                }
+                drop(cleanup_blocker);
+                return terminal_result;
             }
         };
         let slave_fd = slave.as_raw_fd();
@@ -1677,7 +1777,7 @@ fn run_process(
             Ok(child) => child,
             Err(_) => {
                 drop(registration);
-                return write_json_frame(
+                let terminal_result = write_json_frame(
                     &stream,
                     &RunExitResponse {
                         version: PROTOCOL_VERSION,
@@ -1687,6 +1787,11 @@ fn run_process(
                         error_code: Some("spawn_failed"),
                     },
                 );
+                if let Some(worktree) = worktree.as_mut() {
+                    worktree.cleanup();
+                }
+                drop(cleanup_blocker);
+                return terminal_result;
             }
         };
         drop(slave);
@@ -1710,7 +1815,7 @@ fn run_process(
             Err(_) => {
                 // A failed spawn has no process metadata and emits only its terminal frame.
                 drop(registration);
-                return write_json_frame(
+                let terminal_result = write_json_frame(
                     &stream,
                     &RunExitResponse {
                         version: PROTOCOL_VERSION,
@@ -1720,6 +1825,11 @@ fn run_process(
                         error_code: Some("spawn_failed"),
                     },
                 );
+                if let Some(worktree) = worktree.as_mut() {
+                    worktree.cleanup();
+                }
+                drop(cleanup_blocker);
+                return terminal_result;
             }
         };
         if let Err(error) =
@@ -1973,6 +2083,7 @@ fn run_process(
     if let Some(worktree) = worktree.as_mut() {
         worktree.cleanup();
     }
+    drop(cleanup_blocker);
     metadata_result?;
     run_exit_result?;
     stdout_result?;
@@ -2344,8 +2455,9 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 mod tests {
     use super::{
         ActiveRuns, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision,
-        RegisterRunError, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
-        classify_process_supervision, drain_process_output, handle_connection, redact_output,
+        RegisterRunError, RunWorktree, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
+        classify_process_supervision, command_succeeds_within, drain_process_output,
+        handle_connection, redact_output,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -2429,6 +2541,112 @@ mod tests {
         drop(registration);
         assert!(!runs.cancel("run-1"));
         assert!(runs.register("run-1".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn cleanup_blocker_keeps_shutdown_waiting_after_run_id_release() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+        let cleanup_blocker = registration.acquire_cleanup_blocker();
+
+        drop(registration);
+
+        assert!(!runs.wait_until_empty(std::time::Duration::ZERO));
+        drop(cleanup_blocker);
+        assert!(runs.wait_until_empty(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn bounded_command_runner_kills_and_reaps_a_hung_child() {
+        let started = std::time::Instant::now();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+
+        assert!(!command_succeeds_within(
+            &mut command,
+            std::time::Duration::from_millis(20)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cleanup_preserves_a_branch_the_worktree_did_not_create() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after the Unix epoch")
+            .as_nanos();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend should be inside repository")
+            .join("target")
+            .join(format!("branch-owner-{nonce}"));
+        let repository = root.join("repository");
+        let managed_root = root.join("managed");
+        let path = managed_root.join("run");
+        fs::create_dir_all(&path).expect("worktree fixture should be created");
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args([
+                    "-c",
+                    "user.name=Capture Delegate Tests",
+                    "-c",
+                    "user.email=capture-delegate@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["checkout", "-b", "capture-delegate/preexisting"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut worktree = RunWorktree {
+            root: managed_root.canonicalize().unwrap(),
+            repository: repository.canonicalize().unwrap(),
+            path: path.canonicalize().unwrap(),
+            branch: "capture-delegate/preexisting".to_owned(),
+            delete_branch: false,
+            cleaned: false,
+        };
+
+        worktree.cleanup();
+
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/capture-delegate/preexisting",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::remove_dir_all(&root).expect("fixture should be removed");
     }
 
     #[test]
