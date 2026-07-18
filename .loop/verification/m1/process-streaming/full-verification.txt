@@ -1,0 +1,129 @@
+Capture Delegate M1 process-streaming verification
+Timestamp: 2026-07-18T06:46:44Z
+Branch: worktree-m1-process-lifecycle
+Base: 054ad7b73a23500a6cae628dad790ef0ca5314cc
+
+== Rust format ==
+
+== Rust clippy ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+
+== Rust tests ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/private/tmp/cd-m1-release-target/debug/deps/capture_delegate_backend-5485ac32a70fc318)
+
+running 6 tests
+test tests::output_scalar_split_at_read_boundary_is_not_corrupted ... ok
+test tests::cleanup_does_not_unlink_replacement_socket ... ok
+test tests::exhausted_process_slots_emit_a_terminal_capacity_failure_without_waiting ... ok
+test tests::nonexistent_executable_emits_a_structured_terminal_frame ... ok
+test tests::cat_process_outputs_before_one_exit_frame ... ok
+test tests::streaming_write_outlives_the_request_write_timeout ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running unittests src/main.rs (/private/tmp/cd-m1-release-target/debug/deps/capture_delegate_backend-2f745dcd00956bf0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/health_socket.rs (/private/tmp/cd-m1-release-target/debug/deps/health_socket-6810bc055d10f6c5)
+
+running 13 tests
+test disconnected_client_does_not_terminate_service ... ok
+test health_request_receives_ok_response_before_deadline ... ok
+test response_write_failure_does_not_terminate_service ... ok
+test bound_socket_is_private_regardless_of_umask ... ok
+test incomplete_client_does_not_terminate_service ... ok
+test stalled_client_does_not_monopolize_accept_loop ... ok
+test incompatible_protocol_version_receives_actionable_error_frame ... ok
+test malformed_client_does_not_terminate_service ... ok
+test unknown_request_type_receives_actionable_error_frame ... ok
+test valid_but_unterminated_request_is_rejected_and_service_survives ... ok
+test oversized_unterminated_client_is_bounded_and_service_survives ... ok
+test stalled_clients_are_backpressured_by_bounded_worker_pool ... ok
+test byte_dribbling_client_is_closed_by_total_frame_deadline_and_service_survives ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests/process_lifecycle.rs (/private/tmp/cd-m1-release-target/debug/deps/process_lifecycle-f0c53a50e8f1ffb9)
+
+running 7 tests
+test nonexistent_executable_returns_one_spawn_failure_terminal_frame ... ok
+test cat_streams_output_before_one_terminal_exit_frame ... ok
+test cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary ... ok
+test inherited_output_pipes_do_not_delay_the_terminal_frame ... ok
+kill: 91772: No such process
+kill: 91772: No such process
+test disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive ... ok
+test health_remains_prompt_while_eight_process_slots_are_occupied ... ok
+test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+   Doc-tests capture_delegate_backend
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+== Rust release build ==
+    Finished `release` profile [optimized] target(s) in 0.00s
+
+== Swift format ==
+
+== Swift release build ==
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.10s)
+
+== Swift tests with real Rust backend ==
+[0/1] Planning build
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.10s)
+Test Suite 'All tests' started at 2026-07-17 23:46:48.869.
+Test Suite 'All tests' passed at 2026-07-17 23:46:48.869.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1743
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test "nonexistent executable becomes a typed spawn failure event" started.
+◇ Test "Rust backend and Swift health executable complete the health handshake" started.
+◇ Test "a quiet process may send its first output frame after the frame deadline" started.
+◇ Test "Swift process API receives cat output before one terminal event" started.
+◇ Test "run exit decodes a typed capacity exhaustion failure" started.
+◇ Test "byte-dribbled responses honor one total monotonic deadline" started.
+◇ Test "health request JSON is newline delimited" started.
+◇ Test "valid response remains readable over a local socket" started.
+◇ Test "process output callback fires before the terminal frame is sent" started.
+◇ Test "oversized response fails within the frame bound" started.
+◇ Test "run exit decodes a typed spawn failure" started.
+◇ Test "start process request JSON is typed and newline delimited" started.
+◇ Test "closed peer returns an error without SIGPIPE termination" started.
+✔ Test "health request JSON is newline delimited" passed after 0.001 seconds.
+✔ Test "valid response remains readable over a local socket" passed after 0.001 seconds.
+✔ Test "start process request JSON is typed and newline delimited" passed after 0.001 seconds.
+✔ Test "closed peer returns an error without SIGPIPE termination" passed after 0.001 seconds.
+✔ Test "run exit decodes a typed capacity exhaustion failure" passed after 0.001 seconds.
+✔ Test "run exit decodes a typed spawn failure" passed after 0.001 seconds.
+✔ Test "oversized response fails within the frame bound" passed after 0.006 seconds.
+✔ Test "nonexistent executable becomes a typed spawn failure event" passed after 0.236 seconds.
+✔ Test "Swift process API receives cat output before one terminal event" passed after 0.251 seconds.
+✔ Test "Rust backend and Swift health executable complete the health handshake" passed after 0.313 seconds.
+✔ Test "process output callback fires before the terminal frame is sent" passed after 0.603 seconds.
+✔ Test "a quiet process may send its first output frame after the frame deadline" passed after 0.710 seconds.
+✔ Test "byte-dribbled responses honor one total monotonic deadline" passed after 0.762 seconds.
+✔ Test run with 13 tests in 0 suites passed after 0.762 seconds.
+
+== Real health handshake ==
+backend ok
+runtime_directory_mode=700
+socket_mode=600
+
+== Diff check ==
+
+VERDICT: PASS

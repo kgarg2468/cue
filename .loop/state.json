@@ -1,9 +1,9 @@
 {
   "status": "ready",
-  "cycle": 2,
+  "cycle": 3,
   "active_milestone": "M1 IPC/process lifecycle",
-  "branch": null,
-  "active_pr": null,
+  "branch": "loop/m1-process-streaming",
+  "active_pr": 5,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-17",
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "After fresh loginwindow at 2026-07-17 18:57:46 local, scripts/verify-app-launch.sh passed 10/10 consecutive runs and a retained CoreGraphics screenshot shows a nonblank native window with centered “Capture → Delegate”. M0-FOUNDATION-001 is verified against PR #1 commit 3e6cf85; the prior blocker was session-specific, no product source changed, and M1 is dependency-ready.",
-  "updated_at": "2026-07-17"
+  "last_cycle_summary": "Cycle 3 implemented, locally verified, and opened PR #5 for the first bounded M1 process-streaming slice: direct argv launch, callback stdout/stderr events, typed spawn/capacity terminal failures, bounded process admission, health continuity, UTF-8 preservation, disconnect cleanup, and descendant-pipe resilience. Independent correctness and security reviews are clear. M1 remains in progress; CI and merge are pending.",
+  "updated_at": "2026-07-18"
 }

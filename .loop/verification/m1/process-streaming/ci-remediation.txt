@@ -1,0 +1,24 @@
+Capture Delegate M1 PR #5 CI remediation
+Timestamp: 2026-07-18T07:00:00Z
+
+Failed CI run: 29634763962
+Passing identical-head CI run: 29634762754
+Failed test: backend/tests/health_socket.rs::stalled_clients_are_backpressured_by_bounded_worker_pool
+
+Root cause:
+The test established eight stalled clients sequentially, slept 50 ms, and only then started measuring. On a slower GitHub runner, the first connection's 250 ms request deadline expired near the health check, leaving less than the asserted 100 ms inside the late measurement window. The backend still enforced the bounded worker pool; the assertion clock did not cover setup time.
+
+Minimal correction:
+Start the elapsed-time clock before establishing the eight stalled clients and remove the fixed sleep. The assertion now measures the bounded wait from saturation setup instead of relying on setup completing within an unstated timing budget. Product code is unchanged.
+
+Verification:
+- Corrected focused test passed 20/20 consecutive runs.
+- cargo fmt --check passed.
+- cargo clippy --all-targets --all-features -- -D warnings passed.
+- Full Rust suite passed: 6 library + 13 health + 7 process lifecycle tests.
+- Rust release build passed.
+- Strict Swift format and release build passed.
+- All 13 Swift tests, including real Swift-to-Rust integration, passed.
+- git diff --check passed.
+
+Status: local remediation PASS; GitHub CI rerun pending.
