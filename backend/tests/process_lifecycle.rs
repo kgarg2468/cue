@@ -373,6 +373,125 @@ fn cancel_kills_descendant_processes() {
 }
 
 #[test]
+fn pause_and_resume_control_the_run_process_group() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "pause-resume-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 30_000,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
+
+    let pause_response = control_process(&backend.socket_path, "pause_process", "pause-resume-run");
+    assert_eq!(pause_response["type"], "pause_response");
+    assert_eq!(pause_response["status"], "accepted");
+    assert!(
+        wait_for_process_stopped_state(grandchild_pid, true),
+        "grandchild sleep process {grandchild_pid} should stop after pausing the group"
+    );
+
+    let resume_response =
+        control_process(&backend.socket_path, "resume_process", "pause-resume-run");
+    assert_eq!(resume_response["type"], "resume_response");
+    assert_eq!(resume_response["status"], "accepted");
+    assert!(
+        wait_for_process_stopped_state(grandchild_pid, false),
+        "grandchild sleep process {grandchild_pid} should continue after resuming the group"
+    );
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "pause-resume-run")["status"],
+        "accepted"
+    );
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "cancelled"
+    }));
+}
+
+#[test]
+fn pause_unknown_run_and_malformed_pause_return_typed_responses() {
+    let backend = start_backend();
+    let unknown_response = control_process(&backend.socket_path, "pause_process", "unknown-run");
+    assert_eq!(unknown_response["type"], "pause_response");
+    assert_eq!(unknown_response["run_id"], "unknown-run");
+    assert_eq!(unknown_response["status"], "not_found");
+
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("pause client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("pause timeout should configure");
+    stream
+        .write_all(b"{\"version\":1,\"type\":\"pause_process\"}\n")
+        .expect("malformed pause request should write");
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .expect("protocol error should read");
+    let response: serde_json::Value =
+        serde_json::from_str(&response).expect("protocol error should be JSON");
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "invalid_pause_process");
+}
+
+#[test]
+fn paused_run_still_times_out_and_kills_its_process_group() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "paused-timeout-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 1_500,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
+
+    assert_eq!(
+        control_process(&backend.socket_path, "pause_process", "paused-timeout-run")["status"],
+        "accepted"
+    );
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "timed_out"
+    }));
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after paused timeout"
+    );
+}
+
+#[test]
 fn sigterm_kills_active_run_groups_and_removes_socket() {
     assert_signal_shutdown(libc::SIGTERM, true);
 }
@@ -1071,6 +1190,7 @@ impl Drop for DescendantGuard {
         if let Ok(observed) = observed
             && String::from_utf8_lossy(&observed.stdout).contains("sleep 30")
         {
+            // SAFETY: the observed pid still belongs to this test's descendant process.
             let _ = unsafe { libc::kill(self.0, libc::SIGKILL) };
         }
     }
@@ -1079,9 +1199,28 @@ impl Drop for DescendantGuard {
 fn wait_for_process_death(pid: libc::pid_t) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        // SAFETY: signal zero only queries whether the test's observed pid still exists.
         if unsafe { libc::kill(pid, 0) } == -1
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_process_stopped_state(pid: libc::pid_t, stopped: bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = Command::new("/bin/ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+            .expect("process state should be observable");
+        let state = String::from_utf8_lossy(&output.stdout);
+        if !state.trim().is_empty() && state.trim_start().starts_with('T') == stopped {
             return true;
         }
         if Instant::now() >= deadline {
@@ -1115,6 +1254,7 @@ fn assert_signal_shutdown(signal: libc::c_int, assert_socket_removed: bool) {
 
     let started = Instant::now();
     assert_eq!(
+        // SAFETY: backend.child is live here and signal is SIGTERM or SIGINT.
         unsafe { libc::kill(backend.child.id() as libc::pid_t, signal) },
         0,
         "signal should be delivered to the backend"
@@ -1162,4 +1302,24 @@ fn cancel_process(socket_path: &Path, run_id: &str) -> serde_json::Value {
         .read_line(&mut response)
         .expect("cancel response should read");
     serde_json::from_str(&response).expect("cancel response JSON")
+}
+
+fn control_process(socket_path: &Path, request_type: &str, run_id: &str) -> serde_json::Value {
+    let request = serde_json::json!({
+        "version": 1,
+        "type": request_type,
+        "run_id": run_id,
+    });
+    let mut stream = UnixStream::connect(socket_path).expect("control client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("control timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("control request should write");
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .expect("control response should read");
+    serde_json::from_str(&response).expect("control response JSON")
 }

@@ -99,8 +99,24 @@ struct ActiveRuns {
 }
 
 struct ActiveRunsState {
-    runs: HashMap<String, Arc<AtomicBool>>,
+    runs: HashMap<String, Arc<RunControl>>,
     shutting_down: bool,
+}
+
+struct RunControl {
+    cancelled: AtomicBool,
+    paused: AtomicBool,
+    pgid: AtomicI32,
+}
+
+impl RunControl {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            pgid: AtomicI32::new(0),
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -120,7 +136,7 @@ impl ActiveRuns {
     }
 
     fn register(&self, run_id: String) -> Result<RunRegistration, RegisterRunError> {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(RunControl::new());
         let mut state = self
             .state
             .lock()
@@ -131,26 +147,64 @@ impl ActiveRuns {
         if state.runs.contains_key(&run_id) {
             return Err(RegisterRunError::Duplicate);
         }
-        state.runs.insert(run_id.clone(), Arc::clone(&cancelled));
+        state.runs.insert(run_id.clone(), Arc::clone(&control));
         Ok(RunRegistration {
             state: Arc::clone(&self.state),
             run_id,
-            cancelled,
+            control,
         })
     }
 
     fn cancel(&self, run_id: &str) -> bool {
-        let cancelled = self
+        let control = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .runs
             .get(run_id)
             .cloned();
-        let Some(cancelled) = cancelled else {
+        let Some(control) = control else {
             return false;
         };
-        cancelled.store(true, Ordering::Release);
+        control.cancelled.store(true, Ordering::Release);
+        true
+    }
+
+    fn pause(&self, run_id: &str) -> bool {
+        let control = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .runs
+            .get(run_id)
+            .cloned();
+        let Some(control) = control else {
+            return false;
+        };
+        control.paused.store(true, Ordering::SeqCst);
+        let pgid = control.pgid.load(Ordering::SeqCst);
+        if pgid != 0 {
+            signal_process_group(pgid, libc::SIGSTOP);
+        }
+        true
+    }
+
+    fn resume(&self, run_id: &str) -> bool {
+        let control = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .runs
+            .get(run_id)
+            .cloned();
+        let Some(control) = control else {
+            return false;
+        };
+        control.paused.store(false, Ordering::SeqCst);
+        let pgid = control.pgid.load(Ordering::SeqCst);
+        if pgid != 0 {
+            signal_process_group(pgid, libc::SIGCONT);
+        }
         true
     }
 
@@ -160,8 +214,8 @@ impl ActiveRuns {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.shutting_down = true;
-        for cancelled in state.runs.values() {
-            cancelled.store(true, Ordering::Release);
+        for control in state.runs.values() {
+            control.cancelled.store(true, Ordering::Release);
         }
     }
 
@@ -188,7 +242,7 @@ impl ActiveRuns {
 struct RunRegistration {
     state: Arc<Mutex<ActiveRunsState>>,
     run_id: String,
-    cancelled: Arc<AtomicBool>,
+    control: Arc<RunControl>,
 }
 
 impl Drop for RunRegistration {
@@ -200,7 +254,7 @@ impl Drop for RunRegistration {
         if state
             .runs
             .get(&self.run_id)
-            .is_some_and(|cancelled| Arc::ptr_eq(cancelled, &self.cancelled))
+            .is_some_and(|control| Arc::ptr_eq(control, &self.control))
         {
             state.runs.remove(&self.run_id);
         }
@@ -649,6 +703,44 @@ fn handle_connection(
                 stream.write_all(b"\n")?;
                 stream.flush()?;
             }
+            "pause_process" => {
+                let Some(run_id) = request.run_id else {
+                    return write_protocol_error(&mut stream, "invalid_pause_process");
+                };
+                let status = if active_runs.pause(&run_id) {
+                    "accepted"
+                } else {
+                    "not_found"
+                };
+                let response = CancelResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "pause_response",
+                    run_id: &run_id,
+                    status,
+                };
+                serde_json::to_writer(&mut stream, &response)?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
+            }
+            "resume_process" => {
+                let Some(run_id) = request.run_id else {
+                    return write_protocol_error(&mut stream, "invalid_resume_process");
+                };
+                let status = if active_runs.resume(&run_id) {
+                    "accepted"
+                } else {
+                    "not_found"
+                };
+                let response = CancelResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "resume_response",
+                    run_id: &run_id,
+                    status,
+                };
+                serde_json::to_writer(&mut stream, &response)?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
+            }
             _ => write_protocol_error(&mut stream, "unknown_request_type")?,
         }
     }
@@ -687,6 +779,12 @@ fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
+    // SAFETY: a negative process ID targets the registered run's process group; kill retains no
+    // Rust-managed pointers.
+    let _ = unsafe { libc::kill(-pgid, signal) };
+}
+
 fn run_process(
     stream: UnixStream,
     run_id: String,
@@ -697,6 +795,7 @@ fn run_process(
     registration: RunRegistration,
 ) -> io::Result<()> {
     let stream = Arc::new(Mutex::new(stream));
+    // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
     let mut child = match Command::new(executable)
         .args(arguments)
@@ -720,6 +819,13 @@ fn run_process(
             );
         }
     };
+    let pgid = child.id() as libc::pid_t;
+    registration.control.pgid.store(pgid, Ordering::SeqCst);
+    // This Dekker-style store-then-load handshake with pause applies a pause that lands between
+    // registration and spawn from exactly one side.
+    if registration.control.paused.load(Ordering::SeqCst) {
+        signal_process_group(pgid, libc::SIGSTOP);
+    }
     let stdout = child
         .stdout
         .take()
@@ -735,10 +841,10 @@ fn run_process(
         return Err(error);
     }
 
-    let cancelled = Arc::clone(&registration.cancelled);
+    let control = Arc::clone(&registration.control);
     let stdout_writer = Arc::clone(&stream);
     let stdout_run_id = run_id.clone();
-    let stdout_cancelled = Arc::clone(&cancelled);
+    let stdout_control = Arc::clone(&control);
     let stdout_drain = match thread::Builder::new()
         .name("capture-delegate-stdout".to_owned())
         .spawn(move || {
@@ -747,7 +853,7 @@ fn run_process(
                 stdout_writer,
                 stdout_run_id,
                 "stdout",
-                stdout_cancelled,
+                stdout_control,
             )
         }) {
         Ok(drain) => drain,
@@ -759,7 +865,7 @@ fn run_process(
     };
     let stderr_writer = Arc::clone(&stream);
     let stderr_run_id = run_id.clone();
-    let stderr_cancelled = Arc::clone(&cancelled);
+    let stderr_control = Arc::clone(&control);
     let stderr_drain = match thread::Builder::new()
         .name("capture-delegate-stderr".to_owned())
         .spawn(move || {
@@ -768,12 +874,12 @@ fn run_process(
                 stderr_writer,
                 stderr_run_id,
                 "stderr",
-                stderr_cancelled,
+                stderr_control,
             )
         }) {
         Ok(drain) => drain,
         Err(error) => {
-            cancelled.store(true, Ordering::Release);
+            control.cancelled.store(true, Ordering::Release);
             kill_process_group(&mut child);
             let _ = child.wait();
             let _ = stdout_drain.join();
@@ -786,7 +892,7 @@ fn run_process(
         match classify_process_supervision(
             child_status.is_some(),
             timeout_started.elapsed() >= timeout,
-            cancelled.load(Ordering::Acquire),
+            control.cancelled.load(Ordering::Acquire),
         ) {
             ProcessSupervision::Exited => {
                 // A leader that exits while descendants remain (for example
@@ -811,7 +917,7 @@ fn run_process(
             ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
         }
     };
-    cancelled.store(true, Ordering::Release);
+    control.cancelled.store(true, Ordering::Release);
     let stdout_result = stdout_drain
         .join()
         .map_err(|_| io::Error::other("stdout drain thread panicked"))?;
@@ -851,7 +957,7 @@ fn drain_process_output<R: Read>(
         stream,
         run_id,
         output_stream,
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(RunControl::new()),
     )
 }
 
@@ -860,7 +966,7 @@ fn drain_process_output_until_cancelled<R: Read>(
     stream: Arc<Mutex<UnixStream>>,
     run_id: String,
     output_stream: &'static str,
-    cancelled: Arc<AtomicBool>,
+    control: Arc<RunControl>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; MAX_OUTPUT_CHUNK_BYTES];
     let mut utf8_carry = Vec::with_capacity(3);
@@ -868,7 +974,7 @@ fn drain_process_output_until_cancelled<R: Read>(
         let bytes_read = match reader.read(&mut buffer) {
             Ok(bytes_read) => bytes_read,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if cancelled.load(Ordering::Acquire) {
+                if control.cancelled.load(Ordering::Acquire) {
                     break;
                 }
                 thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
@@ -889,12 +995,12 @@ fn drain_process_output_until_cancelled<R: Read>(
                 output,
             };
             if let Err(error) = write_json_frame(&stream, &response) {
-                cancelled.store(true, Ordering::Release);
+                control.cancelled.store(true, Ordering::Release);
                 return Err(error);
             }
         }
     }
-    if !cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
+    if !control.cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
         let response = RunOutputResponse {
             version: PROTOCOL_VERSION,
             response_type: "run_output",
@@ -903,7 +1009,7 @@ fn drain_process_output_until_cancelled<R: Read>(
             output: String::from_utf8_lossy(&utf8_carry).into_owned(),
         };
         write_json_frame(&stream, &response).inspect_err(|_| {
-            cancelled.store(true, Ordering::Release);
+            control.cancelled.store(true, Ordering::Release);
         })?;
     }
     Ok(())
@@ -1044,6 +1150,18 @@ mod tests {
     }
 
     #[test]
+    fn pausing_before_the_process_group_is_known_records_the_pause_without_signalling() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+
+        assert!(runs.pause("run-1"));
+        assert!(registration.control.paused.load(Ordering::SeqCst));
+        assert_eq!(registration.control.pgid.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn shutdown_cancels_existing_runs_and_rejects_new_registrations() {
         let runs = ActiveRuns::new();
         let registration = runs
@@ -1052,7 +1170,7 @@ mod tests {
 
         runs.begin_shutdown();
 
-        assert!(registration.cancelled.load(Ordering::Acquire));
+        assert!(registration.control.cancelled.load(Ordering::Acquire));
         assert!(matches!(
             runs.register("new-run".to_owned()),
             Err(RegisterRunError::ShuttingDown)

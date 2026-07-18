@@ -1,0 +1,45 @@
+M1 pause/resume slice verification — 2026-07-18 (cycle 9)
+
+Slice: versioned pause_process/resume_process requests over the Unix socket
+protocol (spec adapter API: pause(runId)/resume(runId), spec lines 603-604;
+one-click pause, line 865). Pause SIGSTOPs the run's whole process group,
+resume SIGCONTs it; accepted/not_found is existence-based like cancel. The
+registry value became RunControl {cancelled, paused, pgid}; the supervision
+loop stores the pgid post-spawn and a SeqCst store-then-load handshake on
+(paused, pgid) ensures a pause landing in the register-to-spawn window is
+applied by exactly one side. The timeout deadline deliberately keeps ticking
+while paused, and cancel/timeout/shutdown SIGKILL a stopped group unchanged.
+Swift IPCClient gains pauseProcess/resumeProcess mirroring cancelProcess.
+
+Provenance: implemented by a Codex gpt-5.6-sol worker (high effort) within a
+four-file allowlist; diff gate clean. The worker could not run integration or
+Swift tests (sandbox blocks Unix-socket binding); all verification below ran
+in the workspace. One orchestrator adjustment: the worker's new real-backend
+Swift test was relocated from a duplicated harness in
+Tests/CaptureDelegateIPCTests into the existing
+Tests/CaptureDelegateIntegrationTests/ProcessLifecycleTests.swift harness
+(the prompt's allowlist named the wrong path; the worker correctly flagged
+this rather than exceeding its fence).
+
+TDD red evidence: with backend/src/lib.rs and IPCClient.swift reverted to
+origin/main and the new tests kept, all three new Rust integration tests
+fail (unknown_request_type instead of pause/resume responses); restored via
+saved impl.patch (496 lines, verified before revert).
+
+Evidence in this directory:
+- cargo-test.log — full suite green: 11 lib (incl. pause-before-pgid
+  bookkeeping test) + 13 + 22 integration (incl. group pause/resume via
+  /bin/ps state, unknown/malformed pause, paused-run-still-times-out).
+  New pause tests passed 8/8 stress reruns.
+- verify-m0-parity.log — full CI parity gate green: ledger validation, cargo
+  fmt/clippy/test, swift format lint --strict, release builds, 19 Swift
+  tests including "Swift pauses, resumes, and cancels a running process over
+  typed connections" against the real backend binary, health handshake.
+- runtime-demo.log — release-binary demo: grandchild state S→T 0.00s after
+  pause accepted, T→S 0.00s after resume accepted, cancelled terminal and
+  whole-group death 0.01s after cancel accepted, SIGTERM shutdown still
+  exits 0 and removes the socket.
+
+Known bounded semantics (documented in code comments): the timeout clock
+does not stop while paused; pgid-reuse after reap remains the inherent
+window noted in the process-groups slice.
