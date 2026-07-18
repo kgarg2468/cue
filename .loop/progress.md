@@ -96,3 +96,16 @@ Status: delivered through PR #7; M1 remains in progress
 - Both required CI runs passed on exact head `a6693cc`; PR #7 squash-merged as `3058370` and its remote branch was deleted.
 
 Next cycle: select one next bounded M1 lifecycle slice from fresh `origin/main`; keep M1 and partial traceability rows in progress.
+
+## Cycle 6 M1 run cancellation and loop recovery — 2026-07-18
+
+Status: delivered through PR #9; M1 remains in progress
+
+- Recovered the loop after the prior session died mid-cycle-5: broke the orphaned `.loop/LOCK` on direct evidence (no agent process, no commits or file changes since acquisition, never-refreshed heartbeat) with the user present, and recorded the takeover in the lock file. The loop now runs as durable job `a8a4fe0a` (created 2026-07-18, expires 2026-07-25) in session `1bbeeb14`; job `809366a7` died with the prior session.
+- Adopted cycle 5's uncommitted 463-line cancel slice from its stale worktree after full review: versioned `cancel_process`/`cancel_response`, ActiveRuns registry with duplicate-run-id rejection and Drop-based release, typed `cancelled` terminals preserving prior output, and Swift `IPCClient.cancelProcess`. Fixed a registration race in its duplicate-run-id test during adoption.
+- Independent Codex review (gpt-5.6-sol, high effort): no blockers, five major/three minor findings. Fixed the two confirmed in-slice issues pre-merge — run ids now release before every terminal frame so a client observing `run_exit` can immediately reuse the id (deterministically tested), and the cancel/timeout race test no longer assumes an output-first frame (5/5 stress reruns). Flagged inherent cancel/spawn/exit/timeout attribution races and the pre-existing non-reading-client drain stall as pending M1 work in S10-011.
+- Full parity gate green locally (ledger, cargo fmt/clippy/test, swift format strict, release builds, 17 Swift tests against the real backend, health handshake); release-binary runtime demo shows cancel accepted on a separate connection with the `cancelled` terminal 0.01s later and post-exit cancel returning `not_found`. Evidence: `.loop/verification/m1/run-cancel/`.
+- Both required CI runs passed on exact head `70854c6`; PR #9 squash-merged as `ea02d67` and its remote branch was deleted.
+- Environmental note: `cleanup_does_not_unlink_replacement_socket` fails in any checkout whose path exceeds SUN_LEN for the test socket; unrelated to this slice.
+
+Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descendant process groups) from fresh `origin/main`; keep M1 and partial traceability rows in progress.
