@@ -159,3 +159,11 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Evidence: .loop/verification/m1/run-metadata/ (red evidence, cargo 15+13+31, parity, runtime demos incl. partial/full truncation, review report + dispositions).
 - BLOCKED: GitHub Actions billing failure ("recent account payments have failed or your spending limit needs to be increased") — no CI job starts; both required verify-m0 checks red in ~2s with zero steps; rerun reproduced. Local verification fully green. Merge prohibited until user fixes billing and checks rerun green.
 - Next cycle: if CI unblocked → rerun checks, merge PR #19, closeout (traceability S10-010/S10-001). Else busy-exit on the persisted blocker.
+
+## Cycle 12 (firings 12–41) — 2026-07-18
+
+- Firings 12–40 were bounded blocked-probes on the GitHub Actions billing failure: each reran a verify-m0 run on PR #19, confirmed the identical "recent account payments have failed or your spending limit needs to be increased" annotation on the fresh job, appended to `.loop/busy/blocked-retries.log`, and exited with the lock released — twenty-nine consecutive identical results.
+- User directive: GitHub billing will not be enabled; retire CI and use gpt-5.6-sol as the CI substitute (ADR-007). Discovery while implementing it: the free-plan private repo has no branch protection at all — the merge block had been the loop's own CI gate, which the user redefined.
+- Final pre-merge local parity run on PR #19 head `e8671d0` (only `.loop` state files beyond the verified code commit `7199894`): exit 0 (`verify-m0-premerge.log`). Gate change documented in a PR #19 comment; squash-merged as `9c36a5f`; branch deleted.
+- Closeout: S10-010 → done with evidence; S10-001 implementation notes updated (redaction/metadata delivered; PTY, worktree, input-wait detection, durable cleanup remain); state.json → ready, billing blocker cleared (moot under ADR-007), active_pr null.
+- Next cycle: one bounded M1 slice — PTY support (unlocks waiting-input detection S10-009), or durable run state.
