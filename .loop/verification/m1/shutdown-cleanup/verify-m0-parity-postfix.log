@@ -1,0 +1,133 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
+     Running unittests src/lib.rs (target/debug/deps/capture_delegate_backend-d097ed659397632e)
+
+running 10 tests
+test tests::active_run_registry_rejects_duplicates_and_releases_ids_on_teardown ... ok
+test tests::completed_child_wins_over_a_pending_cancellation ... ok
+test tests::completed_child_wins_over_an_elapsed_timeout ... ok
+test tests::shutdown_cancels_existing_runs_and_rejects_new_registrations ... ok
+test tests::output_scalar_split_at_read_boundary_is_not_corrupted ... ok
+test tests::cleanup_does_not_unlink_replacement_socket ... ok
+test tests::exhausted_process_slots_emit_a_terminal_capacity_failure_without_waiting ... ok
+test tests::nonexistent_executable_emits_a_structured_terminal_frame ... ok
+test tests::cat_process_outputs_before_one_exit_frame ... ok
+test tests::streaming_write_outlives_the_request_write_timeout ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running unittests src/main.rs (target/debug/deps/capture_delegate_backend-b30b401a58d6baed)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/health_socket.rs (target/debug/deps/health_socket-fa386bb4f2f25294)
+
+running 13 tests
+test health_request_receives_ok_response_before_deadline ... ok
+test incomplete_client_does_not_terminate_service ... ok
+test incompatible_protocol_version_receives_actionable_error_frame ... ok
+test stalled_client_does_not_monopolize_accept_loop ... ok
+test malformed_client_does_not_terminate_service ... ok
+test bound_socket_is_private_regardless_of_umask ... ok
+test disconnected_client_does_not_terminate_service ... ok
+test response_write_failure_does_not_terminate_service ... ok
+test unknown_request_type_receives_actionable_error_frame ... ok
+test valid_but_unterminated_request_is_rejected_and_service_survives ... ok
+test oversized_unterminated_client_is_bounded_and_service_survives ... ok
+test stalled_clients_are_backpressured_by_bounded_worker_pool ... ok
+test byte_dribbling_client_is_closed_by_total_frame_deadline_and_service_survives ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/process_lifecycle.rs (target/debug/deps/process_lifecycle-e7b06df4e1cf469b)
+
+running 19 tests
+test cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary ... ok
+test cat_streams_output_before_one_terminal_exit_frame ... ok
+test nonexistent_executable_returns_one_spawn_failure_terminal_frame ... ok
+test inherited_output_pipes_do_not_delay_the_terminal_frame ... ok
+test cancel_kills_descendant_processes ... ok
+test cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_terminal_last ... ok
+kill: 95566: No such process
+kill: 95566: No such process
+test disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive ... ok
+test duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown ... ok
+test natural_leader_exit_kills_descendant_processes ... ok
+test u64_max_timeout_allows_a_completed_process ... ok
+test health_remains_prompt_while_eight_process_slots_are_occupied ... ok
+test sigint_kills_active_run_groups ... ok
+test cancellation_and_timeout_races_emit_one_terminal_without_hanging ... ok
+test sigterm_kills_active_run_groups_and_removes_socket ... ok
+test invalid_timeouts_are_rejected_before_process_admission ... ok
+test timed_out_runs_release_all_process_capacity ... ok
+test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
+test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
+test timeout_kills_descendant_processes ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+   Doc-tests capture_delegate_backend
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling capture_delegate_backend v0.1.0 (/Users/krishgarg/conductor/workspaces/cue/moroni/backend)
+    Finished `release` profile [optimized] target(s) in 0.52s
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.10s)
+[0/1] Planning build
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.09s)
+Test Suite 'All tests' started at 2026-07-18 02:32:35.756.
+Test Suite 'All tests' passed at 2026-07-18 02:32:35.757.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1743
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test "Rust backend and Swift health executable complete the health handshake" started.
+◇ Test "sleeping process emits a typed timeout after preserving prior output" started.
+◇ Test "nonexistent executable becomes a typed spawn failure event" started.
+◇ Test "Swift cancels a running process over a separate typed connection" started.
+◇ Test "Swift process API receives cat output before one terminal event" started.
+◇ Test "run exit decodes a typed timeout failure" started.
+◇ Test "start process request JSON is typed and newline delimited" started.
+◇ Test "run exit decodes a typed capacity exhaustion failure" started.
+◇ Test "valid response remains readable over a local socket" started.
+◇ Test "closed peer returns an error without SIGPIPE termination" started.
+◇ Test "cancel process request JSON and accepted result are typed" started.
+◇ Test "a quiet process may send its first output frame after the frame deadline" started.
+◇ Test "process output callback fires before the terminal frame is sent" started.
+◇ Test "byte-dribbled responses honor one total monotonic deadline" started.
+◇ Test "health request JSON is newline delimited" started.
+◇ Test "run exit decodes a typed spawn failure" started.
+◇ Test "oversized response fails within the frame bound" started.
+✔ Test "cancel process request JSON and accepted result are typed" passed after 0.001 seconds.
+✔ Test "valid response remains readable over a local socket" passed after 0.001 seconds.
+✔ Test "closed peer returns an error without SIGPIPE termination" passed after 0.001 seconds.
+✔ Test "run exit decodes a typed timeout failure" passed after 0.001 seconds.
+✔ Test "start process request JSON is typed and newline delimited" passed after 0.001 seconds.
+✔ Test "run exit decodes a typed capacity exhaustion failure" passed after 0.001 seconds.
+✔ Test "health request JSON is newline delimited" passed after 0.001 seconds.
+✔ Test "run exit decodes a typed spawn failure" passed after 0.001 seconds.
+✔ Test "oversized response fails within the frame bound" passed after 0.006 seconds.
+✔ Test "nonexistent executable becomes a typed spawn failure event" passed after 0.223 seconds.
+✔ Test "Swift process API receives cat output before one terminal event" passed after 0.241 seconds.
+✔ Test "Swift cancels a running process over a separate typed connection" passed after 0.247 seconds.
+✔ Test "Rust backend and Swift health executable complete the health handshake" passed after 0.323 seconds.
+✔ Test "sleeping process emits a typed timeout after preserving prior output" passed after 0.425 seconds.
+✔ Test "process output callback fires before the terminal frame is sent" passed after 0.618 seconds.
+✔ Test "a quiet process may send its first output frame after the frame deadline" passed after 0.711 seconds.
+✔ Test "byte-dribbled responses honor one total monotonic deadline" passed after 0.742 seconds.
+✔ Test run with 17 tests in 0 suites passed after 0.742 seconds.
+    Finished `release` profile [optimized] target(s) in 0.00s
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.09s)
+backend ok
