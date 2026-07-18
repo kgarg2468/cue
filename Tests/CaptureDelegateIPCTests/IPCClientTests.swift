@@ -14,7 +14,8 @@ func startProcessRequestJSON() {
     let request = IPCClient.startProcessRequest(
         runID: "run-1",
         executable: "/bin/cat",
-        arguments: ["first", "second"]
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250
     )
 
     #expect(request.hasSuffix("\n"))
@@ -25,6 +26,7 @@ func startProcessRequestJSON() {
     #expect(json["run_id"] as? String == "run-1")
     #expect(json["executable"] as? String == "/bin/cat")
     #expect(json["arguments"] as? [String] == ["first", "second"])
+    #expect(json["timeout_milliseconds"] as? Int == 250)
 }
 
 @Test("closed peer returns an error without SIGPIPE termination")
@@ -249,6 +251,31 @@ func capacityExhaustionExitDecodes() throws {
     #expect(
         collector.result().events == [
             .exit(runID: "capacity-run", exitCode: nil, errorCode: .capacityExhausted)
+        ])
+}
+
+@Test("run exit decodes a typed timeout failure")
+func timeoutExitDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    try writeAll(
+        Array(
+            "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"timeout-run\",\"exit_code\":null,\"error_code\":\"timed_out\"}\n"
+                .utf8),
+        to: descriptors.writer
+    )
+    let collector = ProcessEventCollector()
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "timeout-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .exit(runID: "timeout-run", exitCode: nil, errorCode: .timedOut)
         ])
 }
 

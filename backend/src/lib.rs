@@ -29,6 +29,8 @@ struct Request {
     executable: Option<String>,
     #[serde(default)]
     arguments: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_milliseconds: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -274,11 +276,18 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
                 stream.flush()?;
             }
             "start_process" => {
-                let (Some(run_id), Some(executable), Some(arguments)) =
-                    (request.run_id, request.executable, request.arguments)
-                else {
+                let (Some(run_id), Some(executable), Some(arguments), Some(timeout_milliseconds)) = (
+                    request.run_id,
+                    request.executable,
+                    request.arguments,
+                    request
+                        .timeout_milliseconds
+                        .and_then(|value| value.as_u64())
+                        .filter(|timeout_milliseconds| *timeout_milliseconds > 0),
+                ) else {
                     return write_protocol_error(&mut stream, "invalid_start_process");
                 };
+                let timeout = Duration::from_millis(timeout_milliseconds);
                 let Some(process_slot) = process_slots.try_acquire() else {
                     let stream = Arc::new(Mutex::new(stream));
                     return write_json_frame(
@@ -296,7 +305,14 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
                 thread::Builder::new()
                     .name("capture-delegate-process".to_owned())
                     .spawn(move || {
-                        let _ = run_process(stream, run_id, executable, arguments, process_slot);
+                        let _ = run_process(
+                            stream,
+                            run_id,
+                            executable,
+                            arguments,
+                            timeout,
+                            process_slot,
+                        );
                     })
                     .map_err(|error| {
                         io::Error::other(format!("process worker spawn error: {error}"))
@@ -309,14 +325,40 @@ fn handle_connection(mut stream: UnixStream, process_slots: WorkerSlots) -> io::
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessSupervision {
+    Exited,
+    TimedOut,
+    Cancelled,
+    Running,
+}
+
+fn classify_process_supervision(
+    child_exited: bool,
+    deadline_elapsed: bool,
+    cancelled: bool,
+) -> ProcessSupervision {
+    if child_exited {
+        ProcessSupervision::Exited
+    } else if deadline_elapsed {
+        ProcessSupervision::TimedOut
+    } else if cancelled {
+        ProcessSupervision::Cancelled
+    } else {
+        ProcessSupervision::Running
+    }
+}
+
 fn run_process(
     stream: UnixStream,
     run_id: String,
     executable: String,
     arguments: Vec<String>,
+    timeout: Duration,
     _process_slot: WorkerSlot,
 ) -> io::Result<()> {
     let stream = Arc::new(Mutex::new(stream));
+    let timeout_started = Instant::now();
     let mut child = match Command::new(executable)
         .args(arguments)
         .stdout(Stdio::piped())
@@ -398,14 +440,30 @@ fn run_process(
         }
     };
 
-    let exit_code = loop {
-        match child.try_wait()? {
-            Some(status) => break status.code(),
-            None if cancelled.load(Ordering::Acquire) => {
-                let _ = child.kill();
-                break child.wait()?.code();
+    let (exit_code, error_code) = loop {
+        let child_status = child.try_wait()?;
+        match classify_process_supervision(
+            child_status.is_some(),
+            timeout_started.elapsed() >= timeout,
+            cancelled.load(Ordering::Acquire),
+        ) {
+            ProcessSupervision::Exited => {
+                break (
+                    child_status
+                        .expect("completed child should have status")
+                        .code(),
+                    None,
+                );
             }
-            None => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
+            ProcessSupervision::TimedOut => {
+                let _ = child.kill();
+                break (child.wait()?.code(), Some("timed_out"));
+            }
+            ProcessSupervision::Cancelled => {
+                let _ = child.kill();
+                break (child.wait()?.code(), None);
+            }
+            ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
         }
     };
     cancelled.store(true, Ordering::Release);
@@ -421,8 +479,12 @@ fn run_process(
             version: PROTOCOL_VERSION,
             response_type: "run_exit",
             run_id: &run_id,
-            exit_code,
-            error_code: None,
+            exit_code: if error_code.is_some() {
+                None
+            } else {
+                exit_code
+            },
+            error_code,
         },
     )?;
     stdout_result?;
@@ -593,14 +655,22 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONCURRENT_PROCESSES, SocketCleanup, SocketIdentity, WorkerSlots, drain_process_output,
-        handle_connection,
+        MAX_CONCURRENT_PROCESSES, ProcessSupervision, SocketCleanup, SocketIdentity, WorkerSlots,
+        classify_process_supervision, drain_process_output, handle_connection,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn completed_child_wins_over_an_elapsed_timeout() {
+        assert_eq!(
+            classify_process_supervision(true, true, false),
+            ProcessSupervision::Exited
+        );
+    }
 
     #[test]
     fn cleanup_does_not_unlink_replacement_socket() {
@@ -663,6 +733,7 @@ mod tests {
             "run_id": "unit-run",
             "executable": "/bin/cat",
             "arguments": [existing_file, missing_file],
+            "timeout_milliseconds": 2_000,
         });
         client
             .write_all(format!("{request}\n").as_bytes())
@@ -751,6 +822,7 @@ mod tests {
             "run_id": "missing-run",
             "executable": "/definitely/does/not/exist/capture-delegate",
             "arguments": [],
+            "timeout_milliseconds": 2_000,
         });
         client
             .write_all(format!("{request}\n").as_bytes())
@@ -789,6 +861,7 @@ mod tests {
             "run_id": "capacity-run",
             "executable": "/bin/sleep",
             "arguments": ["5"],
+            "timeout_milliseconds": 10_000,
         });
         let started = std::time::Instant::now();
         client
@@ -826,6 +899,7 @@ mod tests {
             "run_id": "backpressure-run",
             "executable": "/usr/bin/seq",
             "arguments": ["1", "500000"],
+            "timeout_milliseconds": 10_000,
         });
         client
             .write_all(format!("{request}\n").as_bytes())

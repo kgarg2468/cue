@@ -30,7 +30,8 @@ func processLifecycle() throws {
         socketPath: socket.path(),
         runID: "swift-run",
         executable: "/bin/cat",
-        arguments: [existing.path(), missing.path()]
+        arguments: [existing.path(), missing.path()],
+        timeoutMilliseconds: 2_000
     ) { event in
         events.append(event)
     }
@@ -86,7 +87,8 @@ func nonexistentExecutable() throws {
         socketPath: socket.path(),
         runID: "missing-run",
         executable: "/definitely/does/not/exist/capture-delegate",
-        arguments: []
+        arguments: [],
+        timeoutMilliseconds: 2_000
     ) { event in
         events.append(event)
     }
@@ -94,6 +96,52 @@ func nonexistentExecutable() throws {
     #expect(
         events == [
             .exit(runID: "missing-run", exitCode: nil, errorCode: .spawnFailed)
+        ])
+}
+
+@Test("sleeping process emits a typed timeout after preserving prior output")
+func timedOutProcess() throws {
+    guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
+    else {
+        throw NSError(domain: "CaptureDelegateIntegrationTests", code: 1)
+    }
+
+    let directory = URL(filePath: "/private/tmp")
+        .appending(
+            path: "capture-delegate-timeout-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = directory.appending(path: "backend.sock")
+    let backend = try startBackend(binary: backendBinary, socket: socket)
+    defer {
+        if backend.isRunning { backend.terminate() }
+        backend.waitUntilExit()
+    }
+
+    let started = Date()
+    var events: [ProcessEvent] = []
+    try IPCClient.startProcess(
+        socketPath: socket.path(),
+        runID: "timeout-run",
+        executable: "/bin/sh",
+        arguments: ["-c", "printf before-timeout; sleep 2"],
+        timeoutMilliseconds: 200
+    ) { event in
+        events.append(event)
+    }
+
+    #expect(Date().timeIntervalSince(started) < 1)
+    #expect(
+        events.contains { event in
+            if case .output(_, .stdout, let output) = event {
+                return output.contains("before-timeout")
+            }
+            return false
+        })
+    #expect(
+        events == [
+            .output(runID: "timeout-run", stream: .stdout, output: "before-timeout"),
+            .exit(runID: "timeout-run", exitCode: nil, errorCode: .timedOut),
         ])
 }
 

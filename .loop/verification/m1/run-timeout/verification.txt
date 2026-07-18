@@ -1,0 +1,41 @@
+Capture Delegate M1 run-timeout verification
+Timestamp: 2026-07-18
+Branch: loop/m1-run-timeout
+Base: origin/main 3b50498
+
+Contract verified:
+- start_process requires positive JSON u64 timeout_milliseconds.
+- Missing, null, zero, negative, fractional, and string values return type=error, code=invalid_start_process before process admission/spawn.
+- All positive u64 values, including u64::MAX, are accepted.
+- Timeout clock begins immediately before direct child spawn.
+- Direct-child completion observed at the same supervision tick as elapsed timeout wins and reports its real exit.
+- Timeout kills and waits/reaps the direct child, cancels and joins drains, preserves preceding output, emits exactly one run_exit last with exit_code=null and error_code=timed_out, and releases capacity.
+- Swift requires and encodes timeoutMilliseconds and decodes ProcessExitErrorCode.timedOut.
+
+TDD/remediation:
+- Terra worker added request, typed-decode, real timeout, output-ordering, invalid-admission, capacity-release, and u64-max tests.
+- Scope gate rejected unrelated socket-path rewrites; restored origin/main behavior.
+- Review caught deadline-first misclassification and Instant overflow risk. Supervision now observes child completion first and uses elapsed Duration arithmetic.
+- Host verification corrected two test-only expectations to the established protocol frame type "error".
+
+Verification:
+- Focused real timeout and capacity-release tests passed 10/10 consecutive runs.
+- cargo fmt --check: PASS
+- cargo clippy --all-targets --all-features -- -D warnings: PASS
+- Rust tests: 7 library + 13 health + 11 process lifecycle = 31 PASS
+- Rust release build: PASS
+- Swift strict format: PASS
+- Swift release build: PASS
+- Swift tests against real Rust backend: 15 PASS
+- git diff --check: PASS
+
+Independent review: CLEAR
+Reviewer: Opus code-reviewer a0d07124315b39dda
+Verified parsing/type boundaries, clock origin and completion precedence, timeout kill/wait/drain/terminal ordering, disconnect interaction, capacity release, frame bounds, Swift encoding/decoding, tests, and scope.
+
+Deferred/nonblocking:
+- Swift Int cannot express the full u64 range and negative values are rejected by backend rather than client-side.
+- Supervision has 10ms polling granularity.
+- PTY, pause/resume/cancel, descendant process-group termination, waiting-input detection, redaction/metadata, persistence, and UI remain pending M1/later slices.
+
+VERDICT: PASS; M1 remains in progress.

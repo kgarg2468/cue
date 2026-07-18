@@ -88,6 +88,7 @@ fn cat_streams_output_before_one_terminal_exit_frame() {
         "run_id": "rust-run",
         "executable": "/bin/cat",
         "arguments": [existing_file, missing_file],
+        "timeout_milliseconds": 2_000,
     });
 
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
@@ -157,6 +158,7 @@ fn cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary() {
         "run_id": "utf8-run",
         "executable": "/bin/cat",
         "arguments": [fixture],
+        "timeout_milliseconds": 2_000,
     });
 
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
@@ -192,6 +194,7 @@ fn streaming_write_survives_backpressure_longer_than_the_request_timeout() {
         "run_id": "backpressure-run",
         "executable": "/usr/bin/seq",
         "arguments": ["1", "500000"],
+        "timeout_milliseconds": 10_000,
     });
 
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
@@ -239,6 +242,7 @@ fn nonexistent_executable_returns_one_spawn_failure_terminal_frame() {
         "run_id": "missing-run",
         "executable": "/definitely/does/not/exist/capture-delegate",
         "arguments": [],
+        "timeout_milliseconds": 2_000,
     });
 
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
@@ -272,6 +276,7 @@ fn disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive() {
         "run_id": "disconnect-run",
         "executable": "/usr/bin/yes",
         "arguments": ["disconnect-regression"],
+        "timeout_milliseconds": 2_000,
     });
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
     stream
@@ -343,6 +348,7 @@ fn inherited_output_pipes_do_not_delay_the_terminal_frame() {
         "run_id": "inherited-pipe-run",
         "executable": "/bin/sh",
         "arguments": ["-c", "(sleep 5) & exit 0"],
+        "timeout_milliseconds": 2_000,
     });
     let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
     stream
@@ -379,6 +385,7 @@ fn health_remains_prompt_while_eight_process_slots_are_occupied() {
             "run_id": format!("blocked-run-{index}"),
             "executable": "/bin/sleep",
             "arguments": ["5"],
+            "timeout_milliseconds": 10_000,
         });
         let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
         stream
@@ -410,6 +417,7 @@ fn health_remains_prompt_while_eight_process_slots_are_occupied() {
         "run_id": "capacity-run",
         "executable": "/bin/sleep",
         "arguments": ["5"],
+        "timeout_milliseconds": 10_000,
     });
     let mut ninth_stream =
         UnixStream::connect(&backend.socket_path).expect("ninth client should connect");
@@ -473,6 +481,217 @@ fn health_remains_prompt_while_eight_process_slots_are_occupied() {
     assert!(
         child_pids(backend.child.id()).len() <= 8,
         "child count must remain within the process-slot limit"
+    );
+}
+
+#[test]
+fn timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "timeout-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "printf before-timeout; sleep 2"],
+        "timeout_milliseconds": 200,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    let started = Instant::now();
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(frames.iter().any(|frame| {
+        frame["type"] == "run_output"
+            && frame["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("before-timeout"))
+    }));
+    let terminal_indexes: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| (frame["type"] == "run_exit").then_some(index))
+        .collect();
+    assert_eq!(terminal_indexes, vec![frames.len() - 1]);
+    assert!(frames.last().is_some_and(|frame| {
+        frame["exit_code"].is_null() && frame["error_code"] == "timed_out"
+    }));
+
+    let mut health = UnixStream::connect(&backend.socket_path).expect("health should connect");
+    health
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("health timeout should configure");
+    health
+        .write_all(b"{\"version\":1,\"type\":\"health\"}\n")
+        .expect("health should write");
+    let mut health_frame = String::new();
+    BufReader::new(health)
+        .read_line(&mut health_frame)
+        .expect("health should remain responsive");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&health_frame).expect("health JSON")["status"],
+        "ok"
+    );
+}
+
+#[test]
+fn invalid_timeouts_are_rejected_before_process_admission() {
+    let backend = start_backend();
+    for timeout_milliseconds in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(-1),
+        serde_json::json!(1.5),
+        serde_json::json!("100"),
+    ] {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "invalid-timeout-run",
+            "executable": "/bin/sleep",
+            "arguments": ["2"],
+            "timeout_milliseconds": timeout_milliseconds,
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should configure");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        let mut frame = String::new();
+        BufReader::new(stream)
+            .read_line(&mut frame)
+            .expect("protocol error should be readable");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame JSON");
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "invalid_start_process");
+        assert!(child_pids(backend.child.id()).is_empty());
+    }
+
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "missing-timeout-run",
+        "executable": "/bin/sleep",
+        "arguments": ["2"],
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let mut frame = String::new();
+    BufReader::new(stream)
+        .read_line(&mut frame)
+        .expect("protocol error should be readable");
+    let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame JSON");
+    assert_eq!(frame["type"], "error");
+    assert_eq!(frame["code"], "invalid_start_process");
+    assert!(child_pids(backend.child.id()).is_empty());
+}
+
+#[test]
+fn u64_max_timeout_allows_a_completed_process() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "u64-max-timeout-run",
+        "executable": "/usr/bin/true",
+        "arguments": [],
+        "timeout_milliseconds": u64::MAX,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+    let terminal = frames.last().expect("terminal frame should be present");
+    assert_eq!(terminal["type"], "run_exit");
+    assert_eq!(terminal["exit_code"], 0);
+    assert!(terminal["error_code"].is_null());
+}
+
+#[test]
+fn timed_out_runs_release_all_process_capacity() {
+    let backend = start_backend();
+    let mut streams = Vec::new();
+    for index in 0..8 {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": format!("timeout-capacity-{index}"),
+            "executable": "/bin/sleep",
+            "arguments": ["2"],
+            "timeout_milliseconds": 200,
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout should configure");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        streams.push(stream);
+    }
+    for stream in streams {
+        let frames: Vec<serde_json::Value> = BufReader::new(stream)
+            .lines()
+            .map(|line| {
+                serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+            })
+            .collect();
+        assert!(frames.last().is_some_and(|frame| {
+            frame["exit_code"].is_null() && frame["error_code"] == "timed_out"
+        }));
+    }
+
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "capacity-released-run",
+        "executable": "/usr/bin/true",
+        "arguments": [],
+        "timeout_milliseconds": 1_000,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+    assert!(
+        frames
+            .last()
+            .is_some_and(|frame| { frame["exit_code"] == 0 && frame["error_code"].is_null() })
     );
 }
 

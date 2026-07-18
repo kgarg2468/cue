@@ -1,9 +1,9 @@
 {
   "status": "ready",
-  "cycle": 3,
+  "cycle": 4,
   "active_milestone": "M1 IPC/process lifecycle",
-  "branch": null,
-  "active_pr": null,
+  "branch": "loop/m1-run-timeout",
+  "active_pr": 7,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-17",
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 3 delivered the first bounded M1 process-streaming slice through PR #5, squash-merged as 9f40024 after both required CI runs passed and final correctness/security reviews were clear. Direct argv launch, bounded callback stdout/stderr events, typed spawn/capacity failures, health continuity, UTF-8 preservation, producer-disconnect cleanup, and descendant-pipe resilience are merged. M1 remains active and incomplete for PTYs, lifecycle controls/timeouts, wait detection, redaction/metadata, durable state, and full cleanup.",
+  "last_cycle_summary": "Cycle 4 implemented, locally verified, and opened PR #7 for the bounded M1 per-run timeout slice: required positive timeout_milliseconds, typed timed_out terminal events, completion-before-timeout precedence, direct-child kill/reap, prior-output preservation, and capacity release. Independent review is clear. M1 remains active and incomplete; CI and merge are pending.",
   "updated_at": "2026-07-18"
 }
