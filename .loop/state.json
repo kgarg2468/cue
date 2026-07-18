@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 15,
+  "cycle": 16,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,7 +20,7 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 15: delivered M1 worktree isolation + cleanup (S10-001 remainder). sol worker implemented opt-in worktree_repository on start_process: private 0700 worktree under a canonicalized managed temp root, generated capture-delegate/run-<sanitized-id>-<nonce> branch, worktree_path/worktree_branch in run_metadata, terminal-first synchronous cleanup, worktree_failed terminal frames; Swift worktreeRepository param + .worktreeFailed. Orchestrator fixed a macOS /var->/private/var test comparison and a swift-format violation. Red evidence (6 tests fail vs main), full suite green, parity exit 0, runtime demo green. sol review: 3 blockers/6 majors/3 minors \u2014 confirmed+fixed: shutdown-vs-cleanup race (cleanup-blocker guard on ActiveRuns), path canonicalization hardening, bounded kill-on-deadline git runner (hook hangs), branch-ownership preflight before branch -D, nonce-collision test pinning, timeout/spawn-failure cleanup tests, 0700 assertion. Dispositioned as pre-existing/accepted: write-timeout wedge class and zero-terminal-frame error paths (deferred durability slice), disconnect bounded by mandatory timeout, old-backend silent field-ignore (pty precedent). PR #25 squash-merged (2a5406b). Post-fix suite: 18 lib + 13 health_socket + 54 process_lifecycle Rust, 24 Swift. Next cycle: durable run state, or the deferred durability slice (zero-terminal-frame resource errors, write-timeout wedge, unbounded stdin queue).",
-  "updated_at": "2026-07-18T21:50:50.660488+00:00",
+  "last_cycle_summary": "Cycle 16: delivered M1 run-termination durability (S10-001 durability remainder), retiring the write-wedge blocker class (PR #25 disposition) and the zero-terminal-frame major class (PRs #21/#25 dispositions). Bounded 5s post-admission write timeout with a torn-frame-safe ClientWriter dead-client flag (no byte after a torn frame; drains exit promptly; supervision joins; client death does not cancel the run); one-shot RunTerminal emitter guarantees a best-effort run_exit with additive internal_error code on every post-admission failure path, preserving id-release -> run_exit -> worktree-cleanup -> blocker-release order; Swift .internalError. sol review: 0 blockers, 1 major (detached drains past terminal emission on error paths) confirmed and fixed via centralized teardown; 3 test-soundness minors fixed with mutation checks. PR #27 squash-merged (36d3705). Tests: 22 lib + 13 health_socket + 56 process_lifecycle Rust, 25 Swift. Runtime demo: wedged run freed in ~5.1s, slow reader gets complete stream, ordinary framing unchanged. Next cycle: stdin-queue byte cap and/or crash-orphan durable cleanup (S10-001 final remainder), then M2 domain/persistence.",
+  "updated_at": "2026-07-18T22:28:02.723096+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
