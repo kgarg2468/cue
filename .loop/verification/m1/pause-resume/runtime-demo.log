@@ -1,0 +1,11 @@
+run started; grandchild pid 47953
+pre-pause grandchild state: S
+pause -> {'version': 1, 'type': 'pause_response', 'run_id': 'demo', 'status': 'accepted'}
+grandchild state T (0.00s after pause accepted)
+resume -> {'version': 1, 'type': 'resume_response', 'run_id': 'demo', 'status': 'accepted'}
+grandchild state S (0.00s after resume accepted)
+cancel -> {'version': 1, 'type': 'cancel_response', 'run_id': 'demo', 'status': 'accepted'}
+terminal frame: {'version': 1, 'type': 'run_exit', 'run_id': 'demo', 'exit_code': None, 'error_code': 'cancelled'} (0.01s after cancel accepted)
+grandchild dead 0.01s after cancel accepted
+backend exit code: 0
+socket removed: True
