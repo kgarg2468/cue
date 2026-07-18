@@ -1,0 +1,5 @@
+FIRST FRAME: {"version":1,"type":"run_output","run_id":"demo-cancel","stream":"stdout","output":"ready"}
+CANCEL RESPONSE: {"version":1,"type":"cancel_response","run_id":"demo-cancel","status":"accepted"}
+FRAME: {"version":1,"type":"run_exit","run_id":"demo-cancel","exit_code":null,"error_code":"cancelled"}
+terminal received 0.01s after cancel (child had 5s sleep + 5s timeout)
+POST-EXIT CANCEL: {"version":1,"type":"cancel_response","run_id":"demo-cancel","status":"not_found"}
