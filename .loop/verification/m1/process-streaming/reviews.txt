@@ -1,0 +1,16 @@
+Capture Delegate M1 process-streaming reviews
+Timestamp: 2026-07-18T06:45:22Z
+
+Correctness review: CLEAR
+Reviewer: independent Opus code-reviewer a2fd794bbfbf2fdb2
+Scope: backend/src/lib.rs, backend/tests/process_lifecycle.rs, Sources/CaptureDelegateIPC/IPCClient.swift, Tests/CaptureDelegateIPCTests/IPCClientTests.swift, Tests/CaptureDelegateIntegrationTests/ProcessLifecycleTests.swift
+Verified: try_acquire ownership/release, bounded process admission, no waiting process threads, exactly one terminal frame, output ordering, descendant-held pipe handling, disconnect reaping, variadic fcntl, frame/deadline agreement, no production shell.
+Accepted nonblocking/deferred limitations: silent disconnected child and connected backpressured client can retain one of eight bounded process slots until child exit; thread/fcntl exhaustion may yield EOF; truncated invalid UTF-8 tail may omit a replacement scalar.
+
+Security review: CLEAR
+Reviewer: independent Opus code-reviewer aeec79cb362fb6997
+Verified: direct Command::new(executable).args(arguments), no shell interpolation, bounded frames and UTF-8 carry, bounded connection/process pools, safe fcntl use, SIGPIPE behavior, cleanup/reaping, run_id association, typed non-disclosing errors, socket identity cleanup.
+Threat model: same-user client over a mode-0600 Unix socket; authorization policies and manifests remain later milestones.
+Follow-up: production backend launcher does not exist yet. When added, it must create/verify a user-owned mode-0700 runtime directory before spawning. Existing verification harness does so; full-verification.txt confirms runtime_directory_mode=700 and socket_mode=600. On macOS the mode-0600 socket itself denies cross-user connect; the parent-directory requirement additionally prevents path squatting and substitution races.
+
+Verdict: CLEAR for this bounded M1 slice. M1 remains incomplete: PTY, pause/resume/cancel, configurable timeout, waiting-input detection, redaction/metadata, durable state, and full cleanup remain pending.

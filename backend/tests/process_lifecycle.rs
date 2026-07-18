@@ -1,0 +1,500 @@
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+static TEMP_SOCKET_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct BackendProcess {
+    child: Child,
+    directory: PathBuf,
+    socket_path: PathBuf,
+}
+
+impl Drop for BackendProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.socket_path);
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+fn start_backend() -> BackendProcess {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("backend should be inside repository");
+    let directory = repository.join("target").join(format!(
+        "ct-{}-{}",
+        std::process::id(),
+        TEMP_SOCKET_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).expect("test directory should be created");
+    let socket_path = repository.join(format!(
+        "p-{}-{}.sock",
+        std::process::id(),
+        TEMP_SOCKET_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+        ])
+        .spawn()
+        .expect("backend should start");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        match UnixStream::connect(&socket_path) {
+            Ok(stream) => {
+                drop(stream);
+                return BackendProcess {
+                    child,
+                    directory,
+                    socket_path,
+                };
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                thread::yield_now()
+            }
+            Err(error) => panic!("backend socket should accept connections: {error}"),
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("backend did not accept socket connections");
+}
+
+#[test]
+fn cat_streams_output_before_one_terminal_exit_frame() {
+    let backend = start_backend();
+    let existing_file = backend.directory.join("existing.txt");
+    fs::write(&existing_file, "present output\n").expect("existing fixture should be written");
+    let missing_file = backend.directory.join("missing.txt");
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "rust-run",
+        "executable": "/bin/cat",
+        "arguments": [existing_file, missing_file],
+    });
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let frame_lines: Vec<String> = BufReader::new(stream)
+        .lines()
+        .map(|line| line.expect("frame should be readable"))
+        .collect();
+    assert!(
+        frame_lines.iter().all(|frame| frame.len() < 8 * 1024),
+        "every response frame must remain bounded"
+    );
+    let frames: Vec<serde_json::Value> = frame_lines
+        .iter()
+        .map(|line| serde_json::from_str(line).expect("frame JSON"))
+        .collect();
+    let terminal_indexes: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| (frame["type"] == "run_exit").then_some(index))
+        .collect();
+
+    assert_eq!(
+        terminal_indexes,
+        vec![frames.len() - 1],
+        "terminal must be unique and last"
+    );
+    assert!(frames.iter().any(|frame| {
+        frame["type"] == "run_output"
+            && frame["run_id"] == "rust-run"
+            && frame["stream"] == "stdout"
+            && frame["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("present output"))
+    }));
+    assert!(frames.iter().any(|frame| {
+        frame["type"] == "run_output"
+            && frame["run_id"] == "rust-run"
+            && frame["stream"] == "stderr"
+            && frame["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("missing.txt"))
+    }));
+    assert!(
+        frames.last().expect("terminal frame")["exit_code"]
+            .as_i64()
+            .is_some_and(|exit_code| exit_code != 0),
+        "cat should report a nonzero exit code for the missing file"
+    );
+}
+
+#[test]
+fn cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary() {
+    let backend = start_backend();
+    let fixture = backend.directory.join("utf8-split.txt");
+    let expected = format!("{}€", "a".repeat(1023));
+    fs::write(&fixture, &expected).expect("UTF-8 fixture should be written");
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "utf8-run",
+        "executable": "/bin/cat",
+        "arguments": [fixture],
+    });
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+    let output: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+
+    assert_eq!(output, expected);
+    assert!(!output.contains('\u{fffd}'));
+}
+
+#[test]
+fn streaming_write_survives_backpressure_longer_than_the_request_timeout() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "backpressure-run",
+        "executable": "/usr/bin/seq",
+        "arguments": ["1", "500000"],
+    });
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    thread::sleep(Duration::from_millis(600));
+    let frame_lines: Vec<String> = BufReader::new(stream)
+        .lines()
+        .map(|line| line.expect("complete frame should be readable after draining"))
+        .collect();
+    let frames: Vec<serde_json::Value> = frame_lines
+        .iter()
+        .map(|line| serde_json::from_str(line).expect("every frame should be complete JSON"))
+        .collect();
+
+    assert!(
+        frames.iter().any(|frame| {
+            frame["type"] == "run_output"
+                && frame["run_id"] == "backpressure-run"
+                && frame["output"]
+                    .as_str()
+                    .is_some_and(|output| !output.is_empty())
+        }),
+        "stream should retain output after backpressure"
+    );
+    assert!(
+        frames
+            .last()
+            .is_some_and(|frame| frame["type"] == "run_exit"),
+        "stream should finish with a complete terminal frame"
+    );
+}
+
+#[test]
+fn nonexistent_executable_returns_one_spawn_failure_terminal_frame() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "missing-run",
+        "executable": "/definitely/does/not/exist/capture-delegate",
+        "arguments": [],
+    });
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert_eq!(frames[0]["run_id"], "missing-run");
+    assert!(frames[0]["exit_code"].is_null());
+    assert_eq!(frames[0]["error_code"], "spawn_failed");
+}
+
+#[test]
+fn disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "disconnect-run",
+        "executable": "/usr/bin/yes",
+        "arguments": ["disconnect-regression"],
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let mut first_frame = String::new();
+    let mut reader = BufReader::new(stream);
+    reader
+        .read_line(&mut first_frame)
+        .expect("first output frame should be readable");
+    let first_frame: serde_json::Value =
+        serde_json::from_str(&first_frame).expect("first output frame should be JSON");
+    assert_eq!(first_frame["type"], "run_output");
+
+    let child_deadline = Instant::now() + Duration::from_secs(2);
+    let child_pid = loop {
+        if let Some(pid) = child_pids(backend.child.id()).into_iter().next() {
+            break pid;
+        }
+        assert!(
+            Instant::now() < child_deadline,
+            "yes child should become observable"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    drop(reader);
+
+    let exit_deadline = Instant::now() + Duration::from_secs(2);
+    while process_exists(child_pid) && Instant::now() < exit_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let child_survived = process_exists(child_pid);
+    if child_survived {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &child_pid.to_string()])
+            .status();
+    }
+
+    let health_started = Instant::now();
+    let mut health =
+        UnixStream::connect(&backend.socket_path).expect("health client should connect");
+    health
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("health read timeout should configure");
+    health
+        .write_all(b"{\"version\":1,\"type\":\"health\"}\n")
+        .expect("health request should write");
+    let mut health_frame = String::new();
+    BufReader::new(health)
+        .read_line(&mut health_frame)
+        .expect("health response should be readable");
+    let health_frame: serde_json::Value =
+        serde_json::from_str(&health_frame).expect("health response should be JSON");
+
+    assert_eq!(health_frame["status"], "ok");
+    assert!(health_started.elapsed() < Duration::from_secs(1));
+    assert!(!child_survived, "yes child must be reaped after disconnect");
+}
+
+#[test]
+fn inherited_output_pipes_do_not_delay_the_terminal_frame() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "inherited-pipe-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "(sleep 5) & exit 0"],
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let started = Instant::now();
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should arrive promptly")).expect("frame JSON")
+        })
+        .collect();
+
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(
+        frames
+            .last()
+            .is_some_and(|frame| { frame["type"] == "run_exit" && frame["exit_code"] == 0 })
+    );
+}
+
+#[test]
+fn health_remains_prompt_while_eight_process_slots_are_occupied() {
+    let backend = start_backend();
+    let mut process_streams = Vec::new();
+    for index in 0..8 {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": format!("blocked-run-{index}"),
+            "executable": "/bin/sleep",
+            "arguments": ["5"],
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        process_streams.push(stream);
+    }
+
+    let child_deadline = Instant::now() + Duration::from_secs(2);
+    let child_processes = loop {
+        let children = child_pids(backend.child.id());
+        if children.len() == 8 || Instant::now() >= child_deadline {
+            break children;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if child_processes.len() != 8 {
+        for pid in &child_processes {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        panic!("all eight process slots should become occupied");
+    }
+
+    let ninth_request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "capacity-run",
+        "executable": "/bin/sleep",
+        "arguments": ["5"],
+    });
+    let mut ninth_stream =
+        UnixStream::connect(&backend.socket_path).expect("ninth client should connect");
+    ninth_stream
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .expect("ninth read timeout should configure");
+    let ninth_started = Instant::now();
+    ninth_stream
+        .write_all(format!("{ninth_request}\n").as_bytes())
+        .expect("ninth request should write");
+    let mut ninth_frame = String::new();
+    BufReader::new(ninth_stream)
+        .read_line(&mut ninth_frame)
+        .expect("ninth request should receive a prompt terminal response");
+    assert!(ninth_started.elapsed() < Duration::from_secs(1));
+    let ninth_frame: serde_json::Value =
+        serde_json::from_str(&ninth_frame).expect("ninth response should be JSON");
+    assert_eq!(ninth_frame["type"], "run_exit");
+    assert_eq!(ninth_frame["run_id"], "capacity-run");
+    assert!(ninth_frame["exit_code"].is_null());
+    assert_eq!(ninth_frame["error_code"], "capacity_exhausted");
+    assert!(
+        child_pids(backend.child.id()).len() <= 8,
+        "a capacity rejection must not create another child process"
+    );
+
+    let socket_path = backend.socket_path.clone();
+    let (health_sender, health_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            let mut stream = UnixStream::connect(socket_path).map_err(|error| error.to_string())?;
+            stream
+                .set_read_timeout(Some(Duration::from_millis(750)))
+                .map_err(|error| error.to_string())?;
+            stream
+                .write_all(b"{\"version\":1,\"type\":\"health\"}\n")
+                .map_err(|error| error.to_string())?;
+            let mut frame = String::new();
+            BufReader::new(stream)
+                .read_line(&mut frame)
+                .map_err(|error| error.to_string())?;
+            Ok(frame)
+        })();
+        let _ = health_sender.send(result);
+    });
+    let health_result = health_receiver.recv_timeout(Duration::from_secs(1));
+
+    for pid in &child_processes {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    drop(process_streams);
+
+    let health_frame = health_result
+        .expect("health request should finish promptly")
+        .expect("health request should succeed");
+    let health_frame: serde_json::Value =
+        serde_json::from_str(&health_frame).expect("health response should be JSON");
+    assert_eq!(health_frame["status"], "ok");
+    assert!(
+        child_pids(backend.child.id()).len() <= 8,
+        "child count must remain within the process-slot limit"
+    );
+}
+
+fn child_pids(parent_pid: u32) -> Vec<u32> {
+    let output = Command::new("/usr/bin/pgrep")
+        .args(["-P", &parent_pid.to_string()])
+        .output()
+        .expect("child process query should run");
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8(output.stdout)
+        .expect("child process query should be UTF-8")
+        .lines()
+        .map(|line| line.parse().expect("child PID should be numeric"))
+        .collect()
+}
+
+fn process_exists(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .expect("process observation should run")
+        .success()
+}

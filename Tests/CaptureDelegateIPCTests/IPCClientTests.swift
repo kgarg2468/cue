@@ -9,6 +9,24 @@ func healthRequestJSON() {
     #expect(IPCClient.healthRequest == "{\"version\":1,\"type\":\"health\"}\n")
 }
 
+@Test("start process request JSON is typed and newline delimited")
+func startProcessRequestJSON() {
+    let request = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"]
+    )
+
+    #expect(request.hasSuffix("\n"))
+    let data = try! #require(request.dropLast().data(using: .utf8))
+    let json = try! #require(try! JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "start_process")
+    #expect(json["run_id"] as? String == "run-1")
+    #expect(json["executable"] as? String == "/bin/cat")
+    #expect(json["arguments"] as? [String] == ["first", "second"])
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)
@@ -25,23 +43,36 @@ func closedPeerDoesNotRaiseSIGPIPE() throws {
     #expect(receivedError)
 }
 
-@Test("stalled response fails within the client read deadline")
-func stalledResponseIsBounded() throws {
+@Test("a quiet process may send its first output frame after the frame deadline")
+func delayedFirstProcessFrameSucceeds() throws {
     let descriptors = try localSocketPair()
     defer {
         _ = Darwin.close(descriptors.reader)
         _ = Darwin.close(descriptors.writer)
     }
 
+    let response =
+        "{\"version\":1,\"type\":\"run_output\",\"run_id\":\"quiet-run\",\"stream\":\"stdout\",\"output\":\"ready\"}\n"
+    let writerFinished = DispatchSemaphore(value: 0)
+    Thread {
+        defer { writerFinished.signal() }
+        usleep(700_000)
+        try? writeAll(Array(response.utf8), to: descriptors.writer)
+    }.start()
+
     let started = Date()
+    var receivedResponse: String?
     var receivedError = false
     do {
-        _ = try IPCClient.readResponseLine(from: descriptors.reader)
+        receivedResponse = try IPCClient.readResponseLine(from: descriptors.reader)
     } catch {
         receivedError = true
     }
 
-    #expect(receivedError)
+    #expect(writerFinished.wait(timeout: .now() + 2) == .success)
+    #expect(!receivedError)
+    #expect(receivedResponse == response)
+    #expect(Date().timeIntervalSince(started) >= 0.6)
     #expect(Date().timeIntervalSince(started) < 2)
 }
 
@@ -116,6 +147,133 @@ func validResponseRemainsReadable() throws {
     try writeAll(Array(response.utf8), to: descriptors.writer)
 
     #expect(try IPCClient.readResponseLine(from: descriptors.reader) == response)
+}
+
+@Test("process output callback fires before the terminal frame is sent")
+func processOutputStreamsBeforeTerminalFrame() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    let outputReceived = DispatchSemaphore(value: 0)
+    let readingFinished = DispatchSemaphore(value: 0)
+    let collector = ProcessEventCollector()
+    Thread {
+        defer { readingFinished.signal() }
+        do {
+            try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "run-1") {
+                event in
+                collector.append(event)
+                if case .output = event {
+                    outputReceived.signal()
+                }
+            }
+        } catch {
+            collector.record(error)
+        }
+    }.start()
+
+    usleep(300_000)
+    try writeAll(
+        Array(
+            "{\"version\":1,\"type\":\"run_output\",\"run_id\":\"run-1\",\"stream\":\"stdout\",\"output\":\"first\"}\n"
+                .utf8),
+        to: descriptors.writer
+    )
+    #expect(outputReceived.wait(timeout: .now() + 1) == .success)
+    #expect(readingFinished.wait(timeout: .now()) == .timedOut)
+
+    usleep(300_000)
+    try writeAll(
+        Array(
+            "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"run-1\",\"exit_code\":0}\n".utf8),
+        to: descriptors.writer
+    )
+    #expect(readingFinished.wait(timeout: .now() + 1) == .success)
+
+    let result = collector.result()
+    #expect(result.error == nil)
+    #expect(
+        result.events == [
+            .output(runID: "run-1", stream: .stdout, output: "first"),
+            .exit(runID: "run-1", exitCode: 0, errorCode: nil),
+        ])
+}
+
+@Test("run exit decodes a typed spawn failure")
+func spawnFailureExitDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    let collector = ProcessEventCollector()
+    try writeAll(
+        Array(
+            "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"missing-run\",\"exit_code\":null,\"error_code\":\"spawn_failed\"}\n"
+                .utf8),
+        to: descriptors.writer
+    )
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "missing-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .exit(runID: "missing-run", exitCode: nil, errorCode: .spawnFailed)
+        ])
+}
+
+@Test("run exit decodes a typed capacity exhaustion failure")
+func capacityExhaustionExitDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    try writeAll(
+        Array(
+            "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"capacity-run\",\"exit_code\":null,\"error_code\":\"capacity_exhausted\"}\n"
+                .utf8),
+        to: descriptors.writer
+    )
+    let collector = ProcessEventCollector()
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "capacity-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .exit(runID: "capacity-run", exitCode: nil, errorCode: .capacityExhausted)
+        ])
+}
+
+private final class ProcessEventCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [ProcessEvent] = []
+    private var error: Error?
+
+    func append(_ event: ProcessEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func record(_ error: Error) {
+        lock.lock()
+        self.error = error
+        lock.unlock()
+    }
+
+    func result() -> (events: [ProcessEvent], error: Error?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (events, error)
+    }
 }
 
 private func localSocketPair() throws -> (reader: Int32, writer: Int32) {

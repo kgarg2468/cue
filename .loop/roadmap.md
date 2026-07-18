@@ -23,7 +23,7 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 ## Global release controls
 
 - M0 is verified: M0-FOUNDATION-001 passed fresh-login native-window re-verification, and PR `#1` remains merged as `3e6cf85`.
-- M1 is dependency-ready; there is no active milestone branch or PR after M0 closeout.
+- M1 is active on `loop/m1-process-streaming` in PR #5. The first bounded direct-process/streaming slice is locally verified and independently reviewed; CI/merge and later M1 lifecycle slices remain pending.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - M14 may close only against the full specification, including positioning and qualitative success criteria.
