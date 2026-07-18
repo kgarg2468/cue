@@ -109,3 +109,13 @@ Status: delivered through PR #9; M1 remains in progress
 - Environmental note: `cleanup_does_not_unlink_replacement_socket` fails in any checkout whose path exceeds SUN_LEN for the test socket; unrelated to this slice.
 
 Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descendant process groups) from fresh `origin/main`; keep M1 and partial traceability rows in progress.
+
+## Cycle 7 M1 descendant process-group termination — 2026-07-18
+
+- Acquired the lock cleanly (token 42fe659c) with no contention; job a8a4fe0a expires 2026-07-25, so no renewal was due.
+- Slice: every run now leads its own process group (`Command::process_group(0)`) and a `kill_process_group` helper (SIGKILL to the negative pgid plus direct-kill fallback) replaces all five direct `child.kill()` sites in `run_process`, so descendants die on cancel, timeout, natural leader exit, and the error paths. `libc = "0.2"` added.
+- Implementation by a Codex gpt-5.6-terra worker (high effort) within an exact three-file allowlist; diff gate clean. The worker's sandbox blocked Unix-socket binding, so red→green TDD evidence, the full suite, CI parity, stress reruns, and release-binary runtime demos were produced in the workspace.
+- Independent Codex sol review (high): no blockers, 3 major + 2 minor. Fixed pre-merge: natural leader exit skipped the group kill (`sh -c 'sleep 30 & exit 0'` leaked the descendant even after an accepted cancel — Exited branch now group-kills first, with a red-verified regression test and runtime demo showing the grandchild dead 0.00s after run_exit); pid-reuse-unsafe test cleanup (replaced with an identity-checked, panic-safe DescendantGuard); timeout-margin and pid-parse robustness (a first fix attempt set run timeout equal to the client read timeout and deterministically raced — caught by stress reruns). Flagged as future M1 scope: backend-shutdown group cleanup / dev Ctrl-C semantics, inherited run stdin, inherent post-reap pgid-reuse window.
+- Evidence: `.loop/verification/m1/process-groups/` (cargo suite 9+13+17 green, three descendant tests 8/8 stress, verify-m0 parity green twice, cancel and natural-exit runtime demos).
+- Delivered: PR #11 (`59f0f52`, `a07a6e2`), both verify-m0 CI runs green on both commits, squash-merged as `8877242`; closeout in this PR.
+- Status: merged; M1 remains in progress. Next cycle: one bounded M1 slice — backend-shutdown active-run-group cleanup, or pause/resume.
