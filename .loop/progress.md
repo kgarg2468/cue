@@ -176,3 +176,12 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Independent sol review: 0 blockers, 2 majors, 2 minors. Fixed: partial-line VEOF (queue tracks written tail, appends double VEOF), pty timeout + cancel metadata-order tests, Swift wire-format pinning. Accepted/deferred: drain-thread-spawn failure yielding zero terminal frames — same pre-existing class as the pipe path; goes to the durability slice.
 - Closeout: traceability S10-001 PTY portion recorded; state.json cycle 13.
 - Next cycle: waiting-input detection (S10-009, now unlocked by PTY) or durable run state.
+
+## Cycle 14 — 2026-07-18
+
+- Slice: M1 waiting-input detection (S10-009). Branch `loop/m1-input-wait`, PR #23, squash-merged as `1ad2785`.
+- Implementation (sol worker, high effort, diff-gated +622/−21; fix round +247/−23): opt-in `input_wait_detect_milliseconds` on start_process; the backend emits at most one `run_input_waiting` frame per quiet episode when output has been idle past the threshold, the stdin queue is empty/not mid-write, and the child's CPU time advanced <30ms over the window (proc_pidinfo PROC_PIDTASKINFO, mach-timebase converted); activity resets episodes; never after a terminal path; pipe + PTY. Swift: `inputWaitDetectMilliseconds` parameter and a `ProcessEvent.inputWaiting` decode case (orchestrator addition after the worker flagged the decode gap).
+- ADR-007 gate: red evidence (3 positive/validation tests fail vs main; paused-suppression test fails vs pre-fix code), cargo 15+13+46 green, `verify-m0.sh` exit 0 pre- and post-fix (24 Swift tests; first run caught a swift-format layout error, fixed), runtime demo (waiting frame at 502ms of a 500ms threshold, two quiet episodes across delivered input, none after run_exit, clean shutdown). Evidence: `.loop/verification/m1/input-wait/`.
+- Independent sol review: 1 blocker (supervision tick blocked on the writer mutex under client backpressure — fixed with try_lock + skip-tick; adjacent `?`-propagation defect fixed in the same pass), 1 major (paused runs emitted spurious waiting frames — suppressed while paused, rebaselined on resume), 1 minor (busy-silent test machine-dependent — wall-clock bound now). All confirmed and fixed pre-merge; regression tests added for the blocker and major.
+- Closeout: S10-009 → implemented; S10-001 narrowed to worktree + durable cleanup; state.json cycle 14.
+- Next cycle: durable run state or temp/worktree cleanup (S10-001 remainder).
