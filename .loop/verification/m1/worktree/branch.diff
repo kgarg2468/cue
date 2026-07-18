@@ -1,0 +1,1304 @@
+diff --git a/.loop/verification/m1/worktree/cargo-test.log b/.loop/verification/m1/worktree/cargo-test.log
+new file mode 100644
+index 0000000..3f4b5a5
+--- /dev/null
++++ b/.loop/verification/m1/worktree/cargo-test.log
+@@ -0,0 +1,113 @@
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
++     Running unittests src/lib.rs (/Users/krishgarg/conductor/workspaces/cue/moroni/target/debug/deps/capture_delegate_backend-39fb6de77e1f3fc5)
++
++running 15 tests
++test tests::active_run_registry_rejects_duplicates_and_releases_ids_on_teardown ... ok
++test tests::completed_child_wins_over_a_pending_cancellation ... ok
++test tests::completed_child_wins_over_an_elapsed_timeout ... ok
++test tests::closing_stdin_rejects_later_input ... ok
++test tests::pausing_before_the_process_group_is_known_records_the_pause_without_signalling ... ok
++test tests::shutdown_cancels_existing_runs_and_rejects_new_registrations ... ok
++test tests::cleanup_does_not_unlink_replacement_socket ... ok
++test tests::exhausted_process_slots_emit_a_terminal_capacity_failure_without_waiting ... ok
++test tests::nonexistent_executable_emits_a_structured_terminal_frame ... ok
++test tests::benign_output_is_not_changed_by_redaction ... ok
++test tests::output_scalar_split_at_read_boundary_is_not_corrupted ... ok
++test tests::secret_pattern_classes_are_redacted_and_counted ... ok
++test tests::input_buffered_before_stdin_is_published_is_delivered_in_order ... ok
++test tests::cat_process_outputs_before_one_exit_frame ... ok
++test tests::streaming_write_outlives_the_request_write_timeout ... ok
++
++test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
++
++     Running unittests src/main.rs (/Users/krishgarg/conductor/workspaces/cue/moroni/target/debug/deps/capture_delegate_backend-f65f386cbb25ec80)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/health_socket.rs (/Users/krishgarg/conductor/workspaces/cue/moroni/target/debug/deps/health_socket-9d38009ee7e84a8e)
++
++running 13 tests
++test bound_socket_is_private_regardless_of_umask ... ok
++test malformed_client_does_not_terminate_service ... ok
++test response_write_failure_does_not_terminate_service ... ok
++test incomplete_client_does_not_terminate_service ... ok
++test health_request_receives_ok_response_before_deadline ... ok
++test incompatible_protocol_version_receives_actionable_error_frame ... ok
++test stalled_client_does_not_monopolize_accept_loop ... ok
++test disconnected_client_does_not_terminate_service ... ok
++test unknown_request_type_receives_actionable_error_frame ... ok
++test valid_but_unterminated_request_is_rejected_and_service_survives ... ok
++test oversized_unterminated_client_is_bounded_and_service_survives ... ok
++test stalled_clients_are_backpressured_by_bounded_worker_pool ... ok
++test byte_dribbling_client_is_closed_by_total_frame_deadline_and_service_survives ... ok
++
++test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
++
++     Running tests/process_lifecycle.rs (/Users/krishgarg/conductor/workspaces/cue/moroni/target/debug/deps/process_lifecycle-bc1e9043f46530e8)
++
++running 52 tests
++test cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary ... ok
++test cat_streams_output_before_one_terminal_exit_frame ... ok
++test close_stdin_establishes_a_stable_input_boundary ... ok
++test cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_terminal_last ... ok
++test input_controls_on_unknown_runs_return_not_found ... ok
++test cancel_kills_descendant_processes ... ok
++kill: 21549: No such process
++kill: 21549: No such process
++test disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive ... ok
++test inherited_output_pipes_do_not_delay_the_terminal_frame ... ok
++test cancellation_and_timeout_races_emit_one_terminal_without_hanging ... ok
++test duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown ... ok
++test health_remains_prompt_while_eight_process_slots_are_occupied ... ok
++test input_wait_rejects_invalid_values ... ok
++test invalid_timeouts_are_rejected_before_process_admission ... ok
++test malformed_input_controls_return_typed_errors ... ok
++test natural_leader_exit_kills_descendant_processes ... ok
++test non_pty_stderr_stays_separate ... ok
++test nonexistent_executable_returns_one_spawn_failure_terminal_frame ... ok
++test oversized_run_metadata_is_truncated_before_run_exit ... ok
++test pause_and_resume_control_the_run_process_group ... ok
++test pause_unknown_run_and_malformed_pause_return_typed_responses ... ok
++test cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full ... ok
++test pty_cancel_kills_the_process_group ... ok
++test pty_close_stdin_flushes_a_partial_line_to_eof ... ok
++test pty_input_round_trip_with_echo_disabled ... ok
++test pty_merges_stderr_into_stdout ... ok
++test pty_output_is_redacted_and_counted ... ok
++test pty_run_sees_a_controlling_tty ... ok
++test pty_run_times_out_like_pipe_runs ... ok
++test run_metadata_frame_precedes_run_exit_with_process_details ... ok
++test secrets_are_redacted_from_streamed_output ... ok
++test input_wait_fires_for_a_pty_run ... ok
++test send_input_and_close_stdin_drive_a_cat_run_to_natural_exit ... ok
++test input_wait_fires_for_a_quiet_pipe_run ... ok
++test spawn_failure_emits_no_metadata_frame ... ok
++test sigint_kills_active_run_groups ... ok
++test sigterm_kills_active_run_groups_and_removes_socket ... ok
++test input_wait_backpressure_does_not_wedge_cancel ... ok
++test input_wait_does_not_fire_for_busy_silent_run ... ok
++test u64_max_timeout_allows_a_completed_process ... ok
++test timed_out_runs_release_all_process_capacity ... ok
++test input_wait_absent_field_emits_no_waiting_frames ... ok
++test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
++test concurrent_worktree_runs_get_distinct_branches ... ok
++test input_wait_suppressed_while_paused ... ok
++test dirty_worktree_is_still_removed ... ok
++test worktree_cancel_still_cleans_up ... ok
++test worktree_failure_emits_structured_terminal_frame ... ok
++test worktree_request_validation ... ok
++test worktree_run_executes_in_an_isolated_worktree_and_cleans_up ... ok
++test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
++test timeout_kills_descendant_processes ... ok
++test paused_run_still_times_out_and_kills_its_process_group ... ok
++
++test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.35s
++
++   Doc-tests capture_delegate_backend
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
+diff --git a/.loop/verification/m1/worktree/red-evidence.log b/.loop/verification/m1/worktree/red-evidence.log
+new file mode 100644
+index 0000000..4a86de7
+--- /dev/null
++++ b/.loop/verification/m1/worktree/red-evidence.log
+@@ -0,0 +1,13 @@
++=== RED: new worktree tests vs origin/main lib.rs ===
++
++failures:
++    concurrent_worktree_runs_get_distinct_branches
++    dirty_worktree_is_still_removed
++    worktree_cancel_still_cleans_up
++    worktree_failure_emits_structured_terminal_frame
++    worktree_request_validation
++    worktree_run_executes_in_an_isolated_worktree_and_cleans_up
++
++test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 46 filtered out; finished in 1.58s
++
++error: test failed, to rerun pass `--test process_lifecycle`
+diff --git a/.loop/verification/m1/worktree/runtime-demo.log b/.loop/verification/m1/worktree/runtime-demo.log
+new file mode 100644
+index 0000000..0b1136f
+--- /dev/null
++++ b/.loop/verification/m1/worktree/runtime-demo.log
+@@ -0,0 +1,7 @@
++child output: ['/private/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/capture-delegate-worktrees/run-demo-wt-69ee-18c37f65aa51a818-0', 'capture-delegate/run-demo-wt-69ee-18c37f65aa51a818-0']
++metadata: worktree_path=/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/capture-delegate-worktrees/run-demo-wt-69ee-18c37f65aa51a818-0 worktree_branch=capture-delegate/run-demo-wt-69ee-18c37f65aa51a818-0
++exit: code=0 error=None
++cleanup: worktree dir removed and branch deleted: True
++worktree list now: /private/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/cue-demo-repo-18xh92i3  15406c6 [main]
++non-repo failure: exit_code=None error_code=worktree_failed types=['run_exit']
++backend exit: 0 socket removed: True
+diff --git a/.loop/verification/m1/worktree/verification.txt b/.loop/verification/m1/worktree/verification.txt
+new file mode 100644
+index 0000000..d8404a7
+--- /dev/null
++++ b/.loop/verification/m1/worktree/verification.txt
+@@ -0,0 +1,55 @@
++Slice: M1 worktree isolation + cleanup (S10-001 remainder)
++Branch: loop/m1-worktree (from origin/main = afc540f)
++Date: 2026-07-18
++Worker: gpt-5.6-sol (effort high), prompt/transcript/report in /tmp/worker-worktree/
++
++Scope
++- start_process gains optional worktree_repository (absolute path string).
++  Validation failures (non-string/empty/relative) -> invalid_start_process
++  before admission; absent/null preserves ordinary-run behavior.
++- Worktree runs execute in a private 0700 directory under
++  std::env::temp_dir()/capture-delegate-worktrees/ (symlink/non-dir root
++  rejected) on generated branch capture-delegate/run-<sanitized-id>-<nonce>.
++- run_metadata reports worktree_path/worktree_branch (skip-serialized when
++  absent). Terminal-first cleanup: run_exit written+flushed, then synchronous
++  best-effort cleanup (worktree remove --force -> scoped remove_dir_all ->
++  prune -> branch -D), errors swallowed; idempotent RunWorktree drop guard.
++- Runtime worktree failures emit run_exit exit_code=null
++  error_code="worktree_failed".
++- Swift: worktreeRepository parameter on startProcessRequest;
++  ProcessExitErrorCode.worktreeFailed.
++
++Diff gate
++- git status: exactly the 4 allowlisted files modified
++  (backend/src/lib.rs, backend/tests/process_lifecycle.rs,
++  Sources/CaptureDelegateIPC/IPCClient.swift,
++  Tests/CaptureDelegateIPCTests/IPCClientTests.swift); +666/-10 — accepted.
++
++Evidence (this directory)
++- red-evidence.log: 6 new worktree lifecycle tests FAIL against
++  origin/main backend/src/lib.rs (checkout origin/main -- lib.rs, rerun,
++  restore). Worker separately captured Swift red pre-implementation.
++- cargo-test.log: full suite green — 15 lib + 13 health_socket +
++  52 process_lifecycle (46 prior + 6 worktree), 0 failed.
++- verify-m0-parity.log: ./scripts/verify-m0.sh exit 0 (fmt, clippy -D
++  warnings, Rust tests, swift-format strict, swiftlint, Swift tests,
++  release builds, traceability validation).
++- runtime-demo.log: release backend against a scratch git repo —
++  child pwd inside managed root on capture-delegate/run-* branch, metadata
++  carries both worktree fields, cleanup verified by polling (dir gone,
++  git worktree list clean, no capture-delegate/* branches survive a dirty
++  worktree), non-repo request yields error_code=worktree_failed, backend
++  exits 0 and removes its socket.
++
++Orchestrator fixes on top of worker slice
++- process_lifecycle.rs isolation test compared child pwd byte-for-byte with
++  metadata worktree_path; fails on macOS /var -> /private/var symlink.
++  Fixed by comparing through the canonicalized managed root (commit
++  "Compare worktree pwd through the canonicalized managed root").
++- One strict swift-format line-break violation in IPCClientTests.swift,
++  auto-formatted (same class of issue as cycle 14).
++
++Known limitation
++- Codex sandbox cannot bind filesystem Unix sockets; worker verified via
++  cargo test --no-run + a temporary UnixStream::pair probe (removed).
++  Full socket integration tests ran locally (cargo-test.log).
+diff --git a/.loop/verification/m1/worktree/verify-m0-parity.log b/.loop/verification/m1/worktree/verify-m0-parity.log
+new file mode 100644
+index 0000000..5334384
+--- /dev/null
++++ b/.loop/verification/m1/worktree/verify-m0-parity.log
+@@ -0,0 +1,196 @@
++    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
++    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.02s
++     Running unittests src/lib.rs (target/debug/deps/capture_delegate_backend-39fb6de77e1f3fc5)
++
++running 15 tests
++test tests::active_run_registry_rejects_duplicates_and_releases_ids_on_teardown ... ok
++test tests::completed_child_wins_over_an_elapsed_timeout ... ok
++test tests::completed_child_wins_over_a_pending_cancellation ... ok
++test tests::closing_stdin_rejects_later_input ... ok
++test tests::pausing_before_the_process_group_is_known_records_the_pause_without_signalling ... ok
++test tests::cleanup_does_not_unlink_replacement_socket ... ok
++test tests::shutdown_cancels_existing_runs_and_rejects_new_registrations ... ok
++test tests::exhausted_process_slots_emit_a_terminal_capacity_failure_without_waiting ... ok
++test tests::nonexistent_executable_emits_a_structured_terminal_frame ... ok
++test tests::benign_output_is_not_changed_by_redaction ... ok
++test tests::output_scalar_split_at_read_boundary_is_not_corrupted ... ok
++test tests::secret_pattern_classes_are_redacted_and_counted ... ok
++test tests::input_buffered_before_stdin_is_published_is_delivered_in_order ... ok
++test tests::cat_process_outputs_before_one_exit_frame ... ok
++test tests::streaming_write_outlives_the_request_write_timeout ... ok
++
++test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
++
++     Running unittests src/main.rs (target/debug/deps/capture_delegate_backend-f65f386cbb25ec80)
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++     Running tests/health_socket.rs (target/debug/deps/health_socket-9d38009ee7e84a8e)
++
++running 13 tests
++test health_request_receives_ok_response_before_deadline ... ok
++test bound_socket_is_private_regardless_of_umask ... ok
++test incomplete_client_does_not_terminate_service ... ok
++test malformed_client_does_not_terminate_service ... ok
++test response_write_failure_does_not_terminate_service ... ok
++test incompatible_protocol_version_receives_actionable_error_frame ... ok
++test disconnected_client_does_not_terminate_service ... ok
++test stalled_client_does_not_monopolize_accept_loop ... ok
++test unknown_request_type_receives_actionable_error_frame ... ok
++test valid_but_unterminated_request_is_rejected_and_service_survives ... ok
++test oversized_unterminated_client_is_bounded_and_service_survives ... ok
++test byte_dribbling_client_is_closed_by_total_frame_deadline_and_service_survives ... ok
++test stalled_clients_are_backpressured_by_bounded_worker_pool ... ok
++
++test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
++
++     Running tests/process_lifecycle.rs (target/debug/deps/process_lifecycle-bc1e9043f46530e8)
++
++running 52 tests
++test cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary ... ok
++test cat_streams_output_before_one_terminal_exit_frame ... ok
++test close_stdin_establishes_a_stable_input_boundary ... ok
++test cancel_kills_descendant_processes ... ok
++test cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_terminal_last ... ok
++test input_controls_on_unknown_runs_return_not_found ... ok
++test inherited_output_pipes_do_not_delay_the_terminal_frame ... ok
++kill: 25190: No such process
++kill: 25190: No such process
++test disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive ... ok
++test cancellation_and_timeout_races_emit_one_terminal_without_hanging ... ok
++test health_remains_prompt_while_eight_process_slots_are_occupied ... ok
++test duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown ... ok
++test input_wait_rejects_invalid_values ... ok
++test dirty_worktree_is_still_removed ... ok
++test malformed_input_controls_return_typed_errors ... ok
++test natural_leader_exit_kills_descendant_processes ... ok
++test non_pty_stderr_stays_separate ... ok
++test nonexistent_executable_returns_one_spawn_failure_terminal_frame ... ok
++test invalid_timeouts_are_rejected_before_process_admission ... ok
++test oversized_run_metadata_is_truncated_before_run_exit ... ok
++test pause_unknown_run_and_malformed_pause_return_typed_responses ... ok
++test pause_and_resume_control_the_run_process_group ... ok
++test pty_cancel_kills_the_process_group ... ok
++test pty_close_stdin_flushes_a_partial_line_to_eof ... ok
++test pty_input_round_trip_with_echo_disabled ... ok
++test cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full ... ok
++test pty_merges_stderr_into_stdout ... ok
++test pty_output_is_redacted_and_counted ... ok
++test pty_run_sees_a_controlling_tty ... ok
++test run_metadata_frame_precedes_run_exit_with_process_details ... ok
++test secrets_are_redacted_from_streamed_output ... ok
++test send_input_and_close_stdin_drive_a_cat_run_to_natural_exit ... ok
++test sigint_kills_active_run_groups ... ok
++test sigterm_kills_active_run_groups_and_removes_socket ... ok
++test spawn_failure_emits_no_metadata_frame ... ok
++test pty_run_times_out_like_pipe_runs ... ok
++test input_wait_fires_for_a_pty_run ... ok
++test input_wait_fires_for_a_quiet_pipe_run ... ok
++test timed_out_runs_release_all_process_capacity ... ok
++test u64_max_timeout_allows_a_completed_process ... ok
++test input_wait_backpressure_does_not_wedge_cancel ... ok
++test input_wait_does_not_fire_for_busy_silent_run ... ok
++test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
++test input_wait_absent_field_emits_no_waiting_frames ... ok
++test input_wait_suppressed_while_paused ... ok
++test concurrent_worktree_runs_get_distinct_branches ... ok
++test worktree_cancel_still_cleans_up ... ok
++test worktree_failure_emits_structured_terminal_frame ... ok
++test worktree_request_validation ... ok
++test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
++test worktree_run_executes_in_an_isolated_worktree_and_cleans_up ... ok
++test timeout_kills_descendant_processes ... ok
++test paused_run_still_times_out_and_kills_its_process_group ... ok
++
++test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.27s
++
++   Doc-tests capture_delegate_backend
++
++running 0 tests
++
++test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
++
++   Compiling capture_delegate_backend v0.1.0 (/Users/krishgarg/conductor/workspaces/cue/moroni/backend)
++    Finished `release` profile [optimized] target(s) in 1.02s
++[0/1] Planning build
++Building for production...
++[0/4] Write sources
++[1/4] Write swift-version--58304C5D6DBC2206.txt
++[3/5] Compiling CaptureDelegateIPC IPCClient.swift
++[4/7] Compiling CaptureDelegateHealth main.swift
++[4/8] Write Objects.LinkFileList
++[6/8] Compiling CaptureDelegateApp CaptureDelegateApp.swift
++[6/9] Write Objects.LinkFileList
++[7/9] Linking capture-delegate-health
++[8/9] Linking CaptureDelegateApp
++Build complete! (1.38s)
++[0/1] Planning build
++Building for debugging...
++[0/7] Write sources
++[1/7] Write swift-version--58304C5D6DBC2206.txt
++[3/5] Emitting module CaptureDelegateIPCTests
++[4/5] Compiling CaptureDelegateIPCTests IPCClientTests.swift
++[4/6] Write Objects.LinkFileList
++[5/6] Linking CaptureDelegatePackageTests
++Build complete! (0.80s)
++Test Suite 'All tests' started at 2026-07-18 14:25:46.328.
++Test Suite 'All tests' passed at 2026-07-18 14:25:46.329.
++	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
++◇ Test run started.
++↳ Testing Library Version: 1743
++↳ Target Platform: arm64e-apple-macos14.0
++◇ Test "Swift process events redact secrets and report metadata before exit" started.
++◇ Test "Rust backend and Swift health executable complete the health handshake" started.
++◇ Test "Swift process API receives cat output before one terminal event" started.
++◇ Test "nonexistent executable becomes a typed spawn failure event" started.
++◇ Test "Swift cancels a running process over a separate typed connection" started.
++◇ Test "sleeping process emits a typed timeout after preserving prior output" started.
++◇ Test "Swift starts a PTY process and observes tty-marked output" started.
++◇ Test "run input waiting decodes before the terminal frame" started.
++◇ Test "oversized response fails within the frame bound" started.
++◇ Test "Swift pauses, resumes, and cancels a running process over typed connections" started.
++◇ Test "valid response remains readable over a local socket" started.
++◇ Test "health request JSON is newline delimited" started.
++◇ Test "run exit decodes a typed spawn failure" started.
++◇ Test "run exit decodes a typed worktree failure" started.
++◇ Test "run exit decodes a typed capacity exhaustion failure" started.
++◇ Test "cancel process request JSON and accepted result are typed" started.
++◇ Test "closed peer returns an error without SIGPIPE termination" started.
++◇ Test "process output callback fires before the terminal frame is sent" started.
++◇ Test "a quiet process may send its first output frame after the frame deadline" started.
++◇ Test "byte-dribbled responses honor one total monotonic deadline" started.
++◇ Test "Swift sends input, closes stdin, and observes cat exit naturally" started.
++◇ Test "start process request JSON is typed and newline delimited" started.
++◇ Test "run exit decodes a typed timeout failure" started.
++✔ Test "run input waiting decodes before the terminal frame" passed after 0.316 seconds.
++✔ Test "valid response remains readable over a local socket" passed after 0.316 seconds.
++✔ Test "health request JSON is newline delimited" passed after 0.316 seconds.
++✔ Test "run exit decodes a typed spawn failure" passed after 0.316 seconds.
++✔ Test "run exit decodes a typed worktree failure" passed after 0.316 seconds.
++✔ Test "run exit decodes a typed capacity exhaustion failure" passed after 0.316 seconds.
++✔ Test "cancel process request JSON and accepted result are typed" passed after 0.316 seconds.
++✔ Test "closed peer returns an error without SIGPIPE termination" passed after 0.316 seconds.
++✔ Test "oversized response fails within the frame bound" passed after 0.316 seconds.
++✔ Test "nonexistent executable becomes a typed spawn failure event" passed after 0.316 seconds.
++✔ Test "Swift starts a PTY process and observes tty-marked output" passed after 0.316 seconds.
++✔ Test "Swift process events redact secrets and report metadata before exit" passed after 0.316 seconds.
++✔ Test "start process request JSON is typed and newline delimited" passed after 0.316 seconds.
++✔ Test "run exit decodes a typed timeout failure" passed after 0.316 seconds.
++✔ Test "Swift pauses, resumes, and cancels a running process over typed connections" passed after 0.328 seconds.
++✔ Test "Swift cancels a running process over a separate typed connection" passed after 0.328 seconds.
++✔ Test "Swift process API receives cat output before one terminal event" passed after 0.328 seconds.
++✔ Test "Swift sends input, closes stdin, and observes cat exit naturally" passed after 0.402 seconds.
++✔ Test "sleeping process emits a typed timeout after preserving prior output" passed after 0.531 seconds.
++✔ Test "Rust backend and Swift health executable complete the health handshake" passed after 0.595 seconds.
++✔ Test "process output callback fires before the terminal frame is sent" passed after 0.613 seconds.
++✔ Test "a quiet process may send its first output frame after the frame deadline" passed after 0.716 seconds.
++✔ Test "byte-dribbled responses honor one total monotonic deadline" passed after 1.026 seconds.
++✔ Test run with 23 tests in 0 suites passed after 1.027 seconds.
++    Finished `release` profile [optimized] target(s) in 0.01s
++[0/1] Planning build
++Building for production...
++[0/3] Write swift-version--58304C5D6DBC2206.txt
++Build complete! (0.08s)
++backend ok
+diff --git a/Sources/CaptureDelegateIPC/IPCClient.swift b/Sources/CaptureDelegateIPC/IPCClient.swift
+index 1d8af9b..dd9254f 100644
+--- a/Sources/CaptureDelegateIPC/IPCClient.swift
++++ b/Sources/CaptureDelegateIPC/IPCClient.swift
+@@ -14,6 +14,7 @@ public enum ProcessOutputStream: String, Equatable {
+ 
+ public enum ProcessExitErrorCode: String, Equatable {
+     case spawnFailed = "spawn_failed"
++    case worktreeFailed = "worktree_failed"
+     case capacityExhausted = "capacity_exhausted"
+     case timedOut = "timed_out"
+     case cancelled = "cancelled"
+@@ -129,6 +130,7 @@ public enum IPCClient {
+         timeoutMilliseconds: Int,
+         pty: Bool = false,
+         inputWaitDetectMilliseconds: Int? = nil,
++        worktreeRepository: String? = nil,
+         onEvent: (ProcessEvent) -> Void
+     ) throws {
+         let descriptor = try connect(to: socketPath)
+@@ -141,6 +143,7 @@ public enum IPCClient {
+             timeoutMilliseconds: timeoutMilliseconds,
+             pty: pty,
+             inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
++            worktreeRepository: worktreeRepository,
+             to: descriptor
+         )
+         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
+@@ -169,17 +172,22 @@ public enum IPCClient {
+         arguments: [String],
+         timeoutMilliseconds: Int,
+         pty: Bool = false,
+-        inputWaitDetectMilliseconds: Int? = nil
++        inputWaitDetectMilliseconds: Int? = nil,
++        worktreeRepository: String? = nil
+     ) -> String {
+         let ptyField = pty ? ",\"pty\":true" : ""
+         let inputWaitDetectField =
+             inputWaitDetectMilliseconds.map {
+                 ",\"input_wait_detect_milliseconds\":\($0)"
+             } ?? ""
++        let worktreeRepositoryField =
++            worktreeRepository.map {
++                ",\"worktree_repository\":\(jsonString($0))"
++            } ?? ""
+         return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
+             + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
+             + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)"
+-            + "\(inputWaitDetectField)}\n"
++            + "\(inputWaitDetectField)\(worktreeRepositoryField)}\n"
+     }
+ 
+     public static func cancelProcessRequest(runID: String) -> String {
+@@ -266,6 +274,7 @@ public enum IPCClient {
+         timeoutMilliseconds: Int,
+         pty: Bool,
+         inputWaitDetectMilliseconds: Int?,
++        worktreeRepository: String?,
+         to descriptor: Int32
+     ) throws {
+         try suppressSIGPIPE(on: descriptor)
+@@ -277,7 +286,8 @@ public enum IPCClient {
+                     arguments: arguments,
+                     timeoutMilliseconds: timeoutMilliseconds,
+                     pty: pty,
+-                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds
++                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
++                    worktreeRepository: worktreeRepository
+                 ).utf8
+             ), to: descriptor)
+     }
+diff --git a/Tests/CaptureDelegateIPCTests/IPCClientTests.swift b/Tests/CaptureDelegateIPCTests/IPCClientTests.swift
+index 4eb97cd..74d8a0b 100644
+--- a/Tests/CaptureDelegateIPCTests/IPCClientTests.swift
++++ b/Tests/CaptureDelegateIPCTests/IPCClientTests.swift
+@@ -29,6 +29,7 @@ func startProcessRequestJSON() {
+     #expect(json["timeout_milliseconds"] as? Int == 250)
+     #expect(!request.contains("pty"))
+     #expect(!request.contains("input_wait_detect_milliseconds"))
++    #expect(!request.contains("worktree_repository"))
+ 
+     let ptyRequest = IPCClient.startProcessRequest(
+         runID: "run-1",
+@@ -66,6 +67,44 @@ func startProcessRequestJSON() {
+         ptyInputWaitRequest.hasSuffix(
+             ",\"pty\":true,\"input_wait_detect_milliseconds\":500}\n")
+     )
++
++    let worktreeRequest = IPCClient.startProcessRequest(
++        runID: "run-1",
++        executable: "/bin/cat",
++        arguments: ["first", "second"],
++        timeoutMilliseconds: 250,
++        worktreeRepository: "/tmp/repo"
++    )
++    #expect(worktreeRequest.hasSuffix(",\"worktree_repository\":\"\\/tmp\\/repo\"}\n"))
++    #expect(worktreeRequest.components(separatedBy: "\"worktree_repository\"").count == 2)
++    let worktreeData = try! #require(worktreeRequest.dropLast().data(using: .utf8))
++    let worktreeJSON = try! #require(
++        try! JSONSerialization.jsonObject(with: worktreeData) as? [String: Any])
++    #expect(worktreeJSON["worktree_repository"] as? String == "/tmp/repo")
++
++    let allOptionalFieldsRequest = IPCClient.startProcessRequest(
++        runID: "run-1",
++        executable: "/bin/cat",
++        arguments: ["first", "second"],
++        timeoutMilliseconds: 250,
++        pty: true,
++        inputWaitDetectMilliseconds: 500,
++        worktreeRepository: "/tmp/repo"
++    )
++    #expect(
++        allOptionalFieldsRequest.hasSuffix(
++            ",\"pty\":true,\"input_wait_detect_milliseconds\":500"
++                + ",\"worktree_repository\":\"\\/tmp\\/repo\"}\n")
++    )
++    #expect(allOptionalFieldsRequest.components(separatedBy: "\"pty\"").count == 2)
++    #expect(
++        allOptionalFieldsRequest.components(
++            separatedBy: "\"input_wait_detect_milliseconds\""
++        ).count == 2
++    )
++    #expect(
++        allOptionalFieldsRequest.components(separatedBy: "\"worktree_repository\"").count == 2
++    )
+ }
+ 
+ @Test("cancel process request JSON and accepted result are typed")
+@@ -287,6 +326,32 @@ func spawnFailureExitDecodes() throws {
+         ])
+ }
+ 
++@Test("run exit decodes a typed worktree failure")
++func worktreeFailureExitDecodes() throws {
++    let descriptors = try localSocketPair()
++    defer {
++        _ = Darwin.close(descriptors.reader)
++        _ = Darwin.close(descriptors.writer)
++    }
++
++    let collector = ProcessEventCollector()
++    try writeAll(
++        Array(
++            ("{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"worktree-run\","
++                + "\"exit_code\":null,\"error_code\":\"worktree_failed\"}\n")
++                .utf8),
++        to: descriptors.writer
++    )
++    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "worktree-run") {
++        collector.append($0)
++    }
++
++    #expect(
++        collector.result().events == [
++            .exit(runID: "worktree-run", exitCode: nil, errorCode: .worktreeFailed)
++        ])
++}
++
+ @Test("run exit decodes a typed capacity exhaustion failure")
+ func capacityExhaustionExitDecodes() throws {
+     let descriptors = try localSocketPair()
+diff --git a/backend/src/lib.rs b/backend/src/lib.rs
+index a22365e..8ef4fcf 100644
+--- a/backend/src/lib.rs
++++ b/backend/src/lib.rs
+@@ -22,8 +22,11 @@ const MAX_CONCURRENT_CLIENTS: usize = 8;
+ const MAX_CONCURRENT_PROCESSES: usize = 8;
+ const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+ const INPUT_WAIT_CPU_QUIET_NANOSECONDS: u64 = 30_000_000;
++const WORKTREE_ROOT_DIRECTORY_NAME: &str = "capture-delegate-worktrees";
++const MAX_SANITIZED_RUN_ID_BYTES: usize = 48;
+ 
+ static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
++static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+ 
+ extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
+     let write_fd = SHUTDOWN_PIPE_WRITE_FD.load(Ordering::Relaxed);
+@@ -54,6 +57,8 @@ struct Request {
+     data: Option<String>,
+     #[serde(default)]
+     pty: Option<bool>,
++    #[serde(default)]
++    worktree_repository: Option<serde_json::Value>,
+ }
+ 
+ #[derive(Serialize)]
+@@ -107,6 +112,10 @@ struct RunMetadataResponse<'a> {
+     duration_ms: u64,
+     environment_variable_names: Vec<String>,
+     redactions: usize,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    worktree_path: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    worktree_branch: Option<String>,
+ }
+ 
+ #[derive(Serialize)]
+@@ -879,6 +888,18 @@ fn handle_connection(
+             }
+             "start_process" => {
+                 let pty = request.pty.unwrap_or(false);
++                let worktree_repository = match request.worktree_repository {
++                    None => None,
++                    Some(value) => {
++                        let Some(repository) = value
++                            .as_str()
++                            .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
++                        else {
++                            return write_protocol_error(&mut stream, "invalid_start_process");
++                        };
++                        Some(PathBuf::from(repository))
++                    }
++                };
+                 let input_wait_detect_milliseconds = match request.input_wait_detect_milliseconds {
+                     None => None,
+                     Some(value) => {
+@@ -948,6 +969,7 @@ fn handle_connection(
+                                 timeout,
+                                 pty,
+                                 input_wait_detect_milliseconds,
++                                worktree_repository,
+                             },
+                             process_slot,
+                             registration,
+@@ -1236,6 +1258,142 @@ struct StartProcessOptions {
+     timeout: Duration,
+     pty: bool,
+     input_wait_detect_milliseconds: Option<u64>,
++    worktree_repository: Option<PathBuf>,
++}
++
++struct RunWorktree {
++    root: PathBuf,
++    repository: PathBuf,
++    path: PathBuf,
++    branch: String,
++    cleaned: bool,
++}
++
++struct WorktreeSetupError {
++    worktree: Option<RunWorktree>,
++}
++
++impl RunWorktree {
++    fn create(repository: PathBuf, run_id: &str) -> Result<Self, WorktreeSetupError> {
++        let root = worktree_root().map_err(|_| WorktreeSetupError { worktree: None })?;
++        let sanitized_run_id = sanitize_run_id(run_id);
++        let nonce = worktree_nonce();
++        let directory_name = format!("run-{sanitized_run_id}-{nonce}");
++        let path = root.join(directory_name);
++        fs::create_dir(&path).map_err(|_| WorktreeSetupError { worktree: None })?;
++        let branch = format!("capture-delegate/run-{sanitized_run_id}-{nonce}");
++        let worktree = Self {
++            root,
++            repository,
++            path,
++            branch,
++            cleaned: false,
++        };
++        if fs::set_permissions(&worktree.path, fs::Permissions::from_mode(0o700)).is_err() {
++            return Err(WorktreeSetupError {
++                worktree: Some(worktree),
++            });
++        }
++        let added = Command::new("git")
++            .arg("-C")
++            .arg(&worktree.repository)
++            .args(["worktree", "add"])
++            .arg(&worktree.path)
++            .arg("-b")
++            .arg(&worktree.branch)
++            .arg("HEAD")
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status()
++            .is_ok_and(|status| status.success());
++        if !added {
++            return Err(WorktreeSetupError {
++                worktree: Some(worktree),
++            });
++        }
++        Ok(worktree)
++    }
++
++    fn cleanup(&mut self) {
++        if self.cleaned {
++            return;
++        }
++        self.cleaned = true;
++
++        let removed = Command::new("git")
++            .arg("-C")
++            .arg(&self.repository)
++            .args(["worktree", "remove", "--force"])
++            .arg(&self.path)
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status()
++            .is_ok_and(|status| status.success());
++        if !removed && self.path.parent() == Some(self.root.as_path()) {
++            let _ = fs::remove_dir_all(&self.path);
++            let _ = Command::new("git")
++                .arg("-C")
++                .arg(&self.repository)
++                .args(["worktree", "prune"])
++                .stdout(Stdio::null())
++                .stderr(Stdio::null())
++                .status();
++        }
++        let _ = Command::new("git")
++            .arg("-C")
++            .arg(&self.repository)
++            .args(["branch", "-D"])
++            .arg(&self.branch)
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status();
++    }
++}
++
++impl Drop for RunWorktree {
++    fn drop(&mut self) {
++        self.cleanup();
++    }
++}
++
++fn worktree_root() -> io::Result<PathBuf> {
++    let root = std::env::temp_dir().join(WORKTREE_ROOT_DIRECTORY_NAME);
++    fs::create_dir_all(&root)?;
++    let metadata = fs::symlink_metadata(&root)?;
++    if metadata.file_type().is_symlink() || !metadata.is_dir() {
++        return Err(io::Error::other("worktree root is not a directory"));
++    }
++    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
++    Ok(root)
++}
++
++fn sanitize_run_id(run_id: &str) -> String {
++    let mut sanitized = String::with_capacity(MAX_SANITIZED_RUN_ID_BYTES);
++    let mut previous_was_dot = false;
++    for character in run_id.chars() {
++        if sanitized.len() >= MAX_SANITIZED_RUN_ID_BYTES {
++            break;
++        }
++        let allowed = character.is_ascii_alphanumeric()
++            || matches!(character, '_' | '-')
++            || (character == '.' && !previous_was_dot);
++        let character = if allowed { character } else { '-' };
++        previous_was_dot = character == '.';
++        sanitized.push(character);
++    }
++    if sanitized.is_empty() {
++        sanitized.push_str("run");
++    }
++    sanitized
++}
++
++fn worktree_nonce() -> String {
++    let nanoseconds = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map(|duration| duration.as_nanos())
++        .unwrap_or_default();
++    let sequence = WORKTREE_NONCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
++    format!("{:x}-{nanoseconds:x}-{sequence:x}", std::process::id())
+ }
+ 
+ struct ActivityClock {
+@@ -1447,14 +1605,43 @@ fn run_process(
+         timeout,
+         pty,
+         input_wait_detect_milliseconds,
++        worktree_repository,
+     } = options;
+     let stream = Arc::new(Mutex::new(stream));
++    let mut worktree = match worktree_repository {
++        Some(repository) => match RunWorktree::create(repository, &run_id) {
++            Ok(worktree) => Some(worktree),
++            Err(error) => {
++                drop(registration);
++                let terminal_result = write_json_frame(
++                    &stream,
++                    &RunExitResponse {
++                        version: PROTOCOL_VERSION,
++                        response_type: "run_exit",
++                        run_id: &run_id,
++                        exit_code: None,
++                        error_code: Some("worktree_failed"),
++                    },
++                );
++                if let Some(mut worktree) = error.worktree {
++                    worktree.cleanup();
++                }
++                return terminal_result;
++            }
++        },
++        None => None,
++    };
+     // The timeout deadline deliberately keeps ticking while the process group is paused.
+     let timeout_started = Instant::now();
+     let wall_clock_started = SystemTime::now();
+-    let working_directory = std::env::current_dir()
+-        .map(|directory| directory.to_string_lossy().into_owned())
+-        .unwrap_or_default();
++    let working_directory = worktree.as_ref().map_or_else(
++        || {
++            std::env::current_dir()
++                .map(|directory| directory.to_string_lossy().into_owned())
++                .unwrap_or_default()
++        },
++        |worktree| worktree.path.to_string_lossy().into_owned(),
++    );
+     let mut environment_variable_names: Vec<String> = std::env::vars_os()
+         .map(|(name, _)| name.to_string_lossy().into_owned())
+         .collect();
+@@ -1479,6 +1666,9 @@ fn run_process(
+         let slave_fd = slave.as_raw_fd();
+         let mut command = Command::new(&executable);
+         command.args(&arguments);
++        if let Some(worktree) = worktree.as_ref() {
++            command.current_dir(&worktree.path);
++        }
+         // SAFETY: configure_pty_child performs only child-local session and descriptor setup.
+         unsafe {
+             command.pre_exec(move || configure_pty_child(slave_fd));
+@@ -1505,14 +1695,17 @@ fn run_process(
+         // A PTY has one merged output stream; child stderr is reported as stdout here.
+         (child, Some(master))
+     } else {
+-        let mut child = match Command::new(&executable)
++        let mut command = Command::new(&executable);
++        command
+             .args(&arguments)
+             .process_group(0)
+             .stdin(Stdio::piped())
+             .stdout(Stdio::piped())
+-            .stderr(Stdio::piped())
+-            .spawn()
+-        {
++            .stderr(Stdio::piped());
++        if let Some(worktree) = worktree.as_ref() {
++            command.current_dir(&worktree.path);
++        }
++        let mut child = match command.spawn() {
+             Ok(child) => child,
+             Err(_) => {
+                 // A failed spawn has no process metadata and emits only its terminal frame.
+@@ -1743,6 +1936,10 @@ fn run_process(
+         duration_ms,
+         environment_variable_names,
+         redactions: redactions.load(Ordering::Relaxed),
++        worktree_path: worktree
++            .as_ref()
++            .map(|worktree| worktree.path.to_string_lossy().into_owned()),
++        worktree_branch: worktree.as_ref().map(|worktree| worktree.branch.clone()),
+     };
+     let metadata_result = (|| {
+         let frame_is_too_large = |response: &RunMetadataResponse<'_>| -> io::Result<bool> {
+@@ -1773,6 +1970,9 @@ fn run_process(
+             error_code,
+         },
+     );
++    if let Some(worktree) = worktree.as_mut() {
++        worktree.cleanup();
++    }
+     metadata_result?;
+     run_exit_result?;
+     stdout_result?;
+diff --git a/backend/tests/process_lifecycle.rs b/backend/tests/process_lifecycle.rs
+index 70de6cd..6e531fe 100644
+--- a/backend/tests/process_lifecycle.rs
++++ b/backend/tests/process_lifecycle.rs
+@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
+ use std::process::{Child, Command};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::mpsc;
++use std::sync::{Mutex, OnceLock};
+ use std::thread;
+ use std::time::{Duration, Instant};
+ 
+ static TEMP_SOCKET_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++static TEMP_GIT_REPOSITORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
++static WORKTREE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+ 
+ struct BackendProcess {
+     child: Child,
+@@ -2620,3 +2623,404 @@ fn read_json_frame(reader: &mut BufReader<UnixStream>) -> serde_json::Value {
+         .expect("response frame should read");
+     serde_json::from_str(&frame).expect("response frame should be JSON")
+ }
++
++struct ScratchGitRepository {
++    path: PathBuf,
++}
++
++impl ScratchGitRepository {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "capture-delegate-git-test-{}-{}",
++            std::process::id(),
++            TEMP_GIT_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
++        ));
++        fs::create_dir(&path).expect("scratch repository directory should be created");
++        git_command(&path, &["init"]);
++        fs::write(path.join("tracked.txt"), "original\n")
++            .expect("tracked fixture should be written");
++        git_command(&path, &["add", "tracked.txt"]);
++        git_command(
++            &path,
++            &[
++                "-c",
++                "user.name=Capture Delegate Tests",
++                "-c",
++                "user.email=capture-delegate@example.invalid",
++                "commit",
++                "-m",
++                "initial",
++            ],
++        );
++        Self { path }
++    }
++}
++
++impl Drop for ScratchGitRepository {
++    fn drop(&mut self) {
++        let _ = fs::remove_dir_all(&self.path);
++    }
++}
++
++fn git_command(repository: &Path, arguments: &[&str]) -> std::process::Output {
++    let output = Command::new("git")
++        .arg("-C")
++        .arg(repository)
++        .args(arguments)
++        .output()
++        .expect("git should be available");
++    assert!(
++        output.status.success(),
++        "git command failed: {}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    output
++}
++
++fn worktree_test_guard() -> std::sync::MutexGuard<'static, ()> {
++    WORKTREE_TEST_LOCK
++        .get_or_init(|| Mutex::new(()))
++        .lock()
++        .unwrap_or_else(|poisoned| poisoned.into_inner())
++}
++
++fn read_through_terminal(reader: &mut BufReader<UnixStream>) -> Vec<serde_json::Value> {
++    let mut frames = Vec::new();
++    loop {
++        let frame = read_json_frame(reader);
++        let terminal = frame["type"] == "run_exit";
++        frames.push(frame);
++        if terminal {
++            return frames;
++        }
++    }
++}
++
++fn stdout_text(frames: &[serde_json::Value]) -> String {
++    frames
++        .iter()
++        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
++        .filter_map(|frame| frame["output"].as_str())
++        .collect()
++}
++
++fn worktree_count(repository: &Path) -> usize {
++    String::from_utf8_lossy(&git_command(repository, &["worktree", "list", "--porcelain"]).stdout)
++        .lines()
++        .filter(|line| line.starts_with("worktree "))
++        .count()
++}
++
++fn branch_exists(repository: &Path, branch: &str) -> bool {
++    Command::new("git")
++        .arg("-C")
++        .arg(repository)
++        .args(["show-ref", "--verify", "--quiet"])
++        .arg(format!("refs/heads/{branch}"))
++        .status()
++        .expect("git should be available")
++        .success()
++}
++
++fn wait_for_worktree_cleanup(repository: &Path, worktree: &Path, branch: &str) {
++    let deadline = Instant::now() + Duration::from_secs(3);
++    loop {
++        if !worktree.exists()
++            && worktree_count(repository) == 1
++            && !branch_exists(repository, branch)
++        {
++            return;
++        }
++        assert!(
++            Instant::now() < deadline,
++            "worktree directory and branch should be cleaned after run_exit"
++        );
++        thread::sleep(Duration::from_millis(20));
++    }
++}
++
++fn worktree_root_entries() -> Vec<PathBuf> {
++    let root = std::env::temp_dir().join("capture-delegate-worktrees");
++    let mut entries = match fs::read_dir(root) {
++        Ok(entries) => entries
++            .map(|entry| entry.expect("worktree root entry should read").path())
++            .collect(),
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
++        Err(error) => panic!("worktree root should be readable: {error}"),
++    };
++    entries.sort();
++    entries
++}
++
++#[test]
++fn worktree_run_executes_in_an_isolated_worktree_and_cleans_up() {
++    let _guard = worktree_test_guard();
++    let repository = ScratchGitRepository::new();
++    let backend = start_backend();
++    let request = serde_json::json!({
++        "version": 1,
++        "type": "start_process",
++        "run_id": "isolated/worktree",
++        "executable": "/bin/sh",
++        "arguments": ["-c", "pwd; git rev-parse --abbrev-ref HEAD; touch scratch.txt"],
++        "timeout_milliseconds": 2_000,
++        "worktree_repository": repository.path,
++    });
++    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .expect("read timeout should configure");
++    stream
++        .write_all(format!("{request}\n").as_bytes())
++        .expect("request should write");
++
++    let frames = read_through_terminal(&mut BufReader::new(stream));
++    let metadata = frames
++        .iter()
++        .find(|frame| frame["type"] == "run_metadata")
++        .expect("worktree run should emit metadata");
++    let worktree_path = PathBuf::from(
++        metadata["worktree_path"]
++            .as_str()
++            .expect("metadata should carry worktree path"),
++    );
++    let branch = metadata["worktree_branch"]
++        .as_str()
++        .expect("metadata should carry worktree branch");
++    let output = stdout_text(&frames);
++    let output_lines: Vec<_> = output.lines().collect();
++
++    assert!(worktree_path.starts_with(std::env::temp_dir().join("capture-delegate-worktrees")));
++    assert_ne!(worktree_path, repository.path);
++    // `pwd` resolves the macOS /var -> /private/var symlink while metadata reports the
++    // temp_dir()-based path; compare through the canonicalized managed root, which
++    // outlives run-directory cleanup.
++    let canonical_worktree = std::env::temp_dir()
++        .join("capture-delegate-worktrees")
++        .canonicalize()
++        .expect("managed worktree root should canonicalize")
++        .join(
++            worktree_path
++                .file_name()
++                .expect("worktree path should end in a run directory"),
++        );
++    assert_eq!(output_lines.first().copied(), canonical_worktree.to_str());
++    assert_eq!(output_lines.get(1).copied(), Some(branch));
++    assert!(branch.starts_with("capture-delegate/run-isolated-worktree-"));
++    assert!(
++        branch
++            .strip_prefix("capture-delegate/run-")
++            .is_some_and(|name| name.chars().all(|character| {
++                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
++            }))
++    );
++    assert_eq!(metadata["working_directory"], metadata["worktree_path"]);
++    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
++    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
++}
++
++#[test]
++fn worktree_cancel_still_cleans_up() {
++    let _guard = worktree_test_guard();
++    let repository = ScratchGitRepository::new();
++    let backend = start_backend();
++    let request = serde_json::json!({
++        "version": 1,
++        "type": "start_process",
++        "run_id": "worktree-cancel",
++        "executable": "/bin/sh",
++        "arguments": ["-c", "printf ready; sleep 30"],
++        "timeout_milliseconds": 30_000,
++        "worktree_repository": repository.path,
++    });
++    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
++    stream
++        .set_read_timeout(Some(Duration::from_secs(3)))
++        .expect("read timeout should configure");
++    stream
++        .write_all(format!("{request}\n").as_bytes())
++        .expect("request should write");
++    let mut reader = BufReader::new(stream);
++    assert_eq!(read_json_frame(&mut reader)["type"], "run_output");
++    assert_eq!(
++        cancel_process(&backend.socket_path, "worktree-cancel")["status"],
++        "accepted"
++    );
++
++    let frames = read_through_terminal(&mut reader);
++    let metadata = frames
++        .iter()
++        .find(|frame| frame["type"] == "run_metadata")
++        .expect("cancelled worktree run should emit metadata");
++    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
++    let branch = metadata["worktree_branch"].as_str().unwrap();
++    assert_eq!(frames.last().unwrap()["error_code"], "cancelled");
++    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
++}
++
++#[test]
++fn concurrent_worktree_runs_get_distinct_branches() {
++    let _guard = worktree_test_guard();
++    let repository = ScratchGitRepository::new();
++    let backend = start_backend();
++    let start = |run_id: &str| {
++        let request = serde_json::json!({
++            "version": 1,
++            "type": "start_process",
++            "run_id": run_id,
++            "executable": "/bin/sh",
++            "arguments": ["-c", "sleep 1"],
++            "timeout_milliseconds": 3_000,
++            "worktree_repository": repository.path,
++        });
++        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
++        stream
++            .set_read_timeout(Some(Duration::from_secs(4)))
++            .expect("read timeout should configure");
++        stream
++            .write_all(format!("{request}\n").as_bytes())
++            .expect("request should write");
++        stream
++    };
++    let first_stream = start("same-concurrent-id-a");
++    let second_stream = start("same-concurrent-id-b");
++    let first_frames = read_through_terminal(&mut BufReader::new(first_stream));
++    let second_frames = read_through_terminal(&mut BufReader::new(second_stream));
++    let first_metadata = first_frames
++        .iter()
++        .find(|frame| frame["type"] == "run_metadata")
++        .unwrap();
++    let second_metadata = second_frames
++        .iter()
++        .find(|frame| frame["type"] == "run_metadata")
++        .unwrap();
++    let first_path = PathBuf::from(first_metadata["worktree_path"].as_str().unwrap());
++    let second_path = PathBuf::from(second_metadata["worktree_path"].as_str().unwrap());
++    let first_branch = first_metadata["worktree_branch"].as_str().unwrap();
++    let second_branch = second_metadata["worktree_branch"].as_str().unwrap();
++
++    assert_ne!(first_path, second_path);
++    assert_ne!(first_branch, second_branch);
++    wait_for_worktree_cleanup(&repository.path, &first_path, first_branch);
++    wait_for_worktree_cleanup(&repository.path, &second_path, second_branch);
++}
++
++#[test]
++fn worktree_failure_emits_structured_terminal_frame() {
++    let _guard = worktree_test_guard();
++    let backend = start_backend();
++    let directory = std::env::temp_dir().join(format!(
++        "capture-delegate-non-repo-{}-{}",
++        std::process::id(),
++        TEMP_GIT_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
++    ));
++    fs::create_dir(&directory).expect("non-repository fixture should be created");
++    let before = worktree_root_entries();
++    let frames = run_frames(
++        &backend,
++        serde_json::json!({
++            "version": 1,
++            "type": "start_process",
++            "run_id": "failure-non-repo",
++            "executable": "/usr/bin/true",
++            "arguments": [],
++            "timeout_milliseconds": 2_000,
++            "worktree_repository": directory,
++        }),
++    );
++
++    assert_eq!(frames.len(), 1);
++    assert_eq!(frames[0]["type"], "run_exit");
++    assert!(frames[0]["exit_code"].is_null());
++    assert_eq!(frames[0]["error_code"], "worktree_failed");
++    assert_eq!(worktree_root_entries(), before);
++    fs::remove_dir(&directory).expect("non-repository fixture should be removed");
++}
++
++#[test]
++fn worktree_request_validation() {
++    let _guard = worktree_test_guard();
++    let backend = start_backend();
++    for (index, worktree_repository) in [
++        serde_json::json!(42),
++        serde_json::json!(""),
++        serde_json::json!("relative/repository"),
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        let request = serde_json::json!({
++            "version": 1,
++            "type": "start_process",
++            "run_id": format!("invalid-worktree-{index}"),
++            "executable": "/usr/bin/true",
++            "arguments": [],
++            "timeout_milliseconds": 2_000,
++            "worktree_repository": worktree_repository,
++        });
++        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
++        stream
++            .write_all(format!("{request}\n").as_bytes())
++            .expect("request should write");
++        let frame = read_json_frame(&mut BufReader::new(stream));
++        assert_eq!(frame["type"], "error");
++        assert_eq!(frame["code"], "invalid_start_process");
++    }
++
++    for (run_id, worktree_repository) in [
++        ("absent-worktree", None),
++        ("null-worktree", Some(serde_json::Value::Null)),
++    ] {
++        let mut request = serde_json::json!({
++            "version": 1,
++            "type": "start_process",
++            "run_id": run_id,
++            "executable": "/usr/bin/true",
++            "arguments": [],
++            "timeout_milliseconds": 2_000,
++        });
++        if let Some(worktree_repository) = worktree_repository {
++            request["worktree_repository"] = worktree_repository;
++        }
++        let frames = run_frames(&backend, request);
++        let metadata = frames
++            .iter()
++            .find(|frame| frame["type"] == "run_metadata")
++            .expect("ordinary run should emit metadata");
++        assert!(metadata.get("worktree_path").is_none());
++        assert!(metadata.get("worktree_branch").is_none());
++    }
++}
++
++#[test]
++fn dirty_worktree_is_still_removed() {
++    let _guard = worktree_test_guard();
++    let repository = ScratchGitRepository::new();
++    let backend = start_backend();
++    let request = serde_json::json!({
++        "version": 1,
++        "type": "start_process",
++        "run_id": "dirty-worktree",
++        "executable": "/bin/sh",
++        "arguments": ["-c", "printf changed > tracked.txt; touch untracked.txt"],
++        "timeout_milliseconds": 2_000,
++        "worktree_repository": repository.path,
++    });
++    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
++    stream
++        .set_read_timeout(Some(Duration::from_secs(2)))
++        .expect("read timeout should configure");
++    stream
++        .write_all(format!("{request}\n").as_bytes())
++        .expect("request should write");
++
++    let frames = read_through_terminal(&mut BufReader::new(stream));
++    let metadata = frames
++        .iter()
++        .find(|frame| frame["type"] == "run_metadata")
++        .expect("dirty worktree run should emit metadata");
++    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
++    let branch = metadata["worktree_branch"].as_str().unwrap();
++    assert_eq!(frames.last().unwrap()["exit_code"], 0);
++    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
++}

@@ -29,6 +29,7 @@ func startProcessRequestJSON() {
     #expect(json["timeout_milliseconds"] as? Int == 250)
     #expect(!request.contains("pty"))
     #expect(!request.contains("input_wait_detect_milliseconds"))
+    #expect(!request.contains("worktree_repository"))
 
     let ptyRequest = IPCClient.startProcessRequest(
         runID: "run-1",
@@ -65,6 +66,44 @@ func startProcessRequestJSON() {
     #expect(
         ptyInputWaitRequest.hasSuffix(
             ",\"pty\":true,\"input_wait_detect_milliseconds\":500}\n")
+    )
+
+    let worktreeRequest = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250,
+        worktreeRepository: "/tmp/repo"
+    )
+    #expect(worktreeRequest.hasSuffix(",\"worktree_repository\":\"\\/tmp\\/repo\"}\n"))
+    #expect(worktreeRequest.components(separatedBy: "\"worktree_repository\"").count == 2)
+    let worktreeData = try! #require(worktreeRequest.dropLast().data(using: .utf8))
+    let worktreeJSON = try! #require(
+        try! JSONSerialization.jsonObject(with: worktreeData) as? [String: Any])
+    #expect(worktreeJSON["worktree_repository"] as? String == "/tmp/repo")
+
+    let allOptionalFieldsRequest = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250,
+        pty: true,
+        inputWaitDetectMilliseconds: 500,
+        worktreeRepository: "/tmp/repo"
+    )
+    #expect(
+        allOptionalFieldsRequest.hasSuffix(
+            ",\"pty\":true,\"input_wait_detect_milliseconds\":500"
+                + ",\"worktree_repository\":\"\\/tmp\\/repo\"}\n")
+    )
+    #expect(allOptionalFieldsRequest.components(separatedBy: "\"pty\"").count == 2)
+    #expect(
+        allOptionalFieldsRequest.components(
+            separatedBy: "\"input_wait_detect_milliseconds\""
+        ).count == 2
+    )
+    #expect(
+        allOptionalFieldsRequest.components(separatedBy: "\"worktree_repository\"").count == 2
     )
 }
 
@@ -284,6 +323,32 @@ func spawnFailureExitDecodes() throws {
     #expect(
         collector.result().events == [
             .exit(runID: "missing-run", exitCode: nil, errorCode: .spawnFailed)
+        ])
+}
+
+@Test("run exit decodes a typed worktree failure")
+func worktreeFailureExitDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    let collector = ProcessEventCollector()
+    try writeAll(
+        Array(
+            ("{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"worktree-run\","
+                + "\"exit_code\":null,\"error_code\":\"worktree_failed\"}\n")
+                .utf8),
+        to: descriptors.writer
+    )
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "worktree-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .exit(runID: "worktree-run", exitCode: nil, errorCode: .worktreeFailed)
         ])
 }
 

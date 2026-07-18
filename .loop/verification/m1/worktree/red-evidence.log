@@ -1,0 +1,13 @@
+=== RED: new worktree tests vs origin/main lib.rs ===
+
+failures:
+    concurrent_worktree_runs_get_distinct_branches
+    dirty_worktree_is_still_removed
+    worktree_cancel_still_cleans_up
+    worktree_failure_emits_structured_terminal_frame
+    worktree_request_validation
+    worktree_run_executes_in_an_isolated_worktree_and_cleans_up
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 46 filtered out; finished in 1.58s
+
+error: test failed, to rerun pass `--test process_lifecycle`
