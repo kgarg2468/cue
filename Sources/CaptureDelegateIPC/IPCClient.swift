@@ -4,6 +4,22 @@ import Foundation
 
 public enum IPCClientError: Error, Equatable {
     case responseTooLarge
+    case invalidProcessEvent
+}
+
+public enum ProcessOutputStream: String, Equatable {
+    case stdout
+    case stderr
+}
+
+public enum ProcessExitErrorCode: String, Equatable {
+    case spawnFailed = "spawn_failed"
+    case capacityExhausted = "capacity_exhausted"
+}
+
+public enum ProcessEvent: Equatable {
+    case output(runID: String, stream: ProcessOutputStream, output: String)
+    case exit(runID: String, exitCode: Int?, errorCode: ProcessExitErrorCode? = nil)
 }
 
 public enum IPCClient {
@@ -16,8 +32,52 @@ public enum IPCClient {
         defer { _ = Darwin.close(descriptor) }
 
         try writeHealthRequest(to: descriptor)
-        let response = try readResponseLine(from: descriptor)
+        let response = try readBoundedResponseLine(from: descriptor)
         return try validateHealthResponse(response)
+    }
+
+    public static func startProcess(
+        socketPath: String,
+        runID: String,
+        executable: String,
+        arguments: [String],
+        onEvent: (ProcessEvent) -> Void
+    ) throws {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeStartProcessRequest(
+            runID: runID,
+            executable: executable,
+            arguments: arguments,
+            to: descriptor
+        )
+        try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
+    }
+
+    static func readProcessEvents(
+        from descriptor: Int32,
+        expectedRunID: String,
+        onEvent: (ProcessEvent) -> Void
+    ) throws {
+        while true {
+            let event = try decodeProcessEvent(
+                try readResponseLine(from: descriptor),
+                expectedRunID: expectedRunID
+            )
+            onEvent(event)
+            if case .exit = event {
+                return
+            }
+        }
+    }
+
+    public static func startProcessRequest(
+        runID: String,
+        executable: String,
+        arguments: [String]
+    ) -> String {
+        "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments))}\n"
     }
 
     public static func validateHealthResponse(_ response: String) throws -> Bool {
@@ -74,7 +134,23 @@ public enum IPCClient {
 
     static func writeHealthRequest(to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
-        let bytes = Array(healthRequest.utf8)
+        try write(Array(healthRequest.utf8), to: descriptor)
+    }
+
+    static func writeStartProcessRequest(
+        runID: String,
+        executable: String,
+        arguments: [String],
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(
+                startProcessRequest(runID: runID, executable: executable, arguments: arguments).utf8
+            ), to: descriptor)
+    }
+
+    private static func write(_ bytes: [UInt8], to descriptor: Int32) throws {
         var written = 0
         while written < bytes.count {
             let count = bytes.withUnsafeBytes { buffer in
@@ -97,22 +173,51 @@ public enum IPCClient {
     static func readResponseLine(from descriptor: Int32) throws -> String {
         var bytes: [UInt8] = []
         var byte: UInt8 = 0
-        let deadline =
-            DispatchTime.now().uptimeNanoseconds + UInt64(responseTimeoutMicroseconds) * 1_000
 
         while true {
-            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-            let pollResult = Darwin.poll(
-                &pollDescriptor,
-                1,
-                try remainingTimeoutMilliseconds(until: deadline)
-            )
-            if pollResult < 0, errno == EINTR {
+            try waitForReadable(descriptor, timeoutMilliseconds: -1)
+
+            let count = Darwin.read(descriptor, &byte, 1)
+            if count < 0, errno == EINTR {
                 continue
             }
-            guard pollResult > 0 else {
-                throw POSIXError(.ETIMEDOUT)
+            guard count > 0 else {
+                throw posixError()
             }
+            guard bytes.count < maximumResponseBytes else {
+                throw IPCClientError.responseTooLarge
+            }
+            bytes.append(byte)
+            if byte == 10 {
+                return String(decoding: bytes, as: UTF8.self)
+            }
+            break
+        }
+
+        let deadline =
+            DispatchTime.now().uptimeNanoseconds + UInt64(responseTimeoutMicroseconds) * 1_000
+        return try readResponseLine(from: descriptor, bytes: bytes, deadline: deadline)
+    }
+
+    private static func readBoundedResponseLine(from descriptor: Int32) throws -> String {
+        let deadline =
+            DispatchTime.now().uptimeNanoseconds + UInt64(responseTimeoutMicroseconds) * 1_000
+        return try readResponseLine(from: descriptor, bytes: [], deadline: deadline)
+    }
+
+    private static func readResponseLine(
+        from descriptor: Int32,
+        bytes: [UInt8],
+        deadline: UInt64
+    ) throws -> String {
+        var bytes = bytes
+        var byte: UInt8 = 0
+
+        while true {
+            try waitForReadable(
+                descriptor,
+                timeoutMilliseconds: try remainingTimeoutMilliseconds(until: deadline)
+            )
 
             let count = Darwin.read(descriptor, &byte, 1)
             if count < 0, errno == EINTR {
@@ -129,6 +234,79 @@ public enum IPCClient {
                 return String(decoding: bytes, as: UTF8.self)
             }
         }
+    }
+
+    private static func waitForReadable(_ descriptor: Int32, timeoutMilliseconds: Int32) throws {
+        while true {
+            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let pollResult = Darwin.poll(&pollDescriptor, 1, timeoutMilliseconds)
+            if pollResult < 0, errno == EINTR {
+                continue
+            }
+            guard pollResult > 0 else {
+                throw POSIXError(.ETIMEDOUT)
+            }
+            return
+        }
+    }
+
+    private static func decodeProcessEvent(_ response: String, expectedRunID: String) throws
+        -> ProcessEvent
+    {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            let type = json["type"] as? String,
+            json["run_id"] as? String == expectedRunID
+        else {
+            throw IPCClientError.invalidProcessEvent
+        }
+
+        switch type {
+        case "run_output":
+            guard
+                let streamName = json["stream"] as? String,
+                let stream = ProcessOutputStream(rawValue: streamName),
+                let output = json["output"] as? String
+            else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            return .output(runID: expectedRunID, stream: stream, output: output)
+        case "run_exit":
+            let exitCode: Int?
+            if json["exit_code"] is NSNull {
+                exitCode = nil
+            } else if let code = json["exit_code"] as? Int {
+                exitCode = code
+            } else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            let errorCode: ProcessExitErrorCode?
+            if json["error_code"] is NSNull || json["error_code"] == nil {
+                errorCode = nil
+            } else if let value = json["error_code"] as? String,
+                let value = ProcessExitErrorCode(rawValue: value)
+            {
+                errorCode = value
+            } else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            return .exit(runID: expectedRunID, exitCode: exitCode, errorCode: errorCode)
+        default:
+            throw IPCClientError.invalidProcessEvent
+        }
+    }
+
+    private static func jsonString(_ value: String) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: [value])
+        let array = String(decoding: data, as: UTF8.self)
+        return String(array.dropFirst().dropLast())
+    }
+
+    private static func jsonStringArray(_ values: [String]) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: values)
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func remainingTimeoutMilliseconds(until deadline: UInt64) throws -> Int32 {
