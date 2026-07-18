@@ -1,0 +1,7 @@
+child output: ['/private/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/capture-delegate-worktrees/run-demo-wt-62ad-18c380a87d19b068-0', 'capture-delegate/run-demo-wt-62ad-18c380a87d19b068-0']
+metadata: worktree_path=/private/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/capture-delegate-worktrees/run-demo-wt-62ad-18c380a87d19b068-0 worktree_branch=capture-delegate/run-demo-wt-62ad-18c380a87d19b068-0
+exit: code=0 error=None
+cleanup: worktree dir removed and branch deleted: True
+worktree list now: /private/var/folders/07/d949z7_509s8tfzn2f_q63wc0000gn/T/cue-demo-repo-v2ui2ov9  51be6c8 [main]
+non-repo failure: exit_code=None error_code=worktree_failed types=['run_exit']
+backend exit: 0 socket removed: True

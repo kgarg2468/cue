@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static TEMP_SOCKET_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static TEMP_GIT_REPOSITORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static WORKTREE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct BackendProcess {
     child: Child,
@@ -2619,4 +2622,472 @@ fn read_json_frame(reader: &mut BufReader<UnixStream>) -> serde_json::Value {
         .read_line(&mut frame)
         .expect("response frame should read");
     serde_json::from_str(&frame).expect("response frame should be JSON")
+}
+
+struct ScratchGitRepository {
+    path: PathBuf,
+}
+
+impl ScratchGitRepository {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "capture-delegate-git-test-{}-{}",
+            std::process::id(),
+            TEMP_GIT_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).expect("scratch repository directory should be created");
+        git_command(&path, &["init"]);
+        fs::write(path.join("tracked.txt"), "original\n")
+            .expect("tracked fixture should be written");
+        git_command(&path, &["add", "tracked.txt"]);
+        git_command(
+            &path,
+            &[
+                "-c",
+                "user.name=Capture Delegate Tests",
+                "-c",
+                "user.email=capture-delegate@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        Self { path }
+    }
+}
+
+impl Drop for ScratchGitRepository {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn git_command(repository: &Path, arguments: &[&str]) -> std::process::Output {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("git should be available");
+    assert!(
+        output.status.success(),
+        "git command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn worktree_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    WORKTREE_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn read_through_terminal(reader: &mut BufReader<UnixStream>) -> Vec<serde_json::Value> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = read_json_frame(reader);
+        let terminal = frame["type"] == "run_exit";
+        frames.push(frame);
+        if terminal {
+            return frames;
+        }
+    }
+}
+
+fn stdout_text(frames: &[serde_json::Value]) -> String {
+    frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect()
+}
+
+fn worktree_count(repository: &Path) -> usize {
+    String::from_utf8_lossy(&git_command(repository, &["worktree", "list", "--porcelain"]).stdout)
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count()
+}
+
+fn branch_exists(repository: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .status()
+        .expect("git should be available")
+        .success()
+}
+
+fn worktree_branches(repository: &Path) -> Vec<String> {
+    String::from_utf8_lossy(
+        &git_command(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/capture-delegate/",
+            ],
+        )
+        .stdout,
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn wait_for_worktree_cleanup(repository: &Path, worktree: &Path, branch: &str) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if !worktree.exists()
+            && worktree_count(repository) == 1
+            && !branch_exists(repository, branch)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worktree directory and branch should be cleaned after run_exit"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn worktree_root_entries() -> Vec<PathBuf> {
+    let root = std::env::temp_dir().join("capture-delegate-worktrees");
+    let mut entries = match fs::read_dir(root) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("worktree root entry should read").path())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("worktree root should be readable: {error}"),
+    };
+    entries.sort();
+    entries
+}
+
+#[test]
+fn worktree_run_executes_in_an_isolated_worktree_and_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "isolated/worktree",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "pwd; git rev-parse --abbrev-ref HEAD; stat -f %Lp \"$PWD\"; touch scratch.txt"],
+        "timeout_milliseconds": 2_000,
+        "worktree_repository": repository.path,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let frames = read_through_terminal(&mut BufReader::new(stream));
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("worktree run should emit metadata");
+    let worktree_path = PathBuf::from(
+        metadata["worktree_path"]
+            .as_str()
+            .expect("metadata should carry worktree path"),
+    );
+    let branch = metadata["worktree_branch"]
+        .as_str()
+        .expect("metadata should carry worktree branch");
+    let output = stdout_text(&frames);
+    let output_lines: Vec<_> = output.lines().collect();
+
+    let canonical_root = std::env::temp_dir()
+        .join("capture-delegate-worktrees")
+        .canonicalize()
+        .expect("managed worktree root should canonicalize");
+    assert!(worktree_path.starts_with(&canonical_root));
+    assert_ne!(worktree_path, repository.path);
+    assert_eq!(output_lines.first().copied(), worktree_path.to_str());
+    assert_eq!(output_lines.get(1).copied(), Some(branch));
+    assert_eq!(output_lines.get(2).copied(), Some("700"));
+    assert!(branch.starts_with("capture-delegate/run-isolated-worktree-"));
+    assert!(
+        branch
+            .strip_prefix("capture-delegate/run-")
+            .is_some_and(|name| name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+            }))
+    );
+    assert_eq!(metadata["working_directory"], metadata["worktree_path"]);
+    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
+    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
+}
+
+#[test]
+fn worktree_cancel_still_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "worktree-cancel",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "printf ready; sleep 30"],
+        "timeout_milliseconds": 30_000,
+        "worktree_repository": repository.path,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let mut reader = BufReader::new(stream);
+    assert_eq!(read_json_frame(&mut reader)["type"], "run_output");
+    assert_eq!(
+        cancel_process(&backend.socket_path, "worktree-cancel")["status"],
+        "accepted"
+    );
+
+    let frames = read_through_terminal(&mut reader);
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("cancelled worktree run should emit metadata");
+    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
+    let branch = metadata["worktree_branch"].as_str().unwrap();
+    assert_eq!(frames.last().unwrap()["error_code"], "cancelled");
+    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
+}
+
+#[test]
+fn worktree_timeout_still_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "worktree-timeout",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "sleep 30"],
+            "timeout_milliseconds": 100,
+            "worktree_repository": repository.path,
+        }),
+    );
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("timed-out worktree run should emit metadata");
+    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
+    let branch = metadata["worktree_branch"].as_str().unwrap();
+
+    assert_eq!(frames.last().unwrap()["error_code"], "timed_out");
+    assert!(metadata.get("worktree_path").is_some());
+    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
+}
+
+#[test]
+fn worktree_spawn_failure_still_cleans_up() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let before_entries = worktree_root_entries();
+    let before_branches = worktree_branches(&repository.path);
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "worktree-spawn-failure",
+            "executable": "/definitely/does/not/exist/capture-delegate",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+            "worktree_repository": repository.path,
+        }),
+    );
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert_eq!(frames[0]["error_code"], "spawn_failed");
+    assert_eq!(worktree_root_entries(), before_entries);
+    assert_eq!(worktree_count(&repository.path), 1);
+    assert_eq!(worktree_branches(&repository.path), before_branches);
+}
+
+#[test]
+fn concurrent_worktree_runs_get_distinct_branches() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let start = |run_id: &str| {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": run_id,
+            "executable": "/bin/sh",
+            "arguments": ["-c", "sleep 1"],
+            "timeout_milliseconds": 3_000,
+            "worktree_repository": repository.path,
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .expect("read timeout should configure");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        stream
+    };
+    let first_stream = start("collide/a");
+    let second_stream = start("collide:a");
+    let first_frames = read_through_terminal(&mut BufReader::new(first_stream));
+    let second_frames = read_through_terminal(&mut BufReader::new(second_stream));
+    let first_metadata = first_frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .unwrap();
+    let second_metadata = second_frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .unwrap();
+    let first_path = PathBuf::from(first_metadata["worktree_path"].as_str().unwrap());
+    let second_path = PathBuf::from(second_metadata["worktree_path"].as_str().unwrap());
+    let first_branch = first_metadata["worktree_branch"].as_str().unwrap();
+    let second_branch = second_metadata["worktree_branch"].as_str().unwrap();
+
+    assert_ne!(first_path, second_path);
+    assert_ne!(first_branch, second_branch);
+    wait_for_worktree_cleanup(&repository.path, &first_path, first_branch);
+    wait_for_worktree_cleanup(&repository.path, &second_path, second_branch);
+}
+
+#[test]
+fn worktree_failure_emits_structured_terminal_frame() {
+    let _guard = worktree_test_guard();
+    let backend = start_backend();
+    let directory = std::env::temp_dir().join(format!(
+        "capture-delegate-non-repo-{}-{}",
+        std::process::id(),
+        TEMP_GIT_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).expect("non-repository fixture should be created");
+    let before = worktree_root_entries();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "failure-non-repo",
+            "executable": "/usr/bin/true",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+            "worktree_repository": directory,
+        }),
+    );
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert!(frames[0]["exit_code"].is_null());
+    assert_eq!(frames[0]["error_code"], "worktree_failed");
+    assert_eq!(worktree_root_entries(), before);
+    fs::remove_dir(&directory).expect("non-repository fixture should be removed");
+}
+
+#[test]
+fn worktree_request_validation() {
+    let _guard = worktree_test_guard();
+    let backend = start_backend();
+    for (index, worktree_repository) in [
+        serde_json::json!(42),
+        serde_json::json!(""),
+        serde_json::json!("relative/repository"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": format!("invalid-worktree-{index}"),
+            "executable": "/usr/bin/true",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+            "worktree_repository": worktree_repository,
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        let frame = read_json_frame(&mut BufReader::new(stream));
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "invalid_start_process");
+    }
+
+    for (run_id, worktree_repository) in [
+        ("absent-worktree", None),
+        ("null-worktree", Some(serde_json::Value::Null)),
+    ] {
+        let mut request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": run_id,
+            "executable": "/usr/bin/true",
+            "arguments": [],
+            "timeout_milliseconds": 2_000,
+        });
+        if let Some(worktree_repository) = worktree_repository {
+            request["worktree_repository"] = worktree_repository;
+        }
+        let frames = run_frames(&backend, request);
+        let metadata = frames
+            .iter()
+            .find(|frame| frame["type"] == "run_metadata")
+            .expect("ordinary run should emit metadata");
+        assert!(metadata.get("worktree_path").is_none());
+        assert!(metadata.get("worktree_branch").is_none());
+    }
+}
+
+#[test]
+fn dirty_worktree_is_still_removed() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "dirty-worktree",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "printf changed > tracked.txt; touch untracked.txt"],
+        "timeout_milliseconds": 2_000,
+        "worktree_repository": repository.path,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let frames = read_through_terminal(&mut BufReader::new(stream));
+    let metadata = frames
+        .iter()
+        .find(|frame| frame["type"] == "run_metadata")
+        .expect("dirty worktree run should emit metadata");
+    let worktree_path = PathBuf::from(metadata["worktree_path"].as_str().unwrap());
+    let branch = metadata["worktree_branch"].as_str().unwrap();
+    assert_eq!(frames.last().unwrap()["exit_code"], 0);
+    wait_for_worktree_cleanup(&repository.path, &worktree_path, branch);
 }

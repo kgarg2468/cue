@@ -1,0 +1,55 @@
+Slice: M1 worktree isolation + cleanup (S10-001 remainder)
+Branch: loop/m1-worktree (from origin/main = afc540f)
+Date: 2026-07-18
+Worker: gpt-5.6-sol (effort high), prompt/transcript/report in /tmp/worker-worktree/
+
+Scope
+- start_process gains optional worktree_repository (absolute path string).
+  Validation failures (non-string/empty/relative) -> invalid_start_process
+  before admission; absent/null preserves ordinary-run behavior.
+- Worktree runs execute in a private 0700 directory under
+  std::env::temp_dir()/capture-delegate-worktrees/ (symlink/non-dir root
+  rejected) on generated branch capture-delegate/run-<sanitized-id>-<nonce>.
+- run_metadata reports worktree_path/worktree_branch (skip-serialized when
+  absent). Terminal-first cleanup: run_exit written+flushed, then synchronous
+  best-effort cleanup (worktree remove --force -> scoped remove_dir_all ->
+  prune -> branch -D), errors swallowed; idempotent RunWorktree drop guard.
+- Runtime worktree failures emit run_exit exit_code=null
+  error_code="worktree_failed".
+- Swift: worktreeRepository parameter on startProcessRequest;
+  ProcessExitErrorCode.worktreeFailed.
+
+Diff gate
+- git status: exactly the 4 allowlisted files modified
+  (backend/src/lib.rs, backend/tests/process_lifecycle.rs,
+  Sources/CaptureDelegateIPC/IPCClient.swift,
+  Tests/CaptureDelegateIPCTests/IPCClientTests.swift); +666/-10 — accepted.
+
+Evidence (this directory)
+- red-evidence.log: 6 new worktree lifecycle tests FAIL against
+  origin/main backend/src/lib.rs (checkout origin/main -- lib.rs, rerun,
+  restore). Worker separately captured Swift red pre-implementation.
+- cargo-test.log: full suite green — 15 lib + 13 health_socket +
+  52 process_lifecycle (46 prior + 6 worktree), 0 failed.
+- verify-m0-parity.log: ./scripts/verify-m0.sh exit 0 (fmt, clippy -D
+  warnings, Rust tests, swift-format strict, swiftlint, Swift tests,
+  release builds, traceability validation).
+- runtime-demo.log: release backend against a scratch git repo —
+  child pwd inside managed root on capture-delegate/run-* branch, metadata
+  carries both worktree fields, cleanup verified by polling (dir gone,
+  git worktree list clean, no capture-delegate/* branches survive a dirty
+  worktree), non-repo request yields error_code=worktree_failed, backend
+  exits 0 and removes its socket.
+
+Orchestrator fixes on top of worker slice
+- process_lifecycle.rs isolation test compared child pwd byte-for-byte with
+  metadata worktree_path; fails on macOS /var -> /private/var symlink.
+  Fixed by comparing through the canonicalized managed root (commit
+  "Compare worktree pwd through the canonicalized managed root").
+- One strict swift-format line-break violation in IPCClientTests.swift,
+  auto-formatted (same class of issue as cycle 14).
+
+Known limitation
+- Codex sandbox cannot bind filesystem Unix sockets; worker verified via
+  cargo test --no-run + a temporary UnixStream::pair probe (removed).
+  Full socket integration tests ran locally (cargo-test.log).
