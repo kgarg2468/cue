@@ -172,9 +172,10 @@ public enum IPCClient {
         inputWaitDetectMilliseconds: Int? = nil
     ) -> String {
         let ptyField = pty ? ",\"pty\":true" : ""
-        let inputWaitDetectField = inputWaitDetectMilliseconds.map {
-            ",\"input_wait_detect_milliseconds\":\($0)"
-        } ?? ""
+        let inputWaitDetectField =
+            inputWaitDetectMilliseconds.map {
+                ",\"input_wait_detect_milliseconds\":\($0)"
+            } ?? ""
         return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
             + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
             + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)"
