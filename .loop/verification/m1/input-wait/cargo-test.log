@@ -1,0 +1,30 @@
+test invalid_timeouts_are_rejected_before_process_admission ... ok
+test pty_input_round_trip_with_echo_disabled ... ok
+test pty_run_sees_a_controlling_tty ... ok
+test run_metadata_frame_precedes_run_exit_with_process_details ... ok
+test secrets_are_redacted_from_streamed_output ... ok
+test send_input_and_close_stdin_drive_a_cat_run_to_natural_exit ... ok
+test spawn_failure_emits_no_metadata_frame ... ok
+test sigint_kills_active_run_groups ... ok
+test sigterm_kills_active_run_groups_and_removes_socket ... ok
+test cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full ... ok
+test pty_run_times_out_like_pipe_runs ... ok
+test u64_max_timeout_allows_a_completed_process ... ok
+test timed_out_runs_release_all_process_capacity ... ok
+test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
+test input_wait_fires_for_a_quiet_pipe_run ... ok
+test input_wait_fires_for_a_pty_run ... ok
+test input_wait_absent_field_emits_no_waiting_frames ... ok
+test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
+test timeout_kills_descendant_processes ... ok
+test paused_run_still_times_out_and_kills_its_process_group ... ok
+test input_wait_does_not_fire_for_busy_silent_run ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 44.34s
+
+   Doc-tests capture_delegate_backend
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

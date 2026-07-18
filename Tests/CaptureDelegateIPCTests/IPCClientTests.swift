@@ -28,6 +28,7 @@ func startProcessRequestJSON() {
     #expect(json["arguments"] as? [String] == ["first", "second"])
     #expect(json["timeout_milliseconds"] as? Int == 250)
     #expect(!request.contains("pty"))
+    #expect(!request.contains("input_wait_detect_milliseconds"))
 
     let ptyRequest = IPCClient.startProcessRequest(
         runID: "run-1",
@@ -38,6 +39,33 @@ func startProcessRequestJSON() {
     )
     #expect(ptyRequest.hasSuffix(",\"pty\":true}\n"))
     #expect(ptyRequest.components(separatedBy: ",\"pty\":true").count == 2)
+
+    let inputWaitRequest = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250,
+        inputWaitDetectMilliseconds: 500
+    )
+    #expect(
+        inputWaitRequest.hasSuffix(",\"input_wait_detect_milliseconds\":500}\n")
+            && inputWaitRequest.components(
+                separatedBy: ",\"input_wait_detect_milliseconds\":500"
+            ).count == 2
+    )
+
+    let ptyInputWaitRequest = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250,
+        pty: true,
+        inputWaitDetectMilliseconds: 500
+    )
+    #expect(
+        ptyInputWaitRequest.hasSuffix(
+            ",\"pty\":true,\"input_wait_detect_milliseconds\":500}\n")
+    )
 }
 
 @Test("cancel process request JSON and accepted result are typed")
@@ -306,6 +334,34 @@ func timeoutExitDecodes() throws {
     #expect(
         collector.result().events == [
             .exit(runID: "timeout-run", exitCode: nil, errorCode: .timedOut)
+        ])
+}
+
+@Test("run input waiting decodes before the terminal frame")
+func inputWaitingDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    try writeAll(
+        Array(
+            ("{\"version\":1,\"type\":\"run_input_waiting\",\"run_id\":\"wait-run\","
+                + "\"quiet_for_milliseconds\":750}\n"
+                + "{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"wait-run\",\"exit_code\":0}\n")
+                .utf8),
+        to: descriptors.writer
+    )
+    let collector = ProcessEventCollector()
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "wait-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .inputWaiting(runID: "wait-run", quietForMilliseconds: 750),
+            .exit(runID: "wait-run", exitCode: 0, errorCode: nil),
         ])
 }
 
