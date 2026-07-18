@@ -1,0 +1,6 @@
+phase1: first run_input_waiting after 0.50s: {'version': 1, 'type': 'run_input_waiting', 'run_id': 'demo-iw', 'quiet_for_milliseconds': 502}
+send_input: accepted
+phase2: echo output='hello\n', waiting events so far=2
+close_stdin: accepted
+phase3: exit_code=0 error=None waiting_total=2 frames_after_exit=[]
+backend exit: 0 socket removed: True
