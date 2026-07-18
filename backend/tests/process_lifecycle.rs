@@ -231,6 +231,140 @@ fn secrets_are_redacted_from_streamed_output() {
 }
 
 #[test]
+fn pty_run_sees_a_controlling_tty() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "pty-controlling-tty-run",
+            "executable": "/bin/sh",
+            "arguments": [
+                "-c",
+                "test -t 0 && test -t 1 && test -t 2 && echo all-tty || echo no-tty",
+            ],
+            "timeout_milliseconds": 2_000,
+            "pty": true,
+        }),
+    );
+    let stdout: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+
+    assert!(stdout.contains("all-tty"));
+    assert!(!stdout.contains("no-tty"));
+    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
+}
+
+#[test]
+fn pty_merges_stderr_into_stdout() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "pty-merged-output-run",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "test -t 1 || exit 7; echo out; echo err 1>&2"],
+            "timeout_milliseconds": 2_000,
+            "pty": true,
+        }),
+    );
+    let stdout: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+
+    assert!(stdout.contains("out\r\n"));
+    assert!(stdout.contains("err\r\n"));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stderr")
+            .count(),
+        0
+    );
+    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
+}
+
+#[test]
+fn pty_output_is_redacted_and_counted() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "pty-redaction-run",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "test -t 1 || exit 7; echo AKIAIOSFODNN7EXAMPLE"],
+            "timeout_milliseconds": 2_000,
+            "pty": true,
+        }),
+    );
+    let stdout: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+    let metadata_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_metadata")
+        .expect("run should emit metadata");
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+
+    assert!(stdout.contains("[REDACTED]"));
+    assert!(!stdout.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(
+        frames[metadata_index]["redactions"]
+            .as_u64()
+            .is_some_and(|count| count >= 1)
+    );
+    assert!(metadata_index < exit_index);
+    assert_eq!(frames[exit_index]["exit_code"], 0);
+}
+
+#[test]
+fn non_pty_stderr_stays_separate() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "explicit-non-pty-run",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "echo out; echo err 1>&2"],
+            "timeout_milliseconds": 2_000,
+            "pty": false,
+        }),
+    );
+    let stdout: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+    let stderr: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stderr")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+
+    assert!(stdout.contains("out\n"));
+    assert!(!stdout.contains("err\n"));
+    assert!(stderr.contains("err\n"));
+    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
+}
+
+#[test]
 fn spawn_failure_emits_no_metadata_frame() {
     let backend = start_backend();
     let frames = run_frames(
@@ -548,6 +682,49 @@ fn cancel_kills_descendant_processes() {
 }
 
 #[test]
+fn pty_cancel_kills_the_process_group() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "pty-cancel-descendant-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "test -t 1 || exit 7; sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 30_000,
+        "pty": true,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "pty-cancel-descendant-run")["status"],
+        "accepted"
+    );
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.len() >= 2);
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "cancelled"
+    }));
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after PTY cancellation"
+    );
+}
+
+#[test]
 fn pause_and_resume_control_the_run_process_group() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -681,6 +858,123 @@ fn send_input_and_close_stdin_drive_a_cat_run_to_natural_exit() {
     let terminal = read_json_frame(&mut reader);
     assert_eq!(terminal["type"], "run_exit");
     assert_eq!(terminal["run_id"], "stdin-cat-run");
+    assert_eq!(terminal["exit_code"], 0);
+    assert!(terminal.get("error_code").is_none());
+}
+
+#[test]
+fn pty_input_round_trip_with_echo_disabled() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "pty-input-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "test -t 0 || exit 7; exec cat"],
+        "timeout_milliseconds": 10_000,
+        "pty": true,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+
+    let input_response = wait_for_registered_input_control(
+        &backend.socket_path,
+        serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": "pty-input-run",
+            "data": "hello\n",
+        }),
+    );
+    assert_eq!(input_response["status"], "accepted");
+
+    let mut reader = BufReader::new(stream);
+    let mut output = String::new();
+    while !output.contains("hello\r\n") {
+        let frame = read_json_frame(&mut reader);
+        assert_ne!(frame["type"], "run_exit");
+        if frame["type"] == "run_output" && frame["stream"] == "stdout" {
+            output.push_str(frame["output"].as_str().expect("output should be a string"));
+        }
+    }
+    assert_eq!(output.matches("hello").count(), 1);
+    assert_eq!(output, "hello\r\n");
+
+    let close_response = control_process(&backend.socket_path, "close_stdin", "pty-input-run");
+    assert_eq!(close_response["status"], "accepted");
+    let after_close = input_control(
+        &backend.socket_path,
+        serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": "pty-input-run",
+            "data": "after\n",
+        }),
+    );
+    assert_eq!(after_close["status"], "closed");
+
+    let metadata = read_json_frame(&mut reader);
+    assert_eq!(metadata["type"], "run_metadata");
+    let terminal = read_json_frame(&mut reader);
+    assert_eq!(terminal["type"], "run_exit");
+    assert_eq!(terminal["exit_code"], 0);
+    assert!(terminal.get("error_code").is_none());
+}
+
+#[test]
+fn pty_close_stdin_flushes_a_partial_line_to_eof() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "pty-partial-line-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "test -t 0 || exit 7; exec cat"],
+        "timeout_milliseconds": 10_000,
+        "pty": true,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+
+    let input_response = wait_for_registered_input_control(
+        &backend.socket_path,
+        serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": "pty-partial-line-run",
+            "data": "partial-no-newline",
+        }),
+    );
+    assert_eq!(input_response["status"], "accepted");
+
+    let close_response =
+        control_process(&backend.socket_path, "close_stdin", "pty-partial-line-run");
+    assert_eq!(close_response["status"], "accepted");
+
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    let output: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+    let terminal = frames.last().expect("terminal frame should be present");
+    assert!(output.contains("partial-no-newline"));
+    assert_eq!(terminal["type"], "run_exit");
     assert_eq!(terminal["exit_code"], 0);
     assert!(terminal.get("error_code").is_none());
 }
@@ -1482,6 +1776,63 @@ fn invalid_timeouts_are_rejected_before_process_admission() {
     assert_eq!(frame["type"], "error");
     assert_eq!(frame["code"], "invalid_start_process");
     assert!(child_pids(backend.child.id()).is_empty());
+}
+
+#[test]
+fn pty_run_times_out_like_pipe_runs() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "pty-timeout-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "test -t 0 || exit 7; sleep 30"],
+        "timeout_milliseconds": 200,
+        "pty": true,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    let started = Instant::now();
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("frame should be readable")).expect("frame JSON")
+        })
+        .collect();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let terminal_indexes: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| (frame["type"] == "run_exit").then_some(index))
+        .collect();
+    assert_eq!(terminal_indexes, vec![frames.len() - 1]);
+    assert!(frames.len() >= 2);
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert!(frames.last().is_some_and(|frame| {
+        frame["exit_code"].is_null() && frame["error_code"] == "timed_out"
+    }));
+
+    let mut health = UnixStream::connect(&backend.socket_path).expect("health should connect");
+    health
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("health timeout should configure");
+    health
+        .write_all(b"{\"version\":1,\"type\":\"health\"}\n")
+        .expect("health should write");
+    let mut health_frame = String::new();
+    BufReader::new(health)
+        .read_line(&mut health_frame)
+        .expect("health should remain responsive");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&health_frame).expect("health JSON")["status"],
+        "ok"
+    );
 }
 
 #[test]

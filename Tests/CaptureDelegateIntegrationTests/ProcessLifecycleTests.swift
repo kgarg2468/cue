@@ -112,6 +112,45 @@ func processLifecycle() throws {
         })
 }
 
+@Test("Swift starts a PTY process and observes tty-marked output")
+func ptyProcessLifecycle() throws {
+    guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
+    else {
+        throw NSError(domain: "CaptureDelegateIntegrationTests", code: 1)
+    }
+
+    let directory = URL(filePath: "/private/tmp")
+        .appending(
+            path: "capture-delegate-pty-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = directory.appending(path: "backend.sock")
+    let backend = try startBackend(binary: backendBinary, socket: socket)
+    defer {
+        if backend.isRunning { backend.terminate() }
+        backend.waitUntilExit()
+    }
+
+    var events: [ProcessEvent] = []
+    try IPCClient.startProcess(
+        socketPath: socket.path(),
+        runID: "swift-pty-run",
+        executable: "/bin/sh",
+        arguments: ["-c", "test -t 0 && echo tty"],
+        timeoutMilliseconds: 2_000,
+        pty: true
+    ) { event in
+        events.append(event)
+    }
+
+    let output = events.compactMap { event -> String? in
+        if case .output(_, .stdout, let output) = event { return output }
+        return nil
+    }.joined()
+    #expect(output.contains("tty"))
+    #expect(events.last == .exit(runID: "swift-pty-run", exitCode: 0, errorCode: nil))
+}
+
 @Test("nonexistent executable becomes a typed spawn failure event")
 func nonexistentExecutable() throws {
     guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
