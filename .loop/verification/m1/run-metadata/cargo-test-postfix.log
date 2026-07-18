@@ -1,0 +1,9 @@
+     Running unittests src/lib.rs (target/debug/deps/capture_delegate_backend-39fb6de77e1f3fc5)
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+     Running unittests src/main.rs (target/debug/deps/capture_delegate_backend-f65f386cbb25ec80)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/health_socket.rs (target/debug/deps/health_socket-9d38009ee7e84a8e)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+     Running tests/process_lifecycle.rs (target/debug/deps/process_lifecycle-bc1e9043f46530e8)
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.08s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

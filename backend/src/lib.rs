@@ -1149,7 +1149,9 @@ fn run_process(
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
     let wall_clock_started = SystemTime::now();
-    let working_directory = std::env::current_dir()?.to_string_lossy().into_owned();
+    let working_directory = std::env::current_dir()
+        .map(|directory| directory.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut environment_variable_names: Vec<String> = std::env::vars_os()
         .map(|(name, _)| name.to_string_lossy().into_owned())
         .collect();
@@ -1291,6 +1293,8 @@ fn run_process(
             }
         }
     };
+    let wall_clock_finished = SystemTime::now();
+    let duration_ms = u64::try_from(timeout_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     control.cancelled.store(true, Ordering::Release);
     let stdout_result = stdout_drain
         .join()
@@ -1298,30 +1302,37 @@ fn run_process(
     let stderr_result = stderr_drain
         .join()
         .map_err(|_| io::Error::other("stderr drain thread panicked"))?;
-    let wall_clock_finished = SystemTime::now();
-    let duration_ms = u64::try_from(timeout_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    write_json_frame(
-        &stream,
-        &RunMetadataResponse {
-            version: PROTOCOL_VERSION,
-            response_type: "run_metadata",
-            run_id: &run_id,
-            pid: pgid as u32,
-            pgid: pgid as u32,
-            executable: &executable,
-            arguments: &arguments,
-            working_directory,
-            started_at: system_time_as_rfc3339(wall_clock_started),
-            finished_at: system_time_as_rfc3339(wall_clock_finished),
-            duration_ms,
-            environment_variable_names,
-            redactions: redactions.load(Ordering::Relaxed),
-        },
-    )?;
+    let mut metadata = RunMetadataResponse {
+        version: PROTOCOL_VERSION,
+        response_type: "run_metadata",
+        run_id: &run_id,
+        pid: pgid as u32,
+        pgid: pgid as u32,
+        executable: &executable,
+        arguments: &arguments,
+        working_directory,
+        started_at: system_time_as_rfc3339(wall_clock_started),
+        finished_at: system_time_as_rfc3339(wall_clock_finished),
+        duration_ms,
+        environment_variable_names,
+        redactions: redactions.load(Ordering::Relaxed),
+    };
+    let metadata_result = (|| {
+        let frame_is_too_large = |response: &RunMetadataResponse<'_>| -> io::Result<bool> {
+            Ok(serde_json::to_vec(response)?.len() + 1 >= MAX_REQUEST_BYTES)
+        };
+        if frame_is_too_large(&metadata)? {
+            metadata.environment_variable_names.clear();
+        }
+        if frame_is_too_large(&metadata)? {
+            metadata.arguments = &[];
+        }
+        write_json_frame(&stream, &metadata)
+    })();
     // The run id must be released before the terminal frame is written so a
     // client that observes run_exit can immediately reuse the id.
     drop(registration);
-    write_json_frame(
+    let run_exit_result = write_json_frame(
         &stream,
         &RunExitResponse {
             version: PROTOCOL_VERSION,
@@ -1334,7 +1345,9 @@ fn run_process(
             },
             error_code,
         },
-    )?;
+    );
+    metadata_result?;
+    run_exit_result?;
     stdout_result?;
     stderr_result
 }

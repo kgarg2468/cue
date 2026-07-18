@@ -43,3 +43,30 @@ fields (final status, output artifacts).
 - runtime-demo.log — release binary: stdout "export AWS_KEY=[REDACTED]", stderr
   "password=[REDACTED]", metadata pid/pgid/63 env names/duration 15ms/redactions 2,
   frame order run_metadata then run_exit, SIGTERM exit 0 with socket removed.
+
+## Independent review dispositions (Codex gpt-5.6-sol, read-only, high effort)
+Report: review-report.md. Findings confirmed against the code and dispositioned:
+- CONFIRMED blocker — the 8KiB outbound frame cap could make an oversized
+  run_metadata frame (large arguments + env names) unwind the connection before
+  run_exit. Fixed: progressive truncation (clear env names, then arguments, keeping
+  all scalar fields) sized against the exact cap check, and a metadata write error
+  no longer suppresses run_exit (registration released, run_exit attempted, error
+  propagated after). New test oversized_run_metadata_is_truncated_before_run_exit;
+  runtime demo shows partial truncation at a 7000B argument (env cleared, argument
+  kept) and full truncation at 7904B, with run_exit 0 both times.
+- CONFIRMED major — finished_at/duration_ms were captured after the drain-thread
+  joins, so client socket backpressure inflated reported duration. Fixed: captured
+  at the supervision loop's terminal break, before the joins; frame ordering
+  unchanged.
+- CONFIRMED major — the new current_dir()? propagated failure before spawn (deleted
+  backend cwd would EOF every start request with no frame). Fixed: non-propagating
+  fallback to an empty working_directory.
+- Redaction pattern gaps (values under 4 chars, single-quoted/whitespace values,
+  Bearer under 8 chars) and prose over-redaction ("Bearer authentication is
+  required", "parser token: identifier") — accepted trade-offs of the documented
+  fixed pattern set; no change.
+- Pre-existing zero-terminal-frame error paths (drain-thread spawn failure, fcntl,
+  try_wait/wait errors after spawn) — verified pre-existing on main, out of this
+  slice's scope; flagged as future durability work.
+Post-fix evidence: cargo-test-postfix.log (15+13+31 green),
+verify-m0-parity-postfix.log (exit 0), runtime-demo-postfix.log.

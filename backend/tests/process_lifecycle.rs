@@ -151,6 +151,48 @@ fn run_metadata_frame_precedes_run_exit_with_process_details() {
 }
 
 #[test]
+fn oversized_run_metadata_is_truncated_before_run_exit() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "oversized-metadata-run",
+            "executable": "/bin/echo",
+            "arguments": ["x".repeat(7_904)],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+
+    let metadata_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_metadata")
+        .expect("run should emit metadata");
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert_eq!(metadata_index + 1, exit_index);
+
+    let metadata = &frames[metadata_index];
+    assert_eq!(metadata["run_id"], "oversized-metadata-run");
+    assert!(metadata["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert_eq!(metadata["executable"], "/bin/echo");
+    assert!(metadata["working_directory"].as_str().is_some());
+    assert!(metadata["started_at"].as_str().is_some());
+    assert!(metadata["finished_at"].as_str().is_some());
+    assert!(metadata["duration_ms"].as_u64().is_some());
+    assert_eq!(
+        metadata["environment_variable_names"],
+        serde_json::json!([])
+    );
+    assert_eq!(metadata["arguments"], serde_json::json!([]));
+
+    assert_eq!(frames[exit_index]["exit_code"], 0);
+}
+
+#[test]
 fn secrets_are_redacted_from_streamed_output() {
     let backend = start_backend();
     let frames = run_frames(
