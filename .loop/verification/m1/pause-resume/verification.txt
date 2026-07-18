@@ -43,3 +43,34 @@ Evidence in this directory:
 Known bounded semantics (documented in code comments): the timeout clock
 does not stop while paused; pgid-reuse after reap remains the inherent
 window noted in the process-groups slice.
+
+Independent review (Codex gpt-5.6-sol, high effort, static): 1 blocker,
+1 major, 3 minor. Dispositions after code verification (fixes implemented by
+a second sol worker, high effort, diff-gated to lib.rs + process_lifecycle.rs,
++42/-18):
+- FIXED (blocker): the SeqCst handshake guaranteed visibility but not signal
+  ordering — a stalled post-spawn SIGSTOP could land after a resume, leaving
+  the group stopped with paused=false. All {pgid, paused} transitions and
+  their SIGSTOP/SIGCONT delivery now serialize under the registry mutex
+  (pause/resume hold the lock through signalling; publish_pgid does the
+  post-spawn store+conditional-SIGSTOP under the same lock).
+- FIXED (major): pause/resume could signal a reaped, reusable pgid because
+  the registry entry outlives the reap until drains join. New
+  RunRegistration::retire zeroes the published pgid under the mutex; every
+  terminal branch retires after the group kill and before reaping
+  (TimedOut/Cancelled) — the Exited branch's try_wait-to-retire residual
+  matches the pre-existing inherent kill-after-reap pgid-reuse window and is
+  commented as such.
+- FIXED (minor): resume-state polling treated zombie 'Z' as resumed; the
+  helper now rejects both 'T' and 'Z' when expecting a running state.
+- FIXED (minor): the paused-timeout test's 1500ms budget could expire on
+  slow CI before the pause round-trip (flaky not_found); raised to 5000ms.
+- NOTED (minor, no code change): the integration pause test waits for output
+  before pausing, so the register-to-spawn pause window is not exercised
+  end-to-end; it is covered by the lib unit test
+  (pause-before-pgid records without signalling) and is now enforced by
+  mutex serialization rather than lock-free ordering.
+
+Post-fix evidence: cargo fmt/clippy clean; full suite green (11 lib + 13 +
+22 integration); pause tests 8/8 stress; verify-m0 parity green
+(verify-m0-parity-postfix.log, 19 Swift tests).

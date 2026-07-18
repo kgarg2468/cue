@@ -460,7 +460,7 @@ fn paused_run_still_times_out_and_kills_its_process_group() {
         "run_id": "paused-timeout-run",
         "executable": "/bin/sh",
         "arguments": ["-c", "sleep 30 & echo $!; wait"],
-        "timeout_milliseconds": 1_500,
+        "timeout_milliseconds": 5_000,
     });
     let mut stream =
         UnixStream::connect(&backend.socket_path).expect("start client should connect");
@@ -1220,7 +1220,14 @@ fn wait_for_process_stopped_state(pid: libc::pid_t, stopped: bool) -> bool {
             .output()
             .expect("process state should be observable");
         let state = String::from_utf8_lossy(&output.stdout);
-        if !state.trim().is_empty() && state.trim_start().starts_with('T') == stopped {
+        let state = state.trim_start();
+        if !state.is_empty()
+            && if stopped {
+                state.starts_with('T')
+            } else {
+                !state.starts_with('T') && !state.starts_with('Z')
+            }
+        {
             return true;
         }
         if Instant::now() >= deadline {

@@ -171,13 +171,11 @@ impl ActiveRuns {
     }
 
     fn pause(&self, run_id: &str) -> bool {
-        let control = self
+        let state = self
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .runs
-            .get(run_id)
-            .cloned();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let control = state.runs.get(run_id);
         let Some(control) = control else {
             return false;
         };
@@ -190,13 +188,11 @@ impl ActiveRuns {
     }
 
     fn resume(&self, run_id: &str) -> bool {
-        let control = self
+        let state = self
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .runs
-            .get(run_id)
-            .cloned();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let control = state.runs.get(run_id);
         let Some(control) = control else {
             return false;
         };
@@ -243,6 +239,28 @@ struct RunRegistration {
     state: Arc<Mutex<ActiveRunsState>>,
     run_id: String,
     control: Arc<RunControl>,
+}
+
+impl RunRegistration {
+    fn publish_pgid(&self, pgid: libc::pid_t) {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // All pgid/pause transitions and their signals serialize under the registry mutex.
+        self.control.pgid.store(pgid, Ordering::SeqCst);
+        if self.control.paused.load(Ordering::SeqCst) {
+            signal_process_group(pgid, libc::SIGSTOP);
+        }
+    }
+
+    fn retire(&self) {
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.control.pgid.store(0, Ordering::SeqCst);
+    }
 }
 
 impl Drop for RunRegistration {
@@ -820,12 +838,7 @@ fn run_process(
         }
     };
     let pgid = child.id() as libc::pid_t;
-    registration.control.pgid.store(pgid, Ordering::SeqCst);
-    // This Dekker-style store-then-load handshake with pause applies a pause that lands between
-    // registration and spawn from exactly one side.
-    if registration.control.paused.load(Ordering::SeqCst) {
-        signal_process_group(pgid, libc::SIGSTOP);
-    }
+    registration.publish_pgid(pgid);
     let stdout = child
         .stdout
         .take()
@@ -899,6 +912,8 @@ fn run_process(
                 // `sh -c 'sleep 30 & exit 0'`) must not leak them past the
                 // run's terminal frame, including after an accepted cancel.
                 kill_process_group(&mut child);
+                // The try_wait-to-retire window matches the pre-existing kill-after-reap pgid-reuse window.
+                registration.retire();
                 break (
                     child_status
                         .expect("completed child should have status")
@@ -908,10 +923,12 @@ fn run_process(
             }
             ProcessSupervision::TimedOut => {
                 kill_process_group(&mut child);
+                registration.retire();
                 break (child.wait()?.code(), Some("timed_out"));
             }
             ProcessSupervision::Cancelled => {
                 kill_process_group(&mut child);
+                registration.retire();
                 break (child.wait()?.code(), Some("cancelled"));
             }
             ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),
