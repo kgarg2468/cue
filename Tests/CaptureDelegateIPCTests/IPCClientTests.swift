@@ -29,6 +29,25 @@ func startProcessRequestJSON() {
     #expect(json["timeout_milliseconds"] as? Int == 250)
 }
 
+@Test("cancel process request JSON and accepted result are typed")
+func cancelProcessRequestAndAcceptedResult() throws {
+    let request = IPCClient.cancelProcessRequest(runID: "run-1")
+    #expect(request == "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\"run-1\"}\n")
+
+    #expect(
+        try IPCClient.decodeCancelProcessResponse(
+            "{\"version\":1,\"type\":\"cancel_response\",\"run_id\":\"run-1\",\"status\":\"accepted\"}\n",
+            expectedRunID: "run-1"
+        ) == .accepted
+    )
+    #expect(
+        try IPCClient.decodeCancelProcessResponse(
+            "{\"version\":1,\"type\":\"cancel_response\",\"run_id\":\"run-1\",\"status\":\"not_found\"}\n",
+            expectedRunID: "run-1"
+        ) == .notFound
+    )
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)
