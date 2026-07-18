@@ -275,10 +275,9 @@ fn stalled_client_does_not_monopolize_accept_loop() {
 #[test]
 fn stalled_clients_are_backpressured_by_bounded_worker_pool() {
     let backend = start_backend();
-    let _stalled_clients: Vec<_> = (0..8).map(|_| connect(&backend.socket_path)).collect();
-    thread::sleep(Duration::from_millis(50));
-
     let started = Instant::now();
+    let _stalled_clients: Vec<_> = (0..8).map(|_| connect(&backend.socket_path)).collect();
+
     assert_service_healthy(&backend.socket_path);
 
     assert!(
