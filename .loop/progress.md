@@ -151,3 +151,11 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Delivered: PR #17 (`bf89e72`, `2bdf1b9`), both verify-m0 CI runs green on both commits, squash-merged as `67d39f2`; closeout in this PR.
 - Flagged future work: per-run stdin queue is unbounded; waiting-input detection needs PTY support.
 - Status: merged; M1 remains in progress. Next cycle: one bounded M1 slice — PTY support (unlocks waiting-input detection), or run metadata/redaction.
+
+## Cycle 11 — 2026-07-18
+- Slice: M1 run metadata + secret redaction (S10-010), PR #19 (loop/m1-run-metadata).
+- run_metadata frame (pid/pgid/executable/arguments/wd/timestamps/duration/env NAMES/redaction count) after final output, before run_exit, on all terminal paths; spawn failures emit none. Output redaction with fixed compiled pattern set, per-frame, both streams. Swift .metadata event.
+- Provenance: sol impl worker (killed by command timeout post-diff; orchestrator finished one test-ordering edit + all verification). Independent sol review: 1 blocker + 2 majors confirmed → fixed by second sol worker (metadata truncation vs 8KiB cap + run_exit no longer suppressible; duration captured at terminal state; current_dir fallback). Accepted limitations documented: chunk-split secrets, fixed pattern set, prose over-redaction. Pre-existing zero-terminal-frame resource-error paths flagged as future durability work.
+- Evidence: .loop/verification/m1/run-metadata/ (red evidence, cargo 15+13+31, parity, runtime demos incl. partial/full truncation, review report + dispositions).
+- BLOCKED: GitHub Actions billing failure ("recent account payments have failed or your spending limit needs to be increased") — no CI job starts; both required verify-m0 checks red in ~2s with zero steps; rerun reproduced. Local verification fully green. Merge prohibited until user fixes billing and checks rerun green.
+- Next cycle: if CI unblocked → rerun checks, merge PR #19, closeout (traceability S10-010/S10-001). Else busy-exit on the persisted blocker.
