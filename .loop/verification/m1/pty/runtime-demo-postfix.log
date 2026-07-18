@@ -1,0 +1,4 @@
+send partial: accepted
+close: accepted
+partial-line close: output='partial-no-newline' exit=0 elapsed=0.55s (natural exit, not the 10s timeout)
+backend exit: 0 socket removed: True

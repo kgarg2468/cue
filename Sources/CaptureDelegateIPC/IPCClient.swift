@@ -126,6 +126,7 @@ public enum IPCClient {
         executable: String,
         arguments: [String],
         timeoutMilliseconds: Int,
+        pty: Bool = false,
         onEvent: (ProcessEvent) -> Void
     ) throws {
         let descriptor = try connect(to: socketPath)
@@ -136,6 +137,7 @@ public enum IPCClient {
             executable: executable,
             arguments: arguments,
             timeoutMilliseconds: timeoutMilliseconds,
+            pty: pty,
             to: descriptor
         )
         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
@@ -162,9 +164,13 @@ public enum IPCClient {
         runID: String,
         executable: String,
         arguments: [String],
-        timeoutMilliseconds: Int
+        timeoutMilliseconds: Int,
+        pty: Bool = false
     ) -> String {
-        "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),\"timeout_milliseconds\":\(timeoutMilliseconds)}\n"
+        let ptyField = pty ? ",\"pty\":true" : ""
+        return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
+            + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
+            + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -249,6 +255,7 @@ public enum IPCClient {
         executable: String,
         arguments: [String],
         timeoutMilliseconds: Int,
+        pty: Bool,
         to descriptor: Int32
     ) throws {
         try suppressSIGPIPE(on: descriptor)
@@ -258,7 +265,8 @@ public enum IPCClient {
                     runID: runID,
                     executable: executable,
                     arguments: arguments,
-                    timeoutMilliseconds: timeoutMilliseconds
+                    timeoutMilliseconds: timeoutMilliseconds,
+                    pty: pty
                 ).utf8
             ), to: descriptor)
     }

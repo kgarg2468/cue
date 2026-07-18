@@ -27,6 +27,17 @@ func startProcessRequestJSON() {
     #expect(json["executable"] as? String == "/bin/cat")
     #expect(json["arguments"] as? [String] == ["first", "second"])
     #expect(json["timeout_milliseconds"] as? Int == 250)
+    #expect(!request.contains("pty"))
+
+    let ptyRequest = IPCClient.startProcessRequest(
+        runID: "run-1",
+        executable: "/bin/cat",
+        arguments: ["first", "second"],
+        timeoutMilliseconds: 250,
+        pty: true
+    )
+    #expect(ptyRequest.hasSuffix(",\"pty\":true}\n"))
+    #expect(ptyRequest.components(separatedBy: ",\"pty\":true").count == 2)
 }
 
 @Test("cancel process request JSON and accepted result are typed")

@@ -1,9 +1,9 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -49,6 +49,8 @@ struct Request {
     timeout_milliseconds: Option<serde_json::Value>,
     #[serde(default)]
     data: Option<String>,
+    #[serde(default)]
+    pty: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -128,7 +130,23 @@ struct ActiveRunsState {
 struct RunStdinState {
     buffer: Vec<u8>,
     closed: bool,
-    handle: Option<std::process::ChildStdin>,
+    handle: Option<RunStdinHandle>,
+    veof_sent: bool,
+    last_pty_byte_was_newline: bool,
+}
+
+enum RunStdinHandle {
+    Pipe(std::process::ChildStdin),
+    Pty(Arc<File>),
+}
+
+impl RunStdinHandle {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Pipe(stdin) => stdin.write(buffer),
+            Self::Pty(master) => master.as_ref().write(buffer),
+        }
+    }
 }
 
 struct RunControl {
@@ -148,6 +166,8 @@ impl RunControl {
                 buffer: Vec::new(),
                 closed: false,
                 handle: None,
+                veof_sent: false,
+                last_pty_byte_was_newline: true,
             }),
         }
     }
@@ -181,8 +201,15 @@ impl RunControl {
         self.stdin
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .handle = Some(child_stdin);
+            .handle = Some(RunStdinHandle::Pipe(child_stdin));
         Ok(())
+    }
+
+    fn publish_pty_master(&self, master: Arc<File>) {
+        self.stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .handle = Some(RunStdinHandle::Pty(master));
     }
 
     fn drain_stdin(&self) {
@@ -206,6 +233,9 @@ impl RunControl {
                     state.handle.take();
                 }
                 Ok(written) => {
+                    if matches!(state.handle, Some(RunStdinHandle::Pty(_))) {
+                        state.last_pty_byte_was_newline = state.buffer[written - 1] == b'\n';
+                    }
                     state.buffer.drain(..written);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -219,7 +249,19 @@ impl RunControl {
         }
 
         if state.closed && state.buffer.is_empty() {
-            state.handle.take();
+            if matches!(state.handle, Some(RunStdinHandle::Pty(_))) && !state.veof_sent {
+                let veof_count = if state.last_pty_byte_was_newline {
+                    1
+                } else {
+                    2
+                };
+                state.buffer.extend(std::iter::repeat_n(0x04, veof_count));
+                state.veof_sent = true;
+                // A PTY has no half-close: if the child disables ICANON, VEOF cannot signal EOF,
+                // so close_stdin only establishes the closed send boundary.
+            } else {
+                state.handle.take();
+            }
         }
     }
 
@@ -400,6 +442,10 @@ struct RunRegistration {
 impl RunRegistration {
     fn publish_stdin(&self, stdin: std::process::ChildStdin) -> io::Result<()> {
         self.control.publish_stdin(stdin)
+    }
+
+    fn publish_pty_master(&self, master: Arc<File>) {
+        self.control.publish_pty_master(master);
     }
 
     fn drain_stdin(&self) {
@@ -803,6 +849,7 @@ fn handle_connection(
                 stream.flush()?;
             }
             "start_process" => {
+                let pty = request.pty.unwrap_or(false);
                 let (Some(run_id), Some(executable), Some(arguments), Some(timeout_milliseconds)) = (
                     request.run_id,
                     request.executable,
@@ -857,7 +904,7 @@ fn handle_connection(
                             run_id,
                             executable,
                             arguments,
-                            timeout,
+                            StartProcessOptions { timeout, pty },
                             process_slot,
                             registration,
                         );
@@ -1136,15 +1183,86 @@ fn civil_date_from_unix_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+enum ProcessOutput {
+    Pipe(std::process::ChildStdout),
+    Pty(Arc<File>),
+}
+
+struct StartProcessOptions {
+    timeout: Duration,
+    pty: bool,
+}
+
+fn open_pseudo_terminal() -> io::Result<(File, File)> {
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    // SAFETY: openpty initializes both descriptor outputs and does not retain any pointers.
+    if unsafe {
+        libc::openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openpty returned ownership of two valid descriptors.
+    let master = unsafe { File::from_raw_fd(master_fd) };
+    // SAFETY: openpty returned ownership of two valid descriptors.
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: slave is a valid terminal descriptor and termios points to writable storage.
+    if unsafe { libc::tcgetattr(slave.as_raw_fd(), termios.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: tcgetattr succeeded and initialized termios.
+    let mut termios = unsafe { termios.assume_init() };
+    termios.c_lflag &= !libc::ECHO;
+    // SAFETY: slave remains open and termios is fully initialized.
+    if unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &termios) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    set_close_on_exec(&master)?;
+    set_nonblocking(&master)?;
+    Ok((master, slave))
+}
+
+fn configure_pty_child(slave_fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: called after fork in pre_exec; these operations only mutate the child process's
+    // session and descriptor table using the still-open PTY slave descriptor.
+    unsafe {
+        if libc::setsid() == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        for target_fd in 0..=2 {
+            if libc::dup2(slave_fd, target_fd) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        if slave_fd > 2 {
+            libc::close(slave_fd);
+        }
+    }
+    Ok(())
+}
+
 fn run_process(
     stream: UnixStream,
     run_id: String,
     executable: String,
     arguments: Vec<String>,
-    timeout: Duration,
+    options: StartProcessOptions,
     _process_slot: WorkerSlot,
     registration: RunRegistration,
 ) -> io::Result<()> {
+    let StartProcessOptions { timeout, pty } = options;
     let stream = Arc::new(Mutex::new(stream));
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
@@ -1156,54 +1274,106 @@ fn run_process(
         .map(|(name, _)| name.to_string_lossy().into_owned())
         .collect();
     environment_variable_names.sort();
-    let mut child = match Command::new(&executable)
-        .args(&arguments)
-        .process_group(0)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => {
-            // A failed spawn has no process metadata and emits only its terminal frame.
-            drop(registration);
-            return write_json_frame(
-                &stream,
-                &RunExitResponse {
-                    version: PROTOCOL_VERSION,
-                    response_type: "run_exit",
-                    run_id: &run_id,
-                    exit_code: None,
-                    error_code: Some("spawn_failed"),
-                },
-            );
+    let (mut child, pty_master) = if pty {
+        let (master, slave) = match open_pseudo_terminal() {
+            Ok(terminal) => terminal,
+            Err(_) => {
+                drop(registration);
+                return write_json_frame(
+                    &stream,
+                    &RunExitResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "run_exit",
+                        run_id: &run_id,
+                        exit_code: None,
+                        error_code: Some("spawn_failed"),
+                    },
+                );
+            }
+        };
+        let slave_fd = slave.as_raw_fd();
+        let mut command = Command::new(&executable);
+        command.args(&arguments);
+        // SAFETY: configure_pty_child performs only child-local session and descriptor setup.
+        unsafe {
+            command.pre_exec(move || configure_pty_child(slave_fd));
         }
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                drop(registration);
+                return write_json_frame(
+                    &stream,
+                    &RunExitResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "run_exit",
+                        run_id: &run_id,
+                        exit_code: None,
+                        error_code: Some("spawn_failed"),
+                    },
+                );
+            }
+        };
+        drop(slave);
+        let master = Arc::new(master);
+        registration.publish_pty_master(Arc::clone(&master));
+        // A PTY has one merged output stream; child stderr is reported as stdout here.
+        (child, Some(master))
+    } else {
+        let mut child = match Command::new(&executable)
+            .args(&arguments)
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                // A failed spawn has no process metadata and emits only its terminal frame.
+                drop(registration);
+                return write_json_frame(
+                    &stream,
+                    &RunExitResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "run_exit",
+                        run_id: &run_id,
+                        exit_code: None,
+                        error_code: Some("spawn_failed"),
+                    },
+                );
+            }
+        };
+        if let Err(error) =
+            registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"))
+        {
+            kill_process_group(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
+        (child, None)
     };
-    if let Err(error) =
-        registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"))
-    {
-        kill_process_group(&mut child);
-        let _ = child.wait();
-        return Err(error);
-    }
     registration.drain_stdin();
     let pgid = child.id() as libc::pid_t;
     registration.publish_pgid(pgid);
-    let stdout = child
-        .stdout
-        .take()
-        .expect("piped stdout should be available");
-    let stderr = child
-        .stderr
-        .take()
-        .expect("piped stderr should be available");
-
-    if let Err(error) = set_nonblocking(&stdout).and_then(|_| set_nonblocking(&stderr)) {
-        kill_process_group(&mut child);
-        let _ = child.wait();
-        return Err(error);
-    }
+    let (process_output, stderr) = if let Some(master) = pty_master {
+        (ProcessOutput::Pty(master), None)
+    } else {
+        let stdout = child
+            .stdout
+            .take()
+            .expect("piped stdout should be available");
+        let stderr = child
+            .stderr
+            .take()
+            .expect("piped stderr should be available");
+        if let Err(error) = set_nonblocking(&stdout).and_then(|_| set_nonblocking(&stderr)) {
+            kill_process_group(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
+        (ProcessOutput::Pipe(stdout), Some(stderr))
+    };
 
     let control = Arc::clone(&registration.control);
     let redactions = Arc::new(AtomicUsize::new(0));
@@ -1213,15 +1383,22 @@ fn run_process(
     let stdout_redactions = Arc::clone(&redactions);
     let stdout_drain = match thread::Builder::new()
         .name("capture-delegate-stdout".to_owned())
-        .spawn(move || {
-            drain_process_output_until_cancelled(
+        .spawn(move || match process_output {
+            ProcessOutput::Pipe(stdout) => drain_process_output_until_cancelled(
                 stdout,
                 stdout_writer,
                 stdout_run_id,
                 "stdout",
                 stdout_control,
                 stdout_redactions,
-            )
+            ),
+            ProcessOutput::Pty(master) => drain_pty_output_until_cancelled(
+                master,
+                stdout_writer,
+                stdout_run_id,
+                stdout_control,
+                stdout_redactions,
+            ),
         }) {
         Ok(drain) => drain,
         Err(error) => {
@@ -1230,29 +1407,34 @@ fn run_process(
             return Err(error);
         }
     };
-    let stderr_writer = Arc::clone(&stream);
-    let stderr_run_id = run_id.clone();
-    let stderr_control = Arc::clone(&control);
-    let stderr_redactions = Arc::clone(&redactions);
-    let stderr_drain = match thread::Builder::new()
-        .name("capture-delegate-stderr".to_owned())
-        .spawn(move || {
-            drain_process_output_until_cancelled(
-                stderr,
-                stderr_writer,
-                stderr_run_id,
-                "stderr",
-                stderr_control,
-                stderr_redactions,
-            )
-        }) {
-        Ok(drain) => drain,
-        Err(error) => {
-            control.cancelled.store(true, Ordering::Release);
-            kill_process_group(&mut child);
-            let _ = child.wait();
-            let _ = stdout_drain.join();
-            return Err(error);
+    let stderr_drain = if pty {
+        None
+    } else {
+        let stderr_writer = Arc::clone(&stream);
+        let stderr_run_id = run_id.clone();
+        let stderr_control = Arc::clone(&control);
+        let stderr_redactions = Arc::clone(&redactions);
+        let stderr = stderr.expect("non-PTY run should have piped stderr");
+        match thread::Builder::new()
+            .name("capture-delegate-stderr".to_owned())
+            .spawn(move || {
+                drain_process_output_until_cancelled(
+                    stderr,
+                    stderr_writer,
+                    stderr_run_id,
+                    "stderr",
+                    stderr_control,
+                    stderr_redactions,
+                )
+            }) {
+            Ok(drain) => Some(drain),
+            Err(error) => {
+                control.cancelled.store(true, Ordering::Release);
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                let _ = stdout_drain.join();
+                return Err(error);
+            }
         }
     };
 
@@ -1299,9 +1481,13 @@ fn run_process(
     let stdout_result = stdout_drain
         .join()
         .map_err(|_| io::Error::other("stdout drain thread panicked"))?;
-    let stderr_result = stderr_drain
-        .join()
-        .map_err(|_| io::Error::other("stderr drain thread panicked"))?;
+    let stderr_result = if let Some(stderr_drain) = stderr_drain {
+        stderr_drain
+            .join()
+            .map_err(|_| io::Error::other("stderr drain thread panicked"))?
+    } else {
+        Ok(())
+    };
     let mut metadata = RunMetadataResponse {
         version: PROTOCOL_VERSION,
         response_type: "run_metadata",
@@ -1428,6 +1614,107 @@ fn drain_process_output_until_cancelled<R: Read>(
     Ok(())
 }
 
+fn drain_pty_output_until_cancelled(
+    master: Arc<File>,
+    stream: Arc<Mutex<UnixStream>>,
+    run_id: String,
+    control: Arc<RunControl>,
+    redactions: Arc<AtomicUsize>,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; MAX_OUTPUT_CHUNK_BYTES];
+    let mut utf8_carry = Vec::with_capacity(3);
+    loop {
+        let mut descriptor = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        // The PTY master is nonblocking because reads and input writes share its file
+        // description. Poll bounds each wait so cancellation remains observable.
+        let poll_result = unsafe { libc::poll(&mut descriptor, 1, 50) };
+        if poll_result == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if poll_result == 0 {
+            if control.cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            continue;
+        }
+
+        let bytes_read = match master.as_ref().read(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if control.cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+            Err(error) => return Err(error),
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        let output = decode_output_chunk(&mut utf8_carry, &buffer[..bytes_read]);
+        if !output.is_empty() {
+            let (output, redaction_count) = redact_output(&output);
+            redactions.fetch_add(redaction_count, Ordering::Relaxed);
+            let response = RunOutputResponse {
+                version: PROTOCOL_VERSION,
+                response_type: "run_output",
+                run_id: &run_id,
+                stream: "stdout",
+                output,
+            };
+            if let Err(error) = write_json_frame(&stream, &response) {
+                control.cancelled.store(true, Ordering::Release);
+                return Err(error);
+            }
+        }
+    }
+    if !control.cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
+        let (output, redaction_count) = redact_output(&String::from_utf8_lossy(&utf8_carry));
+        redactions.fetch_add(redaction_count, Ordering::Relaxed);
+        let response = RunOutputResponse {
+            version: PROTOCOL_VERSION,
+            response_type: "run_output",
+            run_id: &run_id,
+            stream: "stdout",
+            output,
+        };
+        write_json_frame(&stream, &response).inspect_err(|_| {
+            control.cancelled.store(true, Ordering::Release);
+        })?;
+    }
+    Ok(())
+}
+
+fn set_close_on_exec<R: AsRawFd>(descriptor: &R) -> io::Result<()> {
+    // SAFETY: descriptor is open and fcntl only reads or updates descriptor flags.
+    let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above; this preserves existing flags while adding close-on-exec.
+    if unsafe {
+        libc::fcntl(
+            descriptor.as_raw_fd(),
+            libc::F_SETFD,
+            flags | libc::FD_CLOEXEC,
+        )
+    } == -1
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn set_nonblocking<R: std::os::fd::AsRawFd>(reader: &R) -> io::Result<()> {
     #[cfg(any(
         target_os = "macos",
@@ -1445,14 +1732,14 @@ fn set_nonblocking<R: std::os::fd::AsRawFd>(reader: &R) -> io::Result<()> {
         fn fcntl(fd: std::ffi::c_int, command: std::ffi::c_int, ...) -> std::ffi::c_int;
     }
 
-    // SAFETY: `reader` supplies a valid open pipe descriptor, and fcntl neither
+    // SAFETY: `reader` supplies a valid open descriptor, and fcntl neither
     // retains it nor accesses Rust-managed memory.
     let fd = reader.as_raw_fd();
     let flags = unsafe { fcntl(fd, F_GETFL) };
     if flags == -1 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: as above; this only adds O_NONBLOCK to the pipe descriptor flags.
+    // SAFETY: as above; this only adds O_NONBLOCK to the descriptor flags.
     if unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } == -1 {
         return Err(io::Error::last_os_error());
     }
