@@ -126,6 +126,16 @@ func cancelProcessRequestAndAcceptedResult() throws {
     )
 }
 
+@Test("send input capacity exhaustion is decoded as a typed result")
+func sendInputCapacityExhaustionIsTyped() throws {
+    #expect(
+        try IPCClient.decodeSendInputResponse(
+            "{\"version\":1,\"type\":\"input_response\",\"run_id\":\"run-1\",\"status\":\"capacity_exhausted\"}\n",
+            expectedRunID: "run-1"
+        ) == .capacityExhausted
+    )
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)

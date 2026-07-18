@@ -40,6 +40,7 @@ public enum SendInputResult: Equatable {
     case accepted
     case notFound
     case closed
+    case capacityExhausted
 }
 
 public enum CloseStdinResult: Equatable {
@@ -570,6 +571,7 @@ public enum IPCClient {
         case "accepted": return .accepted
         case "not_found": return .notFound
         case "closed": return .closed
+        case "capacity_exhausted": return .capacityExhausted
         default: throw IPCClientError.invalidProcessEvent
         }
     }

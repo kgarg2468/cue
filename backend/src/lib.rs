@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_OUTPUT_CHUNK_BYTES: usize = 1024;
+/// Maximum stdin bytes queued for a run but not yet written to its child.
+const MAX_PENDING_STDIN_BYTES: usize = 1_048_576;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_CLIENTS: usize = 8;
@@ -212,6 +214,13 @@ enum RunStdinHandle {
     Pty(Arc<File>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunInputStatus {
+    Accepted,
+    Closed,
+    CapacityExhausted,
+}
+
 impl RunStdinHandle {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         match self {
@@ -244,16 +253,19 @@ impl RunControl {
         }
     }
 
-    fn send_input(&self, data: &[u8]) -> bool {
+    fn send_input(&self, data: &[u8]) -> RunInputStatus {
         let mut state = self
             .stdin
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.closed {
-            return false;
+            return RunInputStatus::Closed;
+        }
+        if state.buffer.len().saturating_add(data.len()) > MAX_PENDING_STDIN_BYTES {
+            return RunInputStatus::CapacityExhausted;
         }
         state.buffer.extend_from_slice(data);
-        true
+        RunInputStatus::Accepted
     }
 
     fn close_stdin(&self) {
@@ -366,6 +378,7 @@ enum SendInputStatus {
     Accepted,
     NotFound,
     Closed,
+    CapacityExhausted,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -466,10 +479,10 @@ impl ActiveRuns {
             return SendInputStatus::NotFound;
         };
 
-        if control.send_input(data.as_bytes()) {
-            SendInputStatus::Accepted
-        } else {
-            SendInputStatus::Closed
+        match control.send_input(data.as_bytes()) {
+            RunInputStatus::Accepted => SendInputStatus::Accepted,
+            RunInputStatus::Closed => SendInputStatus::Closed,
+            RunInputStatus::CapacityExhausted => SendInputStatus::CapacityExhausted,
         }
     }
 
@@ -718,6 +731,7 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     }
 
     remove_stale_socket(socket_path)?;
+    cleanup_orphaned_worktrees();
     let listener = UnixListener::bind(socket_path)?;
     let bound_metadata = fs::symlink_metadata(socket_path)?;
     let bound_identity = SocketIdentity::from_metadata(&bound_metadata);
@@ -910,48 +924,50 @@ fn handle_connection(
     stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
 
-    let frame_deadline = Instant::now() + CLIENT_IO_TIMEOUT;
-    let mut request_frame = Vec::new();
     loop {
-        let remaining = frame_deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "request frame deadline elapsed",
-            ));
-        }
-        stream.set_read_timeout(Some(remaining))?;
+        let frame_deadline = Instant::now() + CLIENT_IO_TIMEOUT;
+        let mut request_frame = Vec::new();
+        loop {
+            let remaining = frame_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "request frame deadline elapsed",
+                ));
+            }
+            stream.set_read_timeout(Some(remaining))?;
 
-        let mut byte = [0_u8; 1];
-        match stream.read(&mut byte)? {
-            0 => break,
-            _ => {
-                request_frame.push(byte[0]);
-                if request_frame.len() > MAX_REQUEST_BYTES || byte[0] == b'\n' {
-                    break;
+            let mut byte = [0_u8; 1];
+            match stream.read(&mut byte)? {
+                0 => break,
+                _ => {
+                    request_frame.push(byte[0]);
+                    if request_frame.len() > MAX_REQUEST_BYTES || byte[0] == b'\n' {
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    if request_frame.is_empty() {
-        return Ok(());
-    }
-    if request_frame.len() > MAX_REQUEST_BYTES || request_frame.last() != Some(&b'\n') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "request must be a bounded newline-delimited frame",
-        ));
-    }
+        if request_frame.is_empty() {
+            return Ok(());
+        }
+        if request_frame.len() > MAX_REQUEST_BYTES || request_frame.last() != Some(&b'\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request must be a bounded newline-delimited frame",
+            ));
+        }
 
-    let request: Request = match serde_json::from_slice(&request_frame) {
-        Ok(request) => request,
-        Err(_) => return Ok(()),
-    };
+        let request: Request = match serde_json::from_slice(&request_frame) {
+            Ok(request) => request,
+            Err(_) => return Ok(()),
+        };
 
-    if request.version != PROTOCOL_VERSION {
-        write_protocol_error(&mut stream, "incompatible_version")?;
-    } else {
+        if request.version != PROTOCOL_VERSION {
+            write_protocol_error(&mut stream, "incompatible_version")?;
+            return Ok(());
+        }
         match request.request_type.as_str() {
             "health" => {
                 let response = HealthResponse {
@@ -1085,6 +1101,7 @@ fn handle_connection(
                         "process worker spawn error: {error}"
                     )));
                 }
+                return Ok(());
             }
             "cancel_process" => {
                 let Some(run_id) = request.run_id else {
@@ -1154,6 +1171,7 @@ fn handle_connection(
                     SendInputStatus::Accepted => "accepted",
                     SendInputStatus::NotFound => "not_found",
                     SendInputStatus::Closed => "closed",
+                    SendInputStatus::CapacityExhausted => "capacity_exhausted",
                 };
                 let response = CancelResponse {
                     version: PROTOCOL_VERSION,
@@ -1186,9 +1204,12 @@ fn handle_connection(
             }
             _ => write_protocol_error(&mut stream, "unknown_request_type")?,
         }
-    }
 
-    Ok(())
+        if request.request_type == "send_input" {
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1500,6 +1521,7 @@ impl RunWorktree {
             delete_branch: false,
             cleaned: false,
         };
+        worktree.write_owner_sidecar();
         if fs::set_permissions(&worktree.path, fs::Permissions::from_mode(0o700)).is_err() {
             return Err(WorktreeSetupError {
                 worktree: Some(worktree),
@@ -1587,6 +1609,34 @@ impl RunWorktree {
                 .stderr(Stdio::null());
             let _ = command_succeeds_within(&mut delete_branch, WORKTREE_CLEANUP_TIMEOUT);
         }
+        let _ = fs::remove_file(self.owner_sidecar_path());
+    }
+
+    fn owner_sidecar_path(&self) -> PathBuf {
+        self.root.join(".owners").join(
+            self.path
+                .file_name()
+                .expect("managed worktree path should have a directory name"),
+        )
+    }
+
+    fn write_owner_sidecar(&self) {
+        let owners = self.root.join(".owners");
+        if fs::create_dir_all(&owners).is_err()
+            || !fs::symlink_metadata(&owners)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            || fs::set_permissions(&owners, fs::Permissions::from_mode(0o700)).is_err()
+        {
+            return;
+        }
+        let Ok(mut sidecar) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.owner_sidecar_path())
+        else {
+            return;
+        };
+        let _ = writeln!(sidecar, "{}", std::process::id());
     }
 }
 
@@ -1628,6 +1678,178 @@ fn worktree_root() -> io::Result<PathBuf> {
     }
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
     root.canonicalize()
+}
+
+fn cleanup_orphaned_worktrees() {
+    if let Ok(root) = worktree_root() {
+        cleanup_orphaned_worktrees_in(&root);
+    }
+}
+
+fn cleanup_orphaned_worktrees_in(root: &Path) {
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    if !is_managed_worktree_directory_root(&root) {
+        return;
+    }
+
+    let owners = root.join(".owners");
+    let owners_are_safe = fs::symlink_metadata(&owners)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("run-")
+            || !is_managed_worktree_directory(&root, &path)
+            || !owners_are_safe
+        {
+            continue;
+        }
+        let sidecar = owners.join(&name);
+        if owner_pid_is_dead(&sidecar) {
+            remove_orphaned_worktree(&root, &path, &sidecar);
+        }
+    }
+
+    if owners_are_safe {
+        remove_stale_owner_sidecars(&root, &owners);
+    }
+}
+
+fn is_managed_worktree_directory_root(root: &Path) -> bool {
+    fs::symlink_metadata(root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+fn is_managed_worktree_directory(root: &Path, path: &Path) -> bool {
+    path.parent() == Some(root)
+        && fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+fn owner_pid_is_dead(sidecar: &Path) -> bool {
+    let Ok(owner) = fs::read_to_string(sidecar) else {
+        return false;
+    };
+    let Ok(pid) = owner.trim().parse::<libc::pid_t>() else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 only checks whether the PID can be signalled.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn remove_orphaned_worktree(root: &Path, path: &Path, sidecar: &Path) {
+    if let Some((repository, git_directory)) = recover_worktree_repository(path) {
+        let branch = worktree_branch(&git_directory);
+        let mut remove_worktree = Command::new("git");
+        remove_worktree
+            .arg("-C")
+            .arg(&repository)
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if !command_succeeds_within(&mut remove_worktree, WORKTREE_CLEANUP_TIMEOUT) {
+            remove_managed_worktree_directory(root, path);
+        }
+
+        let mut prune_worktrees = Command::new("git");
+        prune_worktrees
+            .arg("-C")
+            .arg(&repository)
+            .args(["worktree", "prune"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = command_succeeds_within(&mut prune_worktrees, WORKTREE_CLEANUP_TIMEOUT);
+
+        if let Some(branch) = branch.filter(|branch| branch.starts_with("capture-delegate/run-")) {
+            let mut delete_branch = Command::new("git");
+            delete_branch
+                .arg("-C")
+                .arg(&repository)
+                .args(["branch", "-D"])
+                .arg(branch)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let _ = command_succeeds_within(&mut delete_branch, WORKTREE_CLEANUP_TIMEOUT);
+        }
+    } else {
+        remove_managed_worktree_directory(root, path);
+    }
+    let _ = fs::remove_file(sidecar);
+}
+
+fn recover_worktree_repository(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let candidate_git_file = path.join(".git");
+    let candidate_metadata = fs::symlink_metadata(&candidate_git_file).ok()?;
+    if !candidate_metadata.file_type().is_file() || candidate_metadata.file_type().is_symlink() {
+        return None;
+    }
+    let candidate_git_file = candidate_git_file.canonicalize().ok()?;
+
+    let contents = fs::read_to_string(&candidate_git_file).ok()?;
+    let mut lines = contents.lines();
+    let git_directory = PathBuf::from(lines.next()?.strip_prefix("gitdir: ")?);
+    if lines.next().is_some() {
+        return None;
+    }
+    if !git_directory.is_absolute() {
+        return None;
+    }
+    let git_directory = git_directory.canonicalize().ok()?;
+    let worktrees = git_directory.parent()?;
+    let dot_git = worktrees.parent()?;
+    if worktrees.file_name()? != "worktrees" || dot_git.file_name()? != ".git" {
+        return None;
+    }
+
+    let backlink_contents = fs::read_to_string(git_directory.join("gitdir")).ok()?;
+    let mut backlink_lines = backlink_contents.lines();
+    let backlink = PathBuf::from(backlink_lines.next()?);
+    if backlink_lines.next().is_some() || !backlink.is_absolute() {
+        return None;
+    }
+    if backlink.canonicalize().ok()? != candidate_git_file {
+        return None;
+    }
+
+    Some((dot_git.parent()?.canonicalize().ok()?, git_directory))
+}
+
+fn worktree_branch(git_directory: &Path) -> Option<String> {
+    let contents = fs::read_to_string(git_directory.join("HEAD")).ok()?;
+    let mut lines = contents.lines();
+    let branch = lines.next()?.strip_prefix("ref: refs/heads/")?.to_owned();
+    (lines.next().is_none()).then_some(branch)
+}
+
+fn remove_managed_worktree_directory(root: &Path, path: &Path) {
+    if is_managed_worktree_directory(root, path) {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn remove_stale_owner_sidecars(root: &Path, owners: &Path) {
+    let Ok(entries) = fs::read_dir(owners) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let sidecar = entry.path();
+        if fs::symlink_metadata(&sidecar).is_ok_and(|metadata| metadata.is_file())
+            && !is_managed_worktree_directory(root, &root.join(entry.file_name()))
+        {
+            let _ = fs::remove_file(sidecar);
+        }
+    }
 }
 
 fn sanitize_run_id(run_id: &str) -> String {
@@ -2594,20 +2816,101 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRuns, ClientWriter, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL,
-        ProcessSupervision, RegisterRunError, RunTerminal, RunWorktree, SendInputStatus,
-        SocketCleanup, SocketIdentity, WorkerSlots, classify_process_supervision,
-        command_succeeds_within, drain_process_output, handle_connection, redact_output,
-        run_with_internal_error_terminal,
+        ActiveRuns, ClientWriter, MAX_CONCURRENT_PROCESSES, MAX_PENDING_STDIN_BYTES,
+        PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision, RegisterRunError, RunTerminal, RunWorktree,
+        SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots, classify_process_supervision,
+        cleanup_orphaned_worktrees_in, command_succeeds_within, drain_process_output,
+        handle_connection, redact_output, run_with_internal_error_terminal,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::{Command, Stdio};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_fixture_root(prefix: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after the Unix epoch")
+            .as_nanos();
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend should be inside repository")
+            .join("target")
+            .join(format!("{prefix}-{}-{nonce}", std::process::id()))
+    }
+
+    fn initialize_test_repository(repository: &std::path::Path) {
+        fs::create_dir_all(repository).expect("repository directory should be created");
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(repository)
+                .status()
+                .expect("git init should run")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args([
+                    "-c",
+                    "user.name=Capture Delegate Tests",
+                    "-c",
+                    "user.email=capture-delegate@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ])
+                .status()
+                .expect("git commit should run")
+                .success()
+        );
+    }
+
+    fn add_test_worktree(
+        repository: &std::path::Path,
+        root: &std::path::Path,
+        directory_name: &str,
+        branch: &str,
+    ) -> std::path::PathBuf {
+        let path = root.join(directory_name);
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .args(["worktree", "add"])
+                .arg(&path)
+                .arg("-b")
+                .arg(branch)
+                .arg("HEAD")
+                .status()
+                .expect("git worktree add should run")
+                .success()
+        );
+        path
+    }
+
+    fn reaped_test_pid() -> libc::pid_t {
+        let mut child = Command::new("/usr/bin/true")
+            .spawn()
+            .expect("true should spawn");
+        let pid = child.id() as libc::pid_t;
+        assert!(child.wait().expect("true should reap").success());
+        // SAFETY: pid came from a child which has already been reaped.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        pid
+    }
 
     #[test]
     fn client_writer_stops_after_the_first_failed_frame_write() {
@@ -2995,6 +3298,275 @@ mod tests {
     }
 
     #[test]
+    fn run_worktree_owner_sidecar_tracks_its_lifecycle() {
+        let fixture_root = test_fixture_root("worktree-owner");
+        let repository = fixture_root.join("repository");
+        initialize_test_repository(&repository);
+        let mut worktree = match RunWorktree::create(repository.clone(), "owner-lifecycle") {
+            Ok(worktree) => worktree,
+            Err(_) => panic!("worktree should be created"),
+        };
+        let sidecar = worktree.root.join(".owners").join(
+            worktree
+                .path
+                .file_name()
+                .expect("worktree should have a directory name"),
+        );
+
+        assert_eq!(
+            fs::read_to_string(&sidecar).expect("owner sidecar should be readable"),
+            format!("{}\n", std::process::id())
+        );
+        assert_eq!(
+            fs::metadata(worktree.root.join(".owners"))
+                .expect("owners directory should be readable")
+                .mode()
+                & 0o777,
+            0o700,
+            "owners directory should be private"
+        );
+
+        worktree.cleanup();
+
+        assert!(
+            !sidecar.exists(),
+            "normal cleanup should remove the sidecar"
+        );
+        fs::remove_dir_all(&fixture_root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn orphan_cleanup_removes_only_dead_managed_worktrees_and_owned_branches() {
+        let fixture_root = test_fixture_root("orphan-cleanup");
+        let repository = fixture_root.join("repository");
+        let root = fixture_root.join("managed-root");
+        initialize_test_repository(&repository);
+        fs::create_dir_all(root.join(".owners")).expect("owners directory should be created");
+        let root = root
+            .canonicalize()
+            .expect("managed root should canonicalize");
+        let dead_pid = reaped_test_pid();
+
+        let orphan_branch = "capture-delegate/run-dead-owner";
+        let orphan = add_test_worktree(&repository, &root, "run-dead-owner", orphan_branch);
+        fs::write(
+            root.join(".owners").join("run-dead-owner"),
+            format!("{dead_pid}\n"),
+        )
+        .expect("orphan owner sidecar should write");
+
+        let live_branch = "capture-delegate/run-live-owner";
+        let live = add_test_worktree(&repository, &root, "run-live-owner", live_branch);
+        fs::write(
+            root.join(".owners").join("run-live-owner"),
+            format!("{}\n", std::process::id()),
+        )
+        .expect("live owner sidecar should write");
+
+        let unsided_branch = "capture-delegate/run-no-sidecar";
+        let unsided = add_test_worktree(&repository, &root, "run-no-sidecar", unsided_branch);
+
+        let preserved_branch = "keep-this-branch";
+        let preserved =
+            add_test_worktree(&repository, &root, "run-preserve-branch", preserved_branch);
+        fs::write(
+            root.join(".owners").join("run-preserve-branch"),
+            format!("{dead_pid}\n"),
+        )
+        .expect("preserved branch owner sidecar should write");
+
+        let malformed = root.join("run-malformed-git");
+        fs::create_dir(&malformed).expect("malformed worktree directory should be created");
+        fs::write(malformed.join(".git"), "not a valid gitdir file\n")
+            .expect("malformed git file should write");
+        fs::write(
+            root.join(".owners").join("run-malformed-git"),
+            format!("{dead_pid}\n"),
+        )
+        .expect("malformed worktree owner sidecar should write");
+        let malformed_sentinel_branch = "keep-malformed-git-sentinel";
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["branch", malformed_sentinel_branch])
+                .status()
+                .expect("sentinel branch should be created")
+                .success()
+        );
+
+        let ignored = root.join("not-a-run");
+        fs::create_dir(&ignored).expect("non-run directory should be created");
+        let symlink = root.join("run-symlink");
+        std::os::unix::fs::symlink(&live, &symlink).expect("symlink should be created");
+        fs::write(root.join(".owners").join("stale-run"), "123\n")
+            .expect("stale sidecar should write");
+
+        cleanup_orphaned_worktrees_in(&root);
+
+        assert!(!orphan.exists(), "dead owner worktree should be removed");
+        assert!(
+            !root.join(".owners").join("run-dead-owner").exists(),
+            "dead owner sidecar should be removed"
+        );
+        assert!(
+            !Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["show-ref", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{orphan_branch}"))
+                .status()
+                .expect("git show-ref should run")
+                .success(),
+            "managed orphan branch should be removed"
+        );
+        assert!(live.exists(), "live owner worktree must remain");
+        assert!(unsided.exists(), "worktree without sidecar must remain");
+        assert!(!preserved.exists(), "dead owner worktree should be removed");
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["show-ref", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{preserved_branch}"))
+                .status()
+                .expect("git show-ref should run")
+                .success(),
+            "non-managed branch must be preserved"
+        );
+        assert!(
+            !malformed.exists(),
+            "dead malformed worktree directory should be removed"
+        );
+        assert!(
+            !root.join(".owners").join("run-malformed-git").exists(),
+            "dead malformed worktree sidecar should be removed"
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["show-ref", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{malformed_sentinel_branch}"))
+                .status()
+                .expect("git show-ref should run")
+                .success(),
+            "malformed metadata cleanup must not delete an unrelated branch"
+        );
+        assert!(ignored.exists(), "non-run directory must remain");
+        assert!(symlink.exists(), "symlink child must remain");
+        assert!(
+            !root.join(".owners").join("stale-run").exists(),
+            "stale sidecar should be removed"
+        );
+
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["worktree", "remove", "--force"])
+            .arg(&live)
+            .status()
+            .expect("live worktree cleanup should run");
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["worktree", "remove", "--force"])
+            .arg(&unsided)
+            .status()
+            .expect("unsided worktree cleanup should run");
+        fs::remove_file(&symlink).expect("symlink should be removed");
+        fs::remove_dir_all(&fixture_root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn orphan_cleanup_rejects_forged_repository_metadata() {
+        let fixture_root = test_fixture_root("orphan-forged-metadata");
+        let foreign_repository = fixture_root.join("foreign-repository");
+        let foreign_worktree_root = fixture_root.join("foreign-worktrees");
+        let managed_root = fixture_root.join("managed-root");
+        let foreign_branch = "capture-delegate/run-foreign-target";
+        initialize_test_repository(&foreign_repository);
+        fs::create_dir_all(managed_root.join(".owners"))
+            .expect("managed owners directory should be created");
+        let managed_root = managed_root
+            .canonicalize()
+            .expect("managed root should canonicalize");
+        let foreign_worktree = add_test_worktree(
+            &foreign_repository,
+            &foreign_worktree_root,
+            "run-foreign-target",
+            foreign_branch,
+        );
+        let foreign_git_contents = fs::read_to_string(foreign_worktree.join(".git"))
+            .expect("foreign git file should read");
+        let foreign_admin = std::path::PathBuf::from(
+            foreign_git_contents
+                .trim_end()
+                .strip_prefix("gitdir: ")
+                .expect("foreign git file should contain an admin path"),
+        );
+        assert!(foreign_admin.exists(), "foreign admin entry should exist");
+        fs::remove_dir_all(&foreign_worktree)
+            .expect("foreign worktree directory should be removed directly");
+
+        let forged = managed_root.join("run-forged-owner");
+        fs::create_dir(&forged).expect("forged worktree directory should be created");
+        fs::write(forged.join(".git"), &foreign_git_contents)
+            .expect("forged git file should be written");
+        fs::write(
+            managed_root.join(".owners").join("run-forged-owner"),
+            format!("{}\n", reaped_test_pid()),
+        )
+        .expect("forged owner sidecar should be written");
+
+        cleanup_orphaned_worktrees_in(&managed_root);
+
+        let foreign_branch_exists = Command::new("git")
+            .arg("-C")
+            .arg(&foreign_repository)
+            .args(["show-ref", "--verify", "--quiet"])
+            .arg(format!("refs/heads/{foreign_branch}"))
+            .status()
+            .expect("git show-ref should run")
+            .success();
+        let foreign_admin_exists = foreign_admin.exists();
+        let forged_exists = forged.exists();
+        let forged_sidecar_exists = managed_root
+            .join(".owners")
+            .join("run-forged-owner")
+            .exists();
+
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&foreign_repository)
+            .args(["worktree", "prune"])
+            .status();
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&foreign_repository)
+            .args(["branch", "-D", foreign_branch])
+            .status();
+        fs::remove_dir_all(&fixture_root).expect("fixture should be removed");
+
+        assert!(
+            !forged_exists,
+            "forged candidate should be deleted directly"
+        );
+        assert!(
+            !forged_sidecar_exists,
+            "forged candidate sidecar should be removed"
+        );
+        assert!(
+            foreign_branch_exists,
+            "forged metadata must not delete the foreign managed branch"
+        );
+        assert!(
+            foreign_admin_exists,
+            "forged metadata must not prune the foreign admin entry"
+        );
+    }
+
+    #[test]
     fn pausing_before_the_process_group_is_known_records_the_pause_without_signalling() {
         let runs = ActiveRuns::new();
         let registration = runs
@@ -3048,6 +3620,41 @@ mod tests {
 
         assert!(runs.close_stdin("run-1"));
         assert_eq!(runs.send_input("run-1", "after\n"), SendInputStatus::Closed);
+    }
+
+    #[test]
+    fn pending_stdin_capacity_rejection_is_atomic_and_closed_takes_precedence() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("run-1".to_owned())
+            .expect("registration should succeed");
+        let nearly_full = "x".repeat(MAX_PENDING_STDIN_BYTES - 1);
+
+        assert_eq!(
+            runs.send_input("run-1", &nearly_full),
+            SendInputStatus::Accepted
+        );
+        assert_eq!(
+            runs.send_input("run-1", "yz"),
+            SendInputStatus::CapacityExhausted
+        );
+        assert_eq!(
+            registration.control.stdin.lock().unwrap().buffer.len(),
+            MAX_PENDING_STDIN_BYTES - 1,
+            "a rejected request must not enqueue any bytes"
+        );
+        assert_eq!(runs.send_input("run-1", "z"), SendInputStatus::Accepted);
+        assert_eq!(
+            registration.control.stdin.lock().unwrap().buffer.len(),
+            MAX_PENDING_STDIN_BYTES
+        );
+
+        assert!(runs.close_stdin("run-1"));
+        assert_eq!(
+            runs.send_input("run-1", "overflow"),
+            SendInputStatus::Closed,
+            "closed stdin must win over the capacity check"
+        );
     }
 
     #[test]
