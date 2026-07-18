@@ -72,12 +72,14 @@ Status: ready for M1
 
 ## Cycle 3 M1 process streaming — 2026-07-18
 
-Status: PR #5 open; CI and merge pending
+Status: delivered through PR #5; M1 remains in progress
 
 - Implemented a bounded first M1 slice on `loop/m1-process-streaming`: direct executable/argv launch, callback stdout/stderr events, exactly one terminal exit, typed `spawn_failed` and `capacity_exhausted`, UTF-8 preservation, and per-frame byte-dribble deadlines.
 - Bounded execution to eight children with synchronous ninth-run rejection while retaining eight short IPC workers so health remains serviceable. Added disconnect cancellation/reaping for active producers and direct-child completion independent of descendant-held output pipes.
 - Passed the retained authoritative gate in `.loop/verification/m1/process-streaming/full-verification.txt`: Rust format/clippy/release, 26 Rust tests, Swift strict format/release, 13 Swift tests against the real Rust backend, private `0700` runtime plus `0600` socket handshake, and diff check.
 - Independent correctness and execution-boundary security reviews are clear in `.loop/verification/m1/process-streaming/reviews.txt`. A future production launcher must create/verify the private runtime directory; no production launcher exists in this slice.
+- Initial CI exposed a timing race in the inherited M0 worker-saturation test; the test-only clock correction passed 20/20 locally, the full gate passed, and independent remediation review was clear. Both required CI runs then passed on `9bfd3f2`.
+- PR #5 squash-merged as `9f40024` and its remote branch was deleted.
 - M1 remains incomplete. PTYs, explicit timeout, pause/resume/cancel, waiting-input detection, secret redaction/process metadata, durable run state, and remaining cleanup behavior are not claimed.
 
-Next cycle: wait for PR #5 green CI, perform final PR review, and merge before beginning another M1 slice.
+Next cycle: select and implement the next bounded M1 slice from fresh `origin/main`; keep the milestone and partial traceability rows in progress.
