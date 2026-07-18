@@ -1,0 +1,37 @@
+Slice: M1 run-termination durability (bounded client writes + guaranteed terminal frames)
+Branch: loop/m1-durability (from origin/main = 699b119)
+Date: 2026-07-18
+Worker: gpt-5.6-sol (effort high), prompt/transcript/report in /tmp/worker-durability/
+
+Scope (retires two dispositioned review-finding classes from PRs #21/#23/#25)
+- Bounded writes: run connections get OUTPUT_WRITE_TIMEOUT (5s) after
+  admission; a shared ClientWriter marks the client permanently dead after
+  any failed/timed-out frame write (torn-frame safety: no byte is ever
+  written after a partial frame). Drains exit promptly; supervision joins;
+  cancel/timeout/cleanup can no longer wedge on a non-reading client.
+  Client death does NOT cancel the run (existing semantics preserved).
+- Guaranteed terminal frames: every post-admission failure path flows
+  through a one-shot RunTerminal emitter (registration release -> best-effort
+  run_exit with new error_code "internal_error" -> worktree cleanup ->
+  cleanup-blocker release). Typed codes (spawn_failed, timed_out, cancelled,
+  worktree_failed, capacity_exhausted) unchanged. Worker-thread spawn
+  failure at the accept path now also emits internal_error (stream wrapped
+  before spawn). Swift: ProcessExitErrorCode.internalError.
+
+Diff gate
+- Exactly the 4 allowlisted files; +494/-166 (lib.rs restructure into
+  outer wrapper + supervision body accounts for the churn) — accepted.
+
+Evidence (this directory)
+- red-evidence.log: non_reading_client_does_not_wedge_run_termination FAILS
+  against origin/main backend (run never freed within 15s — the wedge);
+  new lib unit tests absent on main. Worker captured Swift red + focused
+  Rust red pre-implementation.
+- cargo-test.log: 21 lib + 13 health_socket + 56 process_lifecycle, 0 failed.
+- verify-m0-parity.log: ./scripts/verify-m0.sh exit 0 (first run).
+- runtime-demo.log: release backend — (1) non-reading client on a flooding
+  run: run id reusable after ~5.1s (write-timeout bound + normal
+  termination), backend responsive throughout; (2) slow-but-alive reader
+  receives complete framed stream ending in run_exit; (3) ordinary run
+  frame order run_output -> run_metadata -> run_exit unchanged; clean
+  shutdown, socket removed.
