@@ -1,0 +1,82 @@
+# M1 slice: waiting-for-input detection (S10-009)
+
+Spec: section 10 Responsibilities — "detect when an agent is waiting for input";
+feeds the section 18.17 "Needs input" notification surface (later milestone).
+
+## Change
+
+- start_process gains optional `input_wait_detect_milliseconds` (positive
+  integer; absent/null = disabled, byte-identical prior behavior; invalid
+  values rejected like invalid timeout_milliseconds). Old backends ignore the
+  field (no deny_unknown_fields), same precedent as `pty`.
+- When enabled the backend emits `{"type":"run_input_waiting","run_id":...,
+  "quiet_for_milliseconds":N}` at most once per quiet episode, when ALL hold:
+  quiet >= threshold since last activity (spawn, output chunk, or stdin bytes
+  written to the child), stdin delivery queue empty and not mid-write, and
+  child CPU time advanced < 30ms over the window (libc::proc_pidinfo
+  PROC_PIDTASKINFO, mach-units converted via mach_timebase_info). Activity
+  resets the episode. Never emitted after the supervision loop chooses a
+  terminal path. Works for pipe and PTY runs. Frames use the synchronized
+  writer path; supervision tick stays nonblocking (stdin try_lock first,
+  full recheck under the locks before emitting).
+- Swift IPCClient: `inputWaitDetectMilliseconds: Int? = nil` on
+  startProcess/startProcessRequest (serialized only when set); ProcessEvent
+  gains `.inputWaiting(runID:quietForMilliseconds:)` with a decode branch
+  (orchestrator addition — the worker-scoped API would otherwise throw
+  invalidProcessEvent on the new frame).
+
+## Provenance
+
+- Implementation: codex gpt-5.6-sol, effort high, workspace-write
+  (/tmp/worker-inputwait/{prompt.md,transcript.log,report.md}); diff-gated to
+  the 4-file allowlist, +622/−21. Worker sandbox cannot bind Unix sockets:
+  red evidence there = Swift compile failure pre-implementation + cargo
+  test --no-run compile of tests-first edits + two removed socket-pair probes.
+- Orchestrator direct edits: run_input_waiting Swift decode + test
+  (small mechanical addition), swift-format layout fix.
+
+## Evidence
+
+- red-evidence.log: the 3 positive/validation input_wait tests FAIL against
+  origin/main's backend/src/lib.rs (2 negative guards pass trivially).
+- cargo-test.log: full suite green — 15 lib + 13 health_socket + 44
+  process_lifecycle (39 prior + 5 new).
+- verify-m0-parity.log: ./scripts/verify-m0.sh exit 0 (fmt, clippy -D
+  warnings, all Rust tests, 24 Swift tests incl. new decode + wire-format
+  assertions, swift format lint --strict, swiftlint, release builds,
+  traceability validation). First run failed on swift-format layout of the
+  worker's closure; fixed and rerun to exit 0.
+- runtime-demo.log (release binary over the real socket): /bin/cat with
+  detection 500ms → run_input_waiting at quiet_for_milliseconds=502; send_input
+  "hello\n" accepted → echoed output → second quiet episode → second waiting
+  frame; close_stdin → natural exit 0; exactly 2 waiting frames, none after
+  run_exit; backend exits 0 and removes the socket.
+
+# Independent review dispositions (gpt-5.6-sol, high effort; report: review-report.md)
+
+- Blocker: supervision tick took a blocking writer lock in the emission path;
+  a drain thread wedged on a non-reading client would block supervision
+  forever (cancel unobservable, slot leaked) — CONFIRMED, FIXED: try_lock
+  with skip-and-retry per tick. Orchestrator-confirmed adjacent defect fixed
+  in the same pass: an emission write error propagated out of the supervision
+  loop mid-run via `?`, bypassing kill/metadata/exit — now the episode is
+  dropped and supervision continues. Regression test:
+  input_wait_backpressure_does_not_wedge_cancel.
+- Major: paused (SIGSTOPped) runs are quiet and CPU-flat, so detection fired
+  a spurious "needs input" frame — CONFIRMED, FIXED: evaluation skipped while
+  paused; first unpaused tick restarts the quiet window and resamples the CPU
+  baseline without clearing `fired`. Red evidence: input_wait_suppressed_while_paused
+  FAILED against pre-fix code (red-evidence.log tail). 
+- Minor: busy-silent negative test used a fixed 20M-iteration loop (machine-
+  speed dependent, could pass vacuously) — CONFIRMED, FIXED: wall-clock-bound
+  busy loop with a 900ms timeout; residual <30ms CPU-gate scheduling
+  dependence documented as accepted. Side effect: the lifecycle suite dropped
+  from ~44s to ~5s wall (that loop dominated the old runtime).
+- Reviewer notes confirmed sound: frame integrity/terminal ordering, stdin
+  double-check, episode once-per-quiet semantics, pid-reuse avoidance
+  (sampling only after try_wait reports running), mach timebase conversion,
+  validation and wire compatibility.
+
+Post-fix evidence: cargo-test-postfix.log (15+13+46),
+verify-m0-parity-postfix.log (exit 0), runtime-demo-postfix.log (behavior
+unchanged: 2 episodes, none after run_exit, clean shutdown).

@@ -1,0 +1,22 @@
+=== RED: new input_wait tests vs origin/main lib.rs ===
+
+---- input_wait_fires_for_a_pty_run stdout ----
+
+thread 'input_wait_fires_for_a_pty_run' (131140027) panicked at backend/tests/process_lifecycle.rs:2441:10:
+response frame should read: Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" }
+
+
+failures:
+    input_wait_fires_for_a_pty_run
+    input_wait_fires_for_a_quiet_pipe_run
+    input_wait_rejects_invalid_values
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 39 filtered out; finished in 43.79s
+
+error: test failed, to rerun pass `--test process_lifecycle`
+failures:
+    input_wait_suppressed_while_paused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.57s
+
+error: test failed, to rerun pass `--test process_lifecycle`

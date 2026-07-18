@@ -542,6 +542,88 @@ fn streaming_write_survives_backpressure_longer_than_the_request_timeout() {
 }
 
 #[test]
+fn input_wait_backpressure_does_not_wedge_cancel() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "input-wait-backpressure-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "/usr/bin/yes x | /usr/bin/head -c 16777216; sleep 30"],
+        "timeout_milliseconds": 30_000,
+        "input_wait_detect_milliseconds": 300,
+    });
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    assert_eq!(
+        wait_for_registered_input_control(
+            &backend.socket_path,
+            serde_json::json!({
+                "version": 1,
+                "type": "send_input",
+                "run_id": "input-wait-backpressure-run",
+                "data": "",
+            }),
+        )["status"],
+        "accepted"
+    );
+    let child_deadline = Instant::now() + Duration::from_secs(2);
+    let process_pid = loop {
+        if let Some(pid) = child_pids(backend.child.id()).into_iter().next() {
+            break pid as libc::pid_t;
+        }
+        assert!(
+            Instant::now() < child_deadline,
+            "chatty process should start"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    // Let the unread socket fill so an output drain holds the writer lock mid-write.
+    thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        cancel_process(&backend.socket_path, "input-wait-backpressure-run")["status"],
+        "accepted"
+    );
+    assert!(
+        wait_for_process_death(process_pid),
+        "cancel should kill the process before the start client resumes reading"
+    );
+
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "cancelled"
+    }));
+
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "input-wait-capacity-released-run",
+            "executable": "/usr/bin/true",
+            "arguments": [],
+            "timeout_milliseconds": 1_000,
+        }),
+    );
+    assert!(
+        frames
+            .last()
+            .is_some_and(|frame| { frame["type"] == "run_exit" && frame["exit_code"] == 0 })
+    );
+}
+
+#[test]
 fn nonexistent_executable_returns_one_spawn_failure_terminal_frame() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -860,6 +942,378 @@ fn send_input_and_close_stdin_drive_a_cat_run_to_natural_exit() {
     assert_eq!(terminal["run_id"], "stdin-cat-run");
     assert_eq!(terminal["exit_code"], 0);
     assert!(terminal.get("error_code").is_none());
+}
+
+#[test]
+fn input_wait_fires_for_a_quiet_pipe_run() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "input-wait-pipe-run",
+        "executable": "/bin/cat",
+        "arguments": [],
+        "timeout_milliseconds": 10_000,
+        "input_wait_detect_milliseconds": 300,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let mut frames = vec![read_json_frame(&mut reader)];
+    assert_eq!(frames[0]["type"], "run_input_waiting");
+    assert_eq!(frames[0]["run_id"], "input-wait-pipe-run");
+    assert!(
+        frames[0]["quiet_for_milliseconds"]
+            .as_u64()
+            .is_some_and(|quiet| quiet >= 300)
+    );
+
+    let input_response = input_control(
+        &backend.socket_path,
+        serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": "input-wait-pipe-run",
+            "data": "hello\n",
+        }),
+    );
+    assert_eq!(input_response["status"], "accepted");
+
+    let mut output = String::new();
+    while frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_input_waiting")
+        .count()
+        < 2
+    {
+        let frame = read_json_frame(&mut reader);
+        if frame["type"] == "run_output" && frame["stream"] == "stdout" {
+            output.push_str(frame["output"].as_str().expect("output should be a string"));
+        }
+        frames.push(frame);
+    }
+    assert!(output.contains("hello\n"));
+    assert!(
+        frames
+            .last()
+            .and_then(|frame| frame["quiet_for_milliseconds"].as_u64())
+            .is_some_and(|quiet| quiet >= 300)
+    );
+
+    assert_eq!(
+        control_process(&backend.socket_path, "close_stdin", "input-wait-pipe-run")["status"],
+        "accepted"
+    );
+    frames.extend(
+        reader.lines().map(|line| {
+            serde_json::from_str(&line.expect("frame should read")).expect("frame JSON")
+        }),
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["type"] == "run_input_waiting")
+            .count(),
+        2
+    );
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert_eq!(frames.last().expect("run should exit")["type"], "run_exit");
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert!(
+        frames[exit_index + 1..]
+            .iter()
+            .all(|frame| frame["type"] != "run_input_waiting")
+    );
+}
+
+#[test]
+fn input_wait_fires_for_a_pty_run() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "input-wait-pty-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "test -t 0 || exit 7; exec cat"],
+        "timeout_milliseconds": 10_000,
+        "pty": true,
+        "input_wait_detect_milliseconds": 300,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let mut frames = vec![read_json_frame(&mut reader)];
+    assert_eq!(frames[0]["type"], "run_input_waiting");
+    assert!(
+        frames[0]["quiet_for_milliseconds"]
+            .as_u64()
+            .is_some_and(|quiet| quiet >= 300)
+    );
+
+    let input_response = input_control(
+        &backend.socket_path,
+        serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": "input-wait-pty-run",
+            "data": "hello\n",
+        }),
+    );
+    assert_eq!(input_response["status"], "accepted");
+
+    let mut output = String::new();
+    while frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_input_waiting")
+        .count()
+        < 2
+    {
+        let frame = read_json_frame(&mut reader);
+        if frame["type"] == "run_output" && frame["stream"] == "stdout" {
+            output.push_str(frame["output"].as_str().expect("output should be a string"));
+        }
+        frames.push(frame);
+    }
+    assert!(output.contains("hello\r\n"));
+    assert!(
+        frames
+            .last()
+            .and_then(|frame| frame["quiet_for_milliseconds"].as_u64())
+            .is_some_and(|quiet| quiet >= 300)
+    );
+
+    assert_eq!(
+        control_process(&backend.socket_path, "close_stdin", "input-wait-pty-run")["status"],
+        "accepted"
+    );
+    frames.extend(
+        reader.lines().map(|line| {
+            serde_json::from_str(&line.expect("frame should read")).expect("frame JSON")
+        }),
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["type"] == "run_input_waiting")
+            .count(),
+        2
+    );
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert_eq!(frames.last().expect("run should exit")["type"], "run_exit");
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert!(
+        frames[exit_index + 1..]
+            .iter()
+            .all(|frame| frame["type"] != "run_input_waiting")
+    );
+}
+
+#[test]
+fn input_wait_suppressed_while_paused() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "input-wait-paused-run",
+        "executable": "/bin/cat",
+        "arguments": [],
+        "timeout_milliseconds": 10_000,
+        "input_wait_detect_milliseconds": 300,
+    });
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    assert_eq!(
+        wait_for_registered_input_control(
+            &backend.socket_path,
+            serde_json::json!({
+                "version": 1,
+                "type": "send_input",
+                "run_id": "input-wait-paused-run",
+                "data": "",
+            }),
+        )["status"],
+        "accepted"
+    );
+    assert_eq!(
+        control_process(
+            &backend.socket_path,
+            "pause_process",
+            "input-wait-paused-run"
+        )["status"],
+        "accepted"
+    );
+
+    stream
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .expect("paused read timeout should configure");
+    let mut reader = BufReader::new(stream);
+    let mut frame = String::new();
+    let error = reader
+        .read_line(&mut frame)
+        .expect_err("paused run must not emit an input-waiting frame");
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+
+    let resumed_at = Instant::now();
+    assert_eq!(
+        control_process(
+            &backend.socket_path,
+            "resume_process",
+            "input-wait-paused-run"
+        )["status"],
+        "accepted"
+    );
+    reader
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("resumed read timeout should configure");
+    let waiting = read_json_frame(&mut reader);
+    assert_eq!(waiting["type"], "run_input_waiting");
+    assert_eq!(waiting["run_id"], "input-wait-paused-run");
+    assert!(
+        resumed_at.elapsed() >= Duration::from_millis(250),
+        "quiet window should restart when the process resumes"
+    );
+    assert!(
+        waiting["quiet_for_milliseconds"]
+            .as_u64()
+            .is_some_and(|quiet| quiet >= 300)
+    );
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "input-wait-paused-run")["status"],
+        "accepted"
+    );
+    let mut frames = vec![waiting];
+    frames.extend(
+        reader.lines().map(|line| {
+            serde_json::from_str(&line.expect("frame should read")).expect("frame JSON")
+        }),
+    );
+    let exit_index = frames
+        .iter()
+        .position(|frame| frame["type"] == "run_exit")
+        .expect("run should emit exit");
+    assert_eq!(exit_index, frames.len() - 1);
+    assert!(
+        frames[exit_index + 1..]
+            .iter()
+            .all(|frame| frame["type"] != "run_input_waiting")
+    );
+}
+
+#[test]
+fn input_wait_does_not_fire_for_busy_silent_run() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "input-wait-busy-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "while :; do :; done"],
+        "timeout_milliseconds": 900,
+        "input_wait_detect_milliseconds": 300,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let frames: Vec<serde_json::Value> = BufReader::new(stream)
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+
+    // The <30ms CPU gate retains a small, accepted dependence on scheduler availability.
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["type"] != "run_input_waiting")
+    );
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "timed_out"
+    }));
+}
+
+#[test]
+fn input_wait_absent_field_emits_no_waiting_frames() {
+    let backend = start_backend();
+    let frames = run_frames(
+        &backend,
+        serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "input-wait-disabled-run",
+            "executable": "/bin/sh",
+            "arguments": ["-c", "sleep 1"],
+            "timeout_milliseconds": 2_000,
+        }),
+    );
+
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame["type"] != "run_input_waiting")
+    );
+    assert_eq!(frames[frames.len() - 2]["type"], "run_metadata");
+    assert_eq!(frames.last().expect("run should exit")["type"], "run_exit");
+}
+
+#[test]
+fn input_wait_rejects_invalid_values() {
+    let backend = start_backend();
+    for input_wait_detect_milliseconds in [serde_json::json!(0), serde_json::json!(-1)] {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": "invalid-input-wait-run",
+            "executable": "/bin/sleep",
+            "arguments": ["2"],
+            "timeout_milliseconds": 2_000,
+            "input_wait_detect_milliseconds": input_wait_detect_milliseconds,
+        });
+        let mut stream = UnixStream::connect(&backend.socket_path).expect("client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should configure");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        let mut frame = String::new();
+        BufReader::new(stream)
+            .read_line(&mut frame)
+            .expect("protocol error should be readable");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame JSON");
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "invalid_start_process");
+        assert!(child_pids(backend.child.id()).is_empty());
+    }
 }
 
 #[test]

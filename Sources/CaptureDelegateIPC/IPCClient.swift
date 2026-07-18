@@ -48,6 +48,7 @@ public enum CloseStdinResult: Equatable {
 public enum ProcessEvent: Equatable {
     case output(runID: String, stream: ProcessOutputStream, output: String)
     case metadata(runID: String, pid: Int, durationMilliseconds: Int, redactions: Int)
+    case inputWaiting(runID: String, quietForMilliseconds: Int)
     case exit(runID: String, exitCode: Int?, errorCode: ProcessExitErrorCode? = nil)
 }
 
@@ -127,6 +128,7 @@ public enum IPCClient {
         arguments: [String],
         timeoutMilliseconds: Int,
         pty: Bool = false,
+        inputWaitDetectMilliseconds: Int? = nil,
         onEvent: (ProcessEvent) -> Void
     ) throws {
         let descriptor = try connect(to: socketPath)
@@ -138,6 +140,7 @@ public enum IPCClient {
             arguments: arguments,
             timeoutMilliseconds: timeoutMilliseconds,
             pty: pty,
+            inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
             to: descriptor
         )
         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
@@ -165,12 +168,18 @@ public enum IPCClient {
         executable: String,
         arguments: [String],
         timeoutMilliseconds: Int,
-        pty: Bool = false
+        pty: Bool = false,
+        inputWaitDetectMilliseconds: Int? = nil
     ) -> String {
         let ptyField = pty ? ",\"pty\":true" : ""
+        let inputWaitDetectField =
+            inputWaitDetectMilliseconds.map {
+                ",\"input_wait_detect_milliseconds\":\($0)"
+            } ?? ""
         return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
             + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
-            + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)}\n"
+            + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)"
+            + "\(inputWaitDetectField)}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -256,6 +265,7 @@ public enum IPCClient {
         arguments: [String],
         timeoutMilliseconds: Int,
         pty: Bool,
+        inputWaitDetectMilliseconds: Int?,
         to descriptor: Int32
     ) throws {
         try suppressSIGPIPE(on: descriptor)
@@ -266,7 +276,8 @@ public enum IPCClient {
                     executable: executable,
                     arguments: arguments,
                     timeoutMilliseconds: timeoutMilliseconds,
-                    pty: pty
+                    pty: pty,
+                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds
                 ).utf8
             ), to: descriptor)
     }
@@ -432,6 +443,12 @@ public enum IPCClient {
             return .metadata(
                 runID: expectedRunID, pid: pid,
                 durationMilliseconds: durationMilliseconds, redactions: redactions)
+        case "run_input_waiting":
+            guard let quietForMilliseconds = json["quiet_for_milliseconds"] as? Int else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            return .inputWaiting(
+                runID: expectedRunID, quietForMilliseconds: quietForMilliseconds)
         case "run_exit":
             let exitCode: Int?
             if json["exit_code"] is NSNull {
