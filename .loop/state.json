@@ -1,7 +1,7 @@
 {
-  "status": "blocked",
-  "cycle": 1,
-  "active_milestone": "M0 Foundation",
+  "status": "ready",
+  "cycle": 2,
+  "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
   "job_id": "809366a7",
@@ -19,20 +19,7 @@
     "expires_date": "2026-07-24",
     "auto_expires": true
   },
-  "blockers": [
-    {
-      "id": "M0-FOUNDATION-001-native-window",
-      "requirement": "M0-FOUNDATION-001",
-      "description": "CaptureDelegateApp is reported by LaunchServices/System Events as foreground and visible but has zero windows; CoreGraphics also reports no window. scripts/verify-app-launch.sh failed deterministically on 10/10 consecutive launches after PR #1 merged.",
-      "tested_reverted_hypotheses": [
-        "AppDelegate activation",
-        "single SwiftUI Window scene",
-        "explicit AppKit-owned NSWindow"
-      ],
-      "source_unchanged": true,
-      "next_required_verification": "Run scripts/verify-app-launch.sh repeatedly after a fresh interactive macOS login. The long-lived current GUI session became inconsistent: unchanged product and standalone AppKit controls alternated between observable windows and foreground zero-window processes, so further source hypotheses in this session are not trustworthy."
-    }
-  ],
-  "last_cycle_summary": "M0 remains blocked at the native-window runtime gate. This cycle proved product source is unchanged and full non-UI parity passes, but repeated GUI controls became inconsistent in the current long-lived macOS session. A fresh interactive login is required before trustworthy window re-verification; no source change or M1 advancement was made.",
+  "blockers": [],
+  "last_cycle_summary": "After fresh loginwindow at 2026-07-17 18:57:46 local, scripts/verify-app-launch.sh passed 10/10 consecutive runs and a retained CoreGraphics screenshot shows a nonblank native window with centered “Capture → Delegate”. M0-FOUNDATION-001 is verified against PR #1 commit 3e6cf85; the prior blocker was session-specific, no product source changed, and M1 is dependency-ready.",
   "updated_at": "2026-07-17"
 }

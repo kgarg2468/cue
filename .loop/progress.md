@@ -61,3 +61,11 @@ Status: blocked pending fresh GUI login
 - Reverted all temporary lifecycle instrumentation and source hypotheses; product source is identical to `origin/main`.
 - Per systematic-debugging stop criteria, no fourth speculative source fix was attempted. Trustworthy re-verification requires a fresh interactive macOS login, which was not performed because it would disrupt the user.
 - M0 remains blocked and M1 remains dependency-blocked.
+
+## Cycle 2 M0 closeout — 2026-07-17
+
+Status: ready for M1
+
+- After fresh loginwindow at 18:57:46 local, `scripts/verify-app-launch.sh` passed 10/10 consecutive runs; retained CoreGraphics screenshot `.loop/verification/m0/fresh-login/app.png` shows a nonblank native window with centered “Capture → Delegate”.
+- Verified M0-FOUNDATION-001 against unchanged PR #1 implementation commit `3e6cf85`; the prior native-window blocker was session-specific and no product source changed.
+- Cleared M0 blockers and made M1 IPC/process lifecycle dependency-ready; no M1 implementation, branch, or PR was started.
