@@ -1,0 +1,44 @@
+# M1 slice: run stdin semantics (send_input / close_stdin)
+
+Spec: section 9 adapter API `answerClarification(runId, answer)`; section 10 local
+runtime responsibilities (input to running agents; S10-001, groundwork for S10-009).
+Waiting-input DETECTION remains pending (expected on the PTY slice).
+
+## Behavior
+- start_process now spawns children with piped stdin (previously the child inherited
+  the backend's stdin — a hygiene bug). Children that read stdin now block until
+  input/EOF instead of reading the backend's descriptor.
+- send_input {run_id, data}: input_response accepted|not_found. Accepted means the
+  input WILL be delivered (modulo racing exit): input sent in the register-to-spawn
+  window is buffered and flushed in order when the child's stdin is published,
+  mirroring the pause-before-pgid pattern. Writes to an open stdin happen under a
+  per-run mutex, never under the global registry mutex; a full pipe blocks only the
+  requesting client's connection thread.
+- close_stdin {run_id}: close_stdin_response accepted|not_found, idempotent. A close
+  while pending keeps buffered input and delivers it before EOF at publication.
+  Terminal branches tear stdin down (drop handle / discard buffer) so no writes
+  outlive a run and the child sees EOF.
+- Malformed variants return typed errors invalid_send_input / invalid_close_stdin.
+- Swift IPCClient adds sendInput/closeStdin + SendInputResult/CloseStdinResult
+  mirroring pauseProcess patterns.
+
+## Provenance
+- Implementation: Codex gpt-5.6-sol worker, high effort, four-file allowlist
+  (/tmp/worker-stdin/); diff gate clean (+415 across exactly the allowlisted files).
+- Orchestrator-found defect: the worker's send_input dropped data in the
+  register-to-publish window (its sandbox cannot run socket integration tests; the
+  cat test failed deterministically). Fixed by a second sol worker (single-file
+  allowlist, /tmp/worker-stdin-fix/): RunStdin::{Pending{buffer,closed},Open,Closed}
+  state machine under one per-run mutex, plus a unit test covering
+  buffer-then-close-then-publish ordering.
+
+## Evidence
+- red-evidence.log — all three new Rust integration tests fail against unmodified
+  origin/main impl (unknown_request_type / error frames).
+- cargo-test.log — green: 12 lib + 13 health + 25 process_lifecycle.
+- Stress: new stdin tests 8/8 consecutive green runs.
+- verify-m0-parity.log — full CI-parity script green, 19-test Swift run includes
+  "Swift sends input, closes stdin, and observes cat exit naturally".
+- runtime-demo.log — release binary: send_input accepted → echo 0.02s,
+  close_stdin accepted → run_exit exit_code 0 (no error_code), post-exit send_input
+  not_found, SIGTERM exit 0 with socket removed.

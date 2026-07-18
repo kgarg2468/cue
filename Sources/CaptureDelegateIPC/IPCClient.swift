@@ -34,6 +34,16 @@ public enum ResumeProcessResult: Equatable {
     case notFound
 }
 
+public enum SendInputResult: Equatable {
+    case accepted
+    case notFound
+}
+
+public enum CloseStdinResult: Equatable {
+    case accepted
+    case notFound
+}
+
 public enum ProcessEvent: Equatable {
     case output(runID: String, stream: ProcessOutputStream, output: String)
     case exit(runID: String, exitCode: Int?, errorCode: ProcessExitErrorCode? = nil)
@@ -83,6 +93,28 @@ public enum IPCClient {
 
         try writeResumeProcessRequest(runID: runID, to: descriptor)
         return try decodeResumeProcessResponse(
+            readBoundedResponseLine(from: descriptor), expectedRunID: runID)
+    }
+
+    public static func sendInput(socketPath: String, runID: String, data: String) throws
+        -> SendInputResult
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeSendInputRequest(runID: runID, data: data, to: descriptor)
+        return try decodeSendInputResponse(
+            readBoundedResponseLine(from: descriptor), expectedRunID: runID)
+    }
+
+    public static func closeStdin(socketPath: String, runID: String) throws
+        -> CloseStdinResult
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCloseStdinRequest(runID: runID, to: descriptor)
+        return try decodeCloseStdinResponse(
             readBoundedResponseLine(from: descriptor), expectedRunID: runID)
     }
 
@@ -143,6 +175,14 @@ public enum IPCClient {
 
     public static func resumeProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"resume_process\",\"run_id\":\(jsonString(runID))}\n"
+    }
+
+    public static func sendInputRequest(runID: String, data: String) -> String {
+        "{\"version\":1,\"type\":\"send_input\",\"run_id\":\(jsonString(runID)),\"data\":\(jsonString(data))}\n"
+    }
+
+    public static func closeStdinRequest(runID: String) -> String {
+        "{\"version\":1,\"type\":\"close_stdin\",\"run_id\":\(jsonString(runID))}\n"
     }
 
     public static func validateHealthResponse(_ response: String) throws -> Bool {
@@ -234,6 +274,16 @@ public enum IPCClient {
     static func writeResumeProcessRequest(runID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(resumeProcessRequest(runID: runID).utf8), to: descriptor)
+    }
+
+    static func writeSendInputRequest(runID: String, data: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(sendInputRequest(runID: runID, data: data).utf8), to: descriptor)
+    }
+
+    static func writeCloseStdinRequest(runID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(closeStdinRequest(runID: runID).utf8), to: descriptor)
     }
 
     private static func write(_ bytes: [UInt8], to descriptor: Int32) throws {
@@ -437,6 +487,50 @@ public enum IPCClient {
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             json["version"] as? Int == 1,
             json["type"] as? String == "resume_response",
+            json["run_id"] as? String == expectedRunID,
+            let status = json["status"] as? String
+        else {
+            throw IPCClientError.invalidProcessEvent
+        }
+
+        switch status {
+        case "accepted": return .accepted
+        case "not_found": return .notFound
+        default: throw IPCClientError.invalidProcessEvent
+        }
+    }
+
+    static func decodeSendInputResponse(
+        _ response: String,
+        expectedRunID: String
+    ) throws -> SendInputResult {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "input_response",
+            json["run_id"] as? String == expectedRunID,
+            let status = json["status"] as? String
+        else {
+            throw IPCClientError.invalidProcessEvent
+        }
+
+        switch status {
+        case "accepted": return .accepted
+        case "not_found": return .notFound
+        default: throw IPCClientError.invalidProcessEvent
+        }
+    }
+
+    static func decodeCloseStdinResponse(
+        _ response: String,
+        expectedRunID: String
+    ) throws -> CloseStdinResult {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "close_stdin_response",
             json["run_id"] as? String == expectedRunID,
             let status = json["status"] as? String
         else {
