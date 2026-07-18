@@ -1,0 +1,55 @@
+M1 run-cancel slice verification — 2026-07-18
+
+Slice: versioned cancel_process request/response over the Unix socket protocol,
+ActiveRuns registry with duplicate-run-id rejection and Drop-based release,
+typed `cancelled` terminal frames, and the Swift IPCClient.cancelProcess API.
+
+Provenance: adopted from cycle 5's uncommitted worktree diff (463 lines,
+5 files, exactly the expected cancel-slice allowlist), after review. Two fixes
+applied during adoption:
+1. backend/tests/process_lifecycle.rs — the reuse section of
+   duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown
+   cancelled before the restarted run was observably registered; it now waits
+   for the first run_output frame (matching the first section), removing the
+   not_found race.
+2. Swift line-length lint wraps in IPCClient.swift and
+   ProcessLifecycleTests.swift (formatting only).
+
+Evidence in this directory:
+- cargo-test.log — cargo test all-green (9 lib + 13 + 14 integration).
+- verify-m0-parity.log — full CI parity gate: ledger validation, cargo
+  fmt/clippy/test, swift format lint --strict, release builds, swift test
+  (17/17 including "Swift cancels a running process over a separate typed
+  connection" against the real backend binary), health handshake.
+- runtime-cancel-demo.log — release binary runtime demo: prior output
+  preserved, cancel accepted on a separate connection, `cancelled` terminal
+  with null exit code arrived 0.01s after cancel (child had 5s remaining),
+  post-exit cancel returns not_found.
+
+Known environmental note: cleanup_does_not_unlink_replacement_socket fails in
+any checkout whose path pushes the test socket path past SUN_LEN (104 bytes on
+macOS); it fails identically on clean origin/main in such paths and passes
+here and in CI. Not caused or touched by this slice.
+
+Independent review (Codex gpt-5.6-sol, high effort): no blockers; five major
+and three minor findings. Dispositions after code verification:
+- FIXED: run id released only after the terminal frame was written, so a
+  client observing run_exit could get a spurious duplicate_run_id on
+  immediate reuse. Registration now drops before every terminal write
+  (normal, capacity_exhausted, spawn_failed paths); the reuse test now
+  restarts the id immediately after reading run_exit instead of waiting
+  for EOF, exercising the ordering deterministically.
+- FIXED: the cancel/timeout race test assumed the first frame is output;
+  a terminal-first result on a slow machine broke the count assertion. The
+  first frame is now included in the frame list and the single terminal is
+  asserted to be last. Both race-sensitive tests passed 5/5 stress reruns.
+- FLAGGED (inherent race semantics, follow-up in M1): a cancel accepted
+  moments before natural exit, timeout expiry, or between registration and
+  spawn can yield an exited/timed_out/capacity/spawn terminal after an
+  accepted cancel response. Exactly one terminal is still emitted and the
+  run terminates; precise terminal attribution ordering is future M1 work.
+- FLAGGED (pre-existing, tracked in S10-011 pending work): a connected but
+  never-reading client stalls drain-thread socket writes (write timeout is
+  intentionally None for backpressure survival), retaining the process slot
+  and now also the run id until disconnect. Waiting-input detection and
+  cleanup remain pending M1 scope.

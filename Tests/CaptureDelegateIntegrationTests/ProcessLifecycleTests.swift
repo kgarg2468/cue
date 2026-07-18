@@ -145,6 +145,62 @@ func timedOutProcess() throws {
         ])
 }
 
+@Test("Swift cancels a running process over a separate typed connection")
+func cancelledProcess() throws {
+    guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
+    else { throw NSError(domain: "CaptureDelegateIntegrationTests", code: 1) }
+
+    let directory = URL(filePath: "/private/tmp")
+        .appending(
+            path: "capture-delegate-cancel-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = directory.appending(path: "backend.sock")
+    let backend = try startBackend(binary: backendBinary, socket: socket)
+    defer {
+        if backend.isRunning { backend.terminate() }
+        backend.waitUntilExit()
+    }
+
+    let outputReceived = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+    let collector = IntegrationEventCollector()
+    Thread {
+        defer { finished.signal() }
+        do {
+            try IPCClient.startProcess(
+                socketPath: socket.path(), runID: "swift-cancel-run", executable: "/bin/sh",
+                arguments: ["-c", "printf ready; sleep 2"], timeoutMilliseconds: 2_000
+            ) { event in
+                collector.append(event)
+                if case .output = event { outputReceived.signal() }
+            }
+        } catch { collector.record(error) }
+    }.start()
+
+    #expect(outputReceived.wait(timeout: .now() + 2) == .success)
+    #expect(
+        try IPCClient.cancelProcess(socketPath: socket.path(), runID: "swift-cancel-run")
+            == .accepted)
+    #expect(finished.wait(timeout: .now() + 2) == .success)
+    #expect(collector.error == nil)
+    #expect(
+        collector.events.last
+            == .exit(runID: "swift-cancel-run", exitCode: nil, errorCode: .cancelled))
+}
+
+private final class IntegrationEventCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [ProcessEvent] = []
+    private var storedError: Error?
+
+    var events: [ProcessEvent] { lock.withLock { storedEvents } }
+    var error: Error? { lock.withLock { storedError } }
+
+    func append(_ event: ProcessEvent) { lock.withLock { storedEvents.append(event) } }
+    func record(_ error: Error) { lock.withLock { storedError = error } }
+}
+
 private func startBackend(binary: String, socket: URL) throws -> Process {
     let backend = Process()
     backend.executableURL = URL(filePath: binary)

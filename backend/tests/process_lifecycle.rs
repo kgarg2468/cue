@@ -268,6 +268,198 @@ fn nonexistent_executable_returns_one_spawn_failure_terminal_frame() {
 }
 
 #[test]
+fn cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_terminal_last() {
+    let backend = start_backend();
+    assert_eq!(
+        cancel_process(&backend.socket_path, "unknown-run")["status"],
+        "not_found"
+    );
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "cancel-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "printf ready; sleep 2"],
+        "timeout_milliseconds": 2_000,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let mut first_frame = String::new();
+    reader
+        .read_line(&mut first_frame)
+        .expect("prior output should be readable");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&first_frame).expect("frame JSON")["type"],
+        "run_output"
+    );
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "cancel-run")["status"],
+        "accepted"
+    );
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["type"], "run_exit");
+    assert!(frames[0]["exit_code"].is_null());
+    assert_eq!(frames[0]["error_code"], "cancelled");
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "cancel-run")["status"],
+        "not_found"
+    );
+    let mut health =
+        UnixStream::connect(&backend.socket_path).expect("health client should connect");
+    health
+        .write_all(b"{\"version\":1,\"type\":\"health\"}\n")
+        .expect("health request should write");
+    let mut health_frame = String::new();
+    BufReader::new(health)
+        .read_line(&mut health_frame)
+        .expect("health response should read");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&health_frame).expect("health JSON")["status"],
+        "ok"
+    );
+}
+
+#[test]
+fn duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "reused-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "printf ready; sleep 2"],
+        "timeout_milliseconds": 2_000,
+    });
+    let mut first = UnixStream::connect(&backend.socket_path).expect("first client should connect");
+    first
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("first request should write");
+    let mut first_reader = BufReader::new(first);
+    let mut output = String::new();
+    first_reader
+        .read_line(&mut output)
+        .expect("first output should read");
+
+    let mut duplicate =
+        UnixStream::connect(&backend.socket_path).expect("duplicate client should connect");
+    duplicate
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("duplicate request should write");
+    let mut duplicate_frame = String::new();
+    BufReader::new(duplicate)
+        .read_line(&mut duplicate_frame)
+        .expect("duplicate error should read");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&duplicate_frame).expect("duplicate JSON")["code"],
+        "duplicate_run_id"
+    );
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "reused-run")["status"],
+        "accepted"
+    );
+    loop {
+        let mut frame = String::new();
+        first_reader
+            .read_line(&mut frame)
+            .expect("first run frame should read");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("first run frame JSON");
+        if frame["type"] == "run_exit" {
+            assert_eq!(frame["error_code"], "cancelled");
+            break;
+        }
+    }
+
+    let mut reused =
+        UnixStream::connect(&backend.socket_path).expect("reused client should connect");
+    reused
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("reused request should write");
+    let mut reused_reader = BufReader::new(reused);
+    let mut reused_output = String::new();
+    reused_reader
+        .read_line(&mut reused_output)
+        .expect("reused output should read before cancelling");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reused_output).expect("reused output JSON")["type"],
+        "run_output"
+    );
+    assert_eq!(
+        cancel_process(&backend.socket_path, "reused-run")["status"],
+        "accepted"
+    );
+    let terminal: Vec<serde_json::Value> = reused_reader
+        .lines()
+        .map(|line| {
+            serde_json::from_str(&line.expect("reused response should read")).expect("reused JSON")
+        })
+        .collect();
+    assert_eq!(
+        terminal.last().expect("terminal")["error_code"],
+        "cancelled"
+    );
+}
+
+#[test]
+fn cancellation_and_timeout_races_emit_one_terminal_without_hanging() {
+    let backend = start_backend();
+    for index in 0..3 {
+        let run_id = format!("cancel-timeout-race-{index}");
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": run_id,
+            "executable": "/bin/sh",
+            "arguments": ["-c", "printf ready; sleep 2"],
+            "timeout_milliseconds": 20,
+        });
+        let mut stream =
+            UnixStream::connect(&backend.socket_path).expect("start client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout should configure");
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("start request should write");
+        let mut reader = BufReader::new(stream);
+        let mut first = String::new();
+        reader
+            .read_line(&mut first)
+            .expect("first frame should read");
+        let first: serde_json::Value = serde_json::from_str(&first).expect("first frame JSON");
+        let _ = cancel_process(&backend.socket_path, &run_id);
+        let frames: Vec<serde_json::Value> = std::iter::once(first)
+            .chain(reader.lines().map(|line| {
+                serde_json::from_str(&line.expect("frame should read")).expect("frame JSON")
+            }))
+            .collect();
+        let terminals: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "run_exit")
+            .collect();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0], frames.last().expect("frames are nonempty"));
+        assert!(matches!(
+            terminals[0]["error_code"].as_str(),
+            Some("cancelled" | "timed_out")
+        ));
+    }
+}
+
+#[test]
 fn disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -716,4 +908,20 @@ fn process_exists(pid: u32) -> bool {
         .status()
         .expect("process observation should run")
         .success()
+}
+
+fn cancel_process(socket_path: &Path, run_id: &str) -> serde_json::Value {
+    let request = serde_json::json!({"version": 1, "type": "cancel_process", "run_id": run_id});
+    let mut stream = UnixStream::connect(socket_path).expect("cancel client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("cancel timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("cancel request should write");
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .expect("cancel response should read");
+    serde_json::from_str(&response).expect("cancel response JSON")
 }
