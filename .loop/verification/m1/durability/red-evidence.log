@@ -1,0 +1,13 @@
+=== RED: durability tests vs origin/main lib.rs ===
+failures:
+    non_reading_client_does_not_wedge_run_termination
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 15.31s
+
+error: test failed, to rerun pass `--test process_lifecycle`
+     Running unittests src/lib.rs (/Users/krishgarg/conductor/workspaces/cue/moroni/target/debug/deps/capture_delegate_backend-39fb6de77e1f3fc5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
