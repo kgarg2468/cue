@@ -127,6 +127,7 @@ public enum IPCClient {
         arguments: [String],
         timeoutMilliseconds: Int,
         pty: Bool = false,
+        inputWaitDetectMilliseconds: Int? = nil,
         onEvent: (ProcessEvent) -> Void
     ) throws {
         let descriptor = try connect(to: socketPath)
@@ -138,6 +139,7 @@ public enum IPCClient {
             arguments: arguments,
             timeoutMilliseconds: timeoutMilliseconds,
             pty: pty,
+            inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
             to: descriptor
         )
         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
@@ -165,12 +167,17 @@ public enum IPCClient {
         executable: String,
         arguments: [String],
         timeoutMilliseconds: Int,
-        pty: Bool = false
+        pty: Bool = false,
+        inputWaitDetectMilliseconds: Int? = nil
     ) -> String {
         let ptyField = pty ? ",\"pty\":true" : ""
+        let inputWaitDetectField = inputWaitDetectMilliseconds.map {
+            ",\"input_wait_detect_milliseconds\":\($0)"
+        } ?? ""
         return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
             + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
-            + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)}\n"
+            + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)"
+            + "\(inputWaitDetectField)}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -256,6 +263,7 @@ public enum IPCClient {
         arguments: [String],
         timeoutMilliseconds: Int,
         pty: Bool,
+        inputWaitDetectMilliseconds: Int?,
         to descriptor: Int32
     ) throws {
         try suppressSIGPIPE(on: descriptor)
@@ -266,7 +274,8 @@ public enum IPCClient {
                     executable: executable,
                     arguments: arguments,
                     timeoutMilliseconds: timeoutMilliseconds,
-                    pty: pty
+                    pty: pty,
+                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds
                 ).utf8
             ), to: descriptor)
     }

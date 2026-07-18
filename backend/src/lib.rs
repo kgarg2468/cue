@@ -9,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,6 +21,7 @@ const CLIENT_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONCURRENT_CLIENTS: usize = 8;
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const INPUT_WAIT_CPU_QUIET_NANOSECONDS: u64 = 30_000_000;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -47,6 +48,8 @@ struct Request {
     arguments: Option<Vec<String>>,
     #[serde(default)]
     timeout_milliseconds: Option<serde_json::Value>,
+    #[serde(default)]
+    input_wait_detect_milliseconds: Option<serde_json::Value>,
     #[serde(default)]
     data: Option<String>,
     #[serde(default)]
@@ -77,6 +80,15 @@ struct RunOutputResponse<'a> {
     run_id: &'a str,
     stream: &'static str,
     output: String,
+}
+
+#[derive(Serialize)]
+struct RunInputWaitingResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    run_id: &'a str,
+    quiet_for_milliseconds: u64,
 }
 
 #[derive(Serialize)]
@@ -212,7 +224,7 @@ impl RunControl {
             .handle = Some(RunStdinHandle::Pty(master));
     }
 
-    fn drain_stdin(&self) {
+    fn drain_stdin(&self, activity: Option<&ActivityClock>) {
         let mut state = self
             .stdin
             .lock()
@@ -237,6 +249,9 @@ impl RunControl {
                         state.last_pty_byte_was_newline = state.buffer[written - 1] == b'\n';
                     }
                     state.buffer.drain(..written);
+                    if let Some(activity) = activity {
+                        activity.record();
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -262,6 +277,16 @@ impl RunControl {
             } else {
                 state.handle.take();
             }
+        }
+    }
+
+    fn stdin_is_idle(&self) -> bool {
+        match self.stdin.try_lock() {
+            Ok(state) => state.buffer.is_empty(),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().buffer.is_empty()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => false,
         }
     }
 
@@ -449,7 +474,11 @@ impl RunRegistration {
     }
 
     fn drain_stdin(&self) {
-        self.control.drain_stdin();
+        self.control.drain_stdin(None);
+    }
+
+    fn drain_stdin_with_activity(&self, activity: &ActivityClock) {
+        self.control.drain_stdin(Some(activity));
     }
 
     fn publish_pgid(&self, pgid: libc::pid_t) {
@@ -850,6 +879,17 @@ fn handle_connection(
             }
             "start_process" => {
                 let pty = request.pty.unwrap_or(false);
+                let input_wait_detect_milliseconds = match request.input_wait_detect_milliseconds {
+                    None => None,
+                    Some(value) => {
+                        let Some(milliseconds) =
+                            value.as_u64().filter(|milliseconds| *milliseconds > 0)
+                        else {
+                            return write_protocol_error(&mut stream, "invalid_start_process");
+                        };
+                        Some(milliseconds)
+                    }
+                };
                 let (Some(run_id), Some(executable), Some(arguments), Some(timeout_milliseconds)) = (
                     request.run_id,
                     request.executable,
@@ -904,7 +944,11 @@ fn handle_connection(
                             run_id,
                             executable,
                             arguments,
-                            StartProcessOptions { timeout, pty },
+                            StartProcessOptions {
+                                timeout,
+                                pty,
+                                input_wait_detect_milliseconds,
+                            },
                             process_slot,
                             registration,
                         );
@@ -1191,6 +1235,118 @@ enum ProcessOutput {
 struct StartProcessOptions {
     timeout: Duration,
     pty: bool,
+    input_wait_detect_milliseconds: Option<u64>,
+}
+
+struct ActivityClock {
+    anchor: Instant,
+    last_activity_nanoseconds: AtomicU64,
+}
+
+impl ActivityClock {
+    fn new() -> Self {
+        Self {
+            anchor: Instant::now(),
+            last_activity_nanoseconds: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self) {
+        self.last_activity_nanoseconds
+            .fetch_max(self.elapsed_nanoseconds(), Ordering::Release);
+    }
+
+    fn snapshot(&self) -> u64 {
+        self.last_activity_nanoseconds.load(Ordering::Acquire)
+    }
+
+    fn quiet_for_milliseconds(&self, expected_activity: u64) -> Option<u64> {
+        if self.snapshot() != expected_activity {
+            return None;
+        }
+        Some(self.elapsed_nanoseconds().saturating_sub(expected_activity) / 1_000_000)
+    }
+
+    fn elapsed_nanoseconds(&self) -> u64 {
+        u64::try_from(self.anchor.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+
+struct InputWaitEpisode {
+    threshold_milliseconds: u64,
+    activity_nanoseconds: u64,
+    cpu_at_activity_nanoseconds: Option<u64>,
+    fired: bool,
+}
+
+impl InputWaitEpisode {
+    fn new(threshold_milliseconds: u64, activity: &ActivityClock, pid: libc::pid_t) -> Self {
+        Self {
+            threshold_milliseconds,
+            activity_nanoseconds: activity.snapshot(),
+            cpu_at_activity_nanoseconds: process_cpu_time_nanoseconds(pid),
+            fired: false,
+        }
+    }
+
+    fn refresh_after_activity(&mut self, activity: &ActivityClock, pid: libc::pid_t) {
+        let current_activity = activity.snapshot();
+        if current_activity == self.activity_nanoseconds {
+            return;
+        }
+
+        self.fired = false;
+        let cpu_at_activity_nanoseconds = process_cpu_time_nanoseconds(pid);
+        if activity.snapshot() == current_activity {
+            self.activity_nanoseconds = current_activity;
+            self.cpu_at_activity_nanoseconds = cpu_at_activity_nanoseconds;
+        } else {
+            self.cpu_at_activity_nanoseconds = None;
+        }
+    }
+}
+
+#[allow(deprecated)]
+fn process_cpu_time_nanoseconds(pid: libc::pid_t) -> Option<u64> {
+    let task_info_size = std::mem::size_of::<libc::proc_taskinfo>();
+    let task_info_size = libc::c_int::try_from(task_info_size).ok()?;
+    let mut task_info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
+    // SAFETY: task_info points to writable storage of exactly task_info_size bytes, and
+    // proc_pidinfo does not retain the pointer after returning.
+    let bytes_written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            task_info.as_mut_ptr().cast(),
+            task_info_size,
+        )
+    };
+    if bytes_written != task_info_size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo returned the full proc_taskinfo size and initialized the value.
+    let task_info = unsafe { task_info.assume_init() };
+    let mach_units = task_info
+        .pti_total_user
+        .saturating_add(task_info.pti_total_system);
+
+    static MACH_TIMEBASE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+    let &(numerator, denominator) = MACH_TIMEBASE
+        .get_or_init(|| {
+            let mut timebase = std::mem::MaybeUninit::<libc::mach_timebase_info>::uninit();
+            // SAFETY: timebase points to writable storage and mach_timebase_info initializes it.
+            if unsafe { libc::mach_timebase_info(timebase.as_mut_ptr()) } != 0 {
+                return None;
+            }
+            // SAFETY: mach_timebase_info returned success and initialized timebase.
+            let timebase = unsafe { timebase.assume_init() };
+            (timebase.denom != 0).then_some((u64::from(timebase.numer), u64::from(timebase.denom)))
+        })
+        .as_ref()?;
+    let nanoseconds =
+        u128::from(mach_units).saturating_mul(u128::from(numerator)) / u128::from(denominator);
+    Some(u64::try_from(nanoseconds).unwrap_or(u64::MAX))
 }
 
 fn open_pseudo_terminal() -> io::Result<(File, File)> {
@@ -1262,7 +1418,11 @@ fn run_process(
     _process_slot: WorkerSlot,
     registration: RunRegistration,
 ) -> io::Result<()> {
-    let StartProcessOptions { timeout, pty } = options;
+    let StartProcessOptions {
+        timeout,
+        pty,
+        input_wait_detect_milliseconds,
+    } = options;
     let stream = Arc::new(Mutex::new(stream));
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
@@ -1353,8 +1513,22 @@ fn run_process(
         }
         (child, None)
     };
-    registration.drain_stdin();
     let pgid = child.id() as libc::pid_t;
+    let activity = input_wait_detect_milliseconds.map(|_| Arc::new(ActivityClock::new()));
+    let mut input_wait_episode = input_wait_detect_milliseconds.map(|milliseconds| {
+        InputWaitEpisode::new(
+            milliseconds,
+            activity
+                .as_deref()
+                .expect("enabled input wait detection should have an activity clock"),
+            pgid,
+        )
+    });
+    if let Some(activity) = activity.as_deref() {
+        registration.drain_stdin_with_activity(activity);
+    } else {
+        registration.drain_stdin();
+    }
     registration.publish_pgid(pgid);
     let (process_output, stderr) = if let Some(master) = pty_master {
         (ProcessOutput::Pty(master), None)
@@ -1381,6 +1555,7 @@ fn run_process(
     let stdout_run_id = run_id.clone();
     let stdout_control = Arc::clone(&control);
     let stdout_redactions = Arc::clone(&redactions);
+    let stdout_activity = activity.clone();
     let stdout_drain = match thread::Builder::new()
         .name("capture-delegate-stdout".to_owned())
         .spawn(move || match process_output {
@@ -1391,6 +1566,7 @@ fn run_process(
                 "stdout",
                 stdout_control,
                 stdout_redactions,
+                stdout_activity,
             ),
             ProcessOutput::Pty(master) => drain_pty_output_until_cancelled(
                 master,
@@ -1398,6 +1574,7 @@ fn run_process(
                 stdout_run_id,
                 stdout_control,
                 stdout_redactions,
+                stdout_activity,
             ),
         }) {
         Ok(drain) => drain,
@@ -1414,6 +1591,7 @@ fn run_process(
         let stderr_run_id = run_id.clone();
         let stderr_control = Arc::clone(&control);
         let stderr_redactions = Arc::clone(&redactions);
+        let stderr_activity = activity.clone();
         let stderr = stderr.expect("non-PTY run should have piped stderr");
         match thread::Builder::new()
             .name("capture-delegate-stderr".to_owned())
@@ -1425,6 +1603,7 @@ fn run_process(
                     "stderr",
                     stderr_control,
                     stderr_redactions,
+                    stderr_activity,
                 )
             }) {
             Ok(drain) => Some(drain),
@@ -1470,7 +1649,27 @@ fn run_process(
                 break (child.wait()?.code(), Some("cancelled"));
             }
             ProcessSupervision::Running => {
-                registration.drain_stdin();
+                if let Some(activity) = activity.as_deref() {
+                    registration.drain_stdin_with_activity(activity);
+                } else {
+                    registration.drain_stdin();
+                }
+                if let (Some(activity), Some(episode)) =
+                    (activity.as_deref(), input_wait_episode.as_mut())
+                {
+                    episode.refresh_after_activity(activity, pgid);
+                    if !episode.fired
+                        && activity
+                            .quiet_for_milliseconds(episode.activity_nanoseconds)
+                            .is_some_and(|quiet| quiet >= episode.threshold_milliseconds)
+                        && control.stdin_is_idle()
+                        && write_input_waiting_frame_if_quiet(
+                            &stream, &run_id, pgid, &control, activity, episode,
+                        )?
+                    {
+                        episode.fired = true;
+                    }
+                }
                 thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
             }
         }
@@ -1552,6 +1751,7 @@ fn drain_process_output<R: Read>(
         output_stream,
         Arc::new(RunControl::new()),
         Arc::new(AtomicUsize::new(0)),
+        None,
     )
 }
 
@@ -1562,6 +1762,7 @@ fn drain_process_output_until_cancelled<R: Read>(
     output_stream: &'static str,
     control: Arc<RunControl>,
     redactions: Arc<AtomicUsize>,
+    activity: Option<Arc<ActivityClock>>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; MAX_OUTPUT_CHUNK_BYTES];
     let mut utf8_carry = Vec::with_capacity(3);
@@ -1591,7 +1792,9 @@ fn drain_process_output_until_cancelled<R: Read>(
                 stream: output_stream,
                 output,
             };
-            if let Err(error) = write_json_frame(&stream, &response) {
+            if let Err(error) =
+                write_json_frame_with_activity(&stream, &response, activity.as_deref())
+            {
                 control.cancelled.store(true, Ordering::Release);
                 return Err(error);
             }
@@ -1607,9 +1810,11 @@ fn drain_process_output_until_cancelled<R: Read>(
             stream: output_stream,
             output,
         };
-        write_json_frame(&stream, &response).inspect_err(|_| {
-            control.cancelled.store(true, Ordering::Release);
-        })?;
+        write_json_frame_with_activity(&stream, &response, activity.as_deref()).inspect_err(
+            |_| {
+                control.cancelled.store(true, Ordering::Release);
+            },
+        )?;
     }
     Ok(())
 }
@@ -1620,6 +1825,7 @@ fn drain_pty_output_until_cancelled(
     run_id: String,
     control: Arc<RunControl>,
     redactions: Arc<AtomicUsize>,
+    activity: Option<Arc<ActivityClock>>,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; MAX_OUTPUT_CHUNK_BYTES];
     let mut utf8_carry = Vec::with_capacity(3);
@@ -1672,7 +1878,9 @@ fn drain_pty_output_until_cancelled(
                 stream: "stdout",
                 output,
             };
-            if let Err(error) = write_json_frame(&stream, &response) {
+            if let Err(error) =
+                write_json_frame_with_activity(&stream, &response, activity.as_deref())
+            {
                 control.cancelled.store(true, Ordering::Release);
                 return Err(error);
             }
@@ -1688,9 +1896,11 @@ fn drain_pty_output_until_cancelled(
             stream: "stdout",
             output,
         };
-        write_json_frame(&stream, &response).inspect_err(|_| {
-            control.cancelled.store(true, Ordering::Release);
-        })?;
+        write_json_frame_with_activity(&stream, &response, activity.as_deref()).inspect_err(
+            |_| {
+                control.cancelled.store(true, Ordering::Release);
+            },
+        )?;
     }
     Ok(())
 }
@@ -1779,7 +1989,7 @@ fn decode_output_chunk(utf8_carry: &mut Vec<u8>, bytes: &[u8]) -> String {
     output
 }
 
-fn write_json_frame<T: Serialize>(stream: &Arc<Mutex<UnixStream>>, response: &T) -> io::Result<()> {
+fn serialize_json_frame<T: Serialize>(response: &T) -> io::Result<Vec<u8>> {
     let mut frame = serde_json::to_vec(response)?;
     frame.push(b'\n');
     if frame.len() >= MAX_REQUEST_BYTES {
@@ -1788,11 +1998,90 @@ fn write_json_frame<T: Serialize>(stream: &Arc<Mutex<UnixStream>>, response: &T)
             "response must be a bounded newline-delimited frame",
         ));
     }
+    Ok(frame)
+}
+
+fn write_serialized_frame(stream: &mut UnixStream, frame: &[u8]) -> io::Result<()> {
+    stream.write_all(frame)?;
+    stream.flush()
+}
+
+fn write_json_frame<T: Serialize>(stream: &Arc<Mutex<UnixStream>>, response: &T) -> io::Result<()> {
+    let frame = serialize_json_frame(response)?;
     let mut stream = stream
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    stream.write_all(&frame)?;
-    stream.flush()
+    write_serialized_frame(&mut stream, &frame)
+}
+
+fn write_json_frame_with_activity<T: Serialize>(
+    stream: &Arc<Mutex<UnixStream>>,
+    response: &T,
+    activity: Option<&ActivityClock>,
+) -> io::Result<()> {
+    let frame = serialize_json_frame(response)?;
+    let mut stream = stream
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_serialized_frame(&mut stream, &frame)?;
+    if let Some(activity) = activity {
+        activity.record();
+    }
+    Ok(())
+}
+
+fn write_input_waiting_frame_if_quiet(
+    stream: &Arc<Mutex<UnixStream>>,
+    run_id: &str,
+    pid: libc::pid_t,
+    control: &RunControl,
+    activity: &ActivityClock,
+    episode: &InputWaitEpisode,
+) -> io::Result<bool> {
+    let mut stream = stream
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if activity.snapshot() != episode.activity_nanoseconds {
+        return Ok(false);
+    }
+    let stdin = match control.stdin.try_lock() {
+        Ok(stdin) => stdin,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+    };
+    if !stdin.buffer.is_empty() {
+        return Ok(false);
+    }
+    let Some(cpu_at_activity_nanoseconds) = episode.cpu_at_activity_nanoseconds else {
+        return Ok(false);
+    };
+    let Some(cpu_now_nanoseconds) = process_cpu_time_nanoseconds(pid) else {
+        return Ok(false);
+    };
+    if cpu_now_nanoseconds.saturating_sub(cpu_at_activity_nanoseconds)
+        >= INPUT_WAIT_CPU_QUIET_NANOSECONDS
+    {
+        return Ok(false);
+    }
+    let Some(quiet_for_milliseconds) =
+        activity.quiet_for_milliseconds(episode.activity_nanoseconds)
+    else {
+        return Ok(false);
+    };
+    if quiet_for_milliseconds < episode.threshold_milliseconds {
+        return Ok(false);
+    }
+
+    let response = RunInputWaitingResponse {
+        version: PROTOCOL_VERSION,
+        response_type: "run_input_waiting",
+        run_id,
+        quiet_for_milliseconds,
+    };
+    let frame = serialize_json_frame(&response)?;
+    write_serialized_frame(&mut stream, &frame)?;
+    drop(stdin);
+    Ok(true)
 }
 
 fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Result<()> {
