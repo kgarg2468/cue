@@ -99,7 +99,8 @@ func startProcessRequestJSON() {
     #expect(allOptionalFieldsRequest.components(separatedBy: "\"pty\"").count == 2)
     #expect(
         allOptionalFieldsRequest.components(
-            separatedBy: "\"input_wait_detect_milliseconds\"").count == 2
+            separatedBy: "\"input_wait_detect_milliseconds\""
+        ).count == 2
     )
     #expect(
         allOptionalFieldsRequest.components(separatedBy: "\"worktree_repository\"").count == 2
