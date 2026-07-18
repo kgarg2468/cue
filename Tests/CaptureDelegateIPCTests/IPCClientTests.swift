@@ -352,6 +352,32 @@ func worktreeFailureExitDecodes() throws {
         ])
 }
 
+@Test("run exit decodes a typed internal error")
+func internalErrorExitDecodes() throws {
+    let descriptors = try localSocketPair()
+    defer {
+        _ = Darwin.close(descriptors.reader)
+        _ = Darwin.close(descriptors.writer)
+    }
+
+    let collector = ProcessEventCollector()
+    try writeAll(
+        Array(
+            ("{\"version\":1,\"type\":\"run_exit\",\"run_id\":\"internal-run\","
+                + "\"exit_code\":null,\"error_code\":\"internal_error\"}\n")
+                .utf8),
+        to: descriptors.writer
+    )
+    try IPCClient.readProcessEvents(from: descriptors.reader, expectedRunID: "internal-run") {
+        collector.append($0)
+    }
+
+    #expect(
+        collector.result().events == [
+            .exit(runID: "internal-run", exitCode: nil, errorCode: .internalError)
+        ])
+}
+
 @Test("run exit decodes a typed capacity exhaustion failure")
 func capacityExhaustionExitDecodes() throws {
     let descriptors = try localSocketPair()

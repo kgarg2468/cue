@@ -1,0 +1,4 @@
+scenario1: run id reusable after 5.086689666844904s (non-reading client did not wedge)
+scenario2: slow reader got 5 output frames, terminal=run_exit, complete=True
+scenario3: ordinary run frame order ok: ['run_output', 'run_metadata', 'run_exit']
+backend exit: 0 socket removed: True

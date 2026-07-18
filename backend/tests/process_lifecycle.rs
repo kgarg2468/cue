@@ -94,6 +94,117 @@ fn run_frames(backend: &BackendProcess, request: serde_json::Value) -> Vec<serde
 }
 
 #[test]
+fn non_reading_client_does_not_wedge_run_termination() {
+    let backend = start_backend();
+    let run_id = "non-reading-run";
+    let mut non_reading_client =
+        UnixStream::connect(&backend.socket_path).expect("flood client should connect");
+    let flood_request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": run_id,
+        "executable": "/usr/bin/yes",
+        "arguments": [],
+        "timeout_milliseconds": 500,
+    });
+    non_reading_client
+        .write_all(format!("{flood_request}\n").as_bytes())
+        .expect("flood request should write");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "run id should become reusable after the output write timeout"
+        );
+        let mut probe =
+            UnixStream::connect(&backend.socket_path).expect("reuse probe should connect");
+        probe
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("probe read timeout should configure");
+        let probe_request = serde_json::json!({
+            "version": 1,
+            "type": "start_process",
+            "run_id": run_id,
+            "executable": "/usr/bin/true",
+            "arguments": [],
+            "timeout_milliseconds": 1_000,
+        });
+        probe
+            .write_all(format!("{probe_request}\n").as_bytes())
+            .expect("reuse probe should write");
+        let mut admitted = false;
+        for line in BufReader::new(probe).lines() {
+            let frame: serde_json::Value =
+                serde_json::from_str(&line.expect("probe frame should read"))
+                    .expect("probe frame should be JSON");
+            if frame["type"] == "error" && frame["code"] == "duplicate_run_id" {
+                break;
+            }
+            if frame["type"] == "run_exit" {
+                assert_eq!(frame["exit_code"], 0);
+                admitted = true;
+                break;
+            }
+        }
+        if admitted {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    drop(non_reading_client);
+}
+
+#[test]
+fn slow_reader_does_not_lose_frames() {
+    let backend = start_backend();
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("slow client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout should configure");
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "slow-reader-run",
+        "executable": "/usr/bin/seq",
+        "arguments": ["1", "2000"],
+        "timeout_milliseconds": 5_000,
+    });
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let mut frames = Vec::new();
+    for line in BufReader::with_capacity(32, stream).lines() {
+        frames.push(
+            serde_json::from_str::<serde_json::Value>(&line.expect("frame should read"))
+                .expect("every slow-read frame should be complete JSON"),
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let output: String = frames
+        .iter()
+        .filter(|frame| frame["type"] == "run_output" && frame["stream"] == "stdout")
+        .filter_map(|frame| frame["output"].as_str())
+        .collect();
+    let expected_output = (1..=2_000)
+        .map(|number| format!("{number}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(output, expected_output);
+    assert_eq!(
+        frames.last().expect("slow run should terminate")["type"],
+        "run_exit"
+    );
+    assert_eq!(
+        frames.last().expect("slow run should terminate")["exit_code"],
+        0
+    );
+}
+
+#[test]
 fn run_metadata_frame_precedes_run_exit_with_process_details() {
     let backend = start_backend();
     let frames = run_frames(

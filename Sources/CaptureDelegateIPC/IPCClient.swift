@@ -15,6 +15,7 @@ public enum ProcessOutputStream: String, Equatable {
 public enum ProcessExitErrorCode: String, Equatable {
     case spawnFailed = "spawn_failed"
     case worktreeFailed = "worktree_failed"
+    case internalError = "internal_error"
     case capacityExhausted = "capacity_exhausted"
     case timedOut = "timed_out"
     case cancelled = "cancelled"
