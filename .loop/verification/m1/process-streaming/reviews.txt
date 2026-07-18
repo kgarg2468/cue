@@ -14,3 +14,14 @@ Threat model: same-user client over a mode-0600 Unix socket; authorization polic
 Follow-up: production backend launcher does not exist yet. When added, it must create/verify a user-owned mode-0700 runtime directory before spawning. Existing verification harness does so; full-verification.txt confirms runtime_directory_mode=700 and socket_mode=600. On macOS the mode-0600 socket itself denies cross-user connect; the parent-directory requirement additionally prevents path squatting and substitution races.
 
 Verdict: CLEAR for this bounded M1 slice. M1 remains incomplete: PTY, pause/resume/cancel, configurable timeout, waiting-input detection, redaction/metadata, durable state, and full cleanup remain pending.
+
+Final PR review: CLEAR
+Reviewer: independent Opus code-reviewer a7fb8edc45b35b186
+Head reviewed: ac1e369 against origin/main 054ad7b
+Verified exact two-commit diff, retained evidence/test counts, implementation invariants, and that M1 traceability remained in_progress without overclaim.
+
+CI remediation review: CLEAR
+Reviewer: independent Opus code-reviewer a737fc9d4c5eef6e0
+Verified the test-only worker-saturation clock correction preserved regression power. Corrected test passed 20/20 locally, the full local gate passed, and both required CI runs passed on final head 9bfd3f2.
+
+Delivery: PR #5 squash-merged as 9f40024 at 2026-07-18T07:03:51Z; remote branch deleted.
