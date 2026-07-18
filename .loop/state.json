@@ -1,9 +1,9 @@
 {
-  "status": "blocked_external",
-  "cycle": 11,
+  "status": "ready",
+  "cycle": 12,
   "active_milestone": "M1 IPC/process lifecycle",
-  "branch": "loop/m1-run-metadata",
-  "active_pr": 19,
+  "branch": null,
+  "active_pr": null,
   "job_id": "a8a4fe0a",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-18",
@@ -19,15 +19,8 @@
     "expires_date": "2026-07-25",
     "auto_expires": true
   },
-  "blockers": [
-    {
-      "id": "github-actions-billing",
-      "recorded": "2026-07-18",
-      "severity": "external",
-      "description": "GitHub Actions refuses to start jobs: 'The job was not started because recent account payments have failed or your spending limit needs to be increased.' Both required verify-m0 checks on PR #19 fail in ~2s with no steps executed; a rerun reproduced it. Local verification of the PR is fully green (15+13+31 Rust tests, CI-parity script exit 0, runtime demo). Merging is prohibited while required checks are red.",
-      "unblock": "User must fix billing/spending limit in GitHub Settings -> Billing & plans for the account owning kgarg2468/cue, then re-run the failed verify-m0 runs on PR #19 (or the next cycle will)."
-    }
-  ],
-  "last_cycle_summary": "Cycle 11 built the M1 run-metadata/redaction slice (S10-010) on PR #19. Every spawned run now emits one run_metadata frame (pid, pgid, executable, arguments, working_directory, RFC3339 timestamps, duration_ms, sorted environment variable names only, redaction count) between its final run_output and run_exit on all terminal paths; spawn failures emit none. run_output is redacted pre-emission via a compiled fixed pattern set (AKIA/GitHub/Slack/OpenAI tokens, Bearer, sensitive key=value, PEM blocks) with [REDACTED]; Swift ProcessEvent gained .metadata. Implemented by a Codex sol worker (killed by a command timeout during its own verification; orchestrator completed one test-ordering fix and all verification). Independent sol review found 1 blocker + 2 majors, all confirmed and fixed by a second sol worker: oversized metadata frames vs the 8KiB outbound cap could suppress run_exit (now progressive truncation of env names then arguments, and metadata write errors no longer skip the terminal frame); duration was inflated by drain-thread joins under client backpressure (now captured at supervision terminal state); a new current_dir()? call could EOF every start request if the backend cwd vanished (now falls back to empty). Full local verification green incl. runtime demos of partial (7000B) and full (7904B) truncation. MERGE BLOCKED: GitHub Actions billing failure prevents all CI jobs from starting; see blockers.",
-  "updated_at": "2026-07-18"
+  "blockers": [],
+  "last_cycle_summary": "Cycle 12 (firings 12-41): after 29 identical billing-blocked probes, the user directed retiring CI and substituting sol-based verification (ADR-007). Final local parity run on PR #19 head e8671d0 exit 0; PR #19 squash-merged as 9c36a5f, branch deleted. S10-010 done; S10-001 updated. Next: PTY support (unlocks waiting-input detection S10-009) or durable run state.",
+  "updated_at": "2026-07-18",
+  "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
