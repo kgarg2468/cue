@@ -2792,7 +2792,19 @@ fn worktree_run_executes_in_an_isolated_worktree_and_cleans_up() {
 
     assert!(worktree_path.starts_with(std::env::temp_dir().join("capture-delegate-worktrees")));
     assert_ne!(worktree_path, repository.path);
-    assert_eq!(output_lines.first().copied(), worktree_path.to_str());
+    // `pwd` resolves the macOS /var -> /private/var symlink while metadata reports the
+    // temp_dir()-based path; compare through the canonicalized managed root, which
+    // outlives run-directory cleanup.
+    let canonical_worktree = std::env::temp_dir()
+        .join("capture-delegate-worktrees")
+        .canonicalize()
+        .expect("managed worktree root should canonicalize")
+        .join(
+            worktree_path
+                .file_name()
+                .expect("worktree path should end in a run directory"),
+        );
+    assert_eq!(output_lines.first().copied(), canonical_worktree.to_str());
     assert_eq!(output_lines.get(1).copied(), Some(branch));
     assert!(branch.starts_with("capture-delegate/run-isolated-worktree-"));
     assert!(
