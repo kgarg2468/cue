@@ -353,6 +353,7 @@ fn cancel_kills_descendant_processes() {
         .expect("start request should write");
     let mut reader = BufReader::new(stream);
     let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
 
     assert_eq!(
         cancel_process(&backend.socket_path, "cancel-descendant-run")["status"],
@@ -380,7 +381,42 @@ fn timeout_kills_descendant_processes() {
         "run_id": "timeout-descendant-run",
         "executable": "/bin/sh",
         "arguments": ["-c", "sleep 30 & echo $!; wait"],
-        "timeout_milliseconds": 500,
+        "timeout_milliseconds": 2_000,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "timed_out"
+    }));
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after timeout"
+    );
+}
+
+#[test]
+fn natural_leader_exit_kills_descendant_processes() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "natural-exit-descendant-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; exit 0"],
+        "timeout_milliseconds": 30_000,
     });
     let mut stream =
         UnixStream::connect(&backend.socket_path).expect("start client should connect");
@@ -392,16 +428,19 @@ fn timeout_kills_descendant_processes() {
         .expect("start request should write");
     let mut reader = BufReader::new(stream);
     let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
     let frames: Vec<serde_json::Value> = reader
         .lines()
         .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
         .collect();
     assert!(frames.last().is_some_and(|frame| {
-        frame["type"] == "run_exit" && frame["error_code"] == "timed_out"
+        frame["type"] == "run_exit"
+            && frame["exit_code"] == 0
+            && frame["error_code"] == serde_json::Value::Null
     }));
     assert!(
         wait_for_process_death(grandchild_pid),
-        "grandchild sleep process {grandchild_pid} should be dead after timeout"
+        "grandchild sleep process {grandchild_pid} should be dead after the leader exits naturally"
     );
 }
 
@@ -989,7 +1028,15 @@ fn read_grandchild_pid(reader: &mut BufReader<UnixStream>) -> libc::pid_t {
         reader
             .read_line(&mut frame)
             .expect("grandchild pid output should be readable");
+        assert!(
+            !frame.is_empty(),
+            "connection closed before the grandchild pid was observed"
+        );
         let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame JSON");
+        assert_ne!(
+            frame["type"], "run_exit",
+            "run exited before the grandchild pid was observed"
+        );
         if frame["type"] == "run_output" && frame["stream"] == "stdout" {
             return frame["output"]
                 .as_str()
@@ -997,6 +1044,24 @@ fn read_grandchild_pid(reader: &mut BufReader<UnixStream>) -> libc::pid_t {
                 .trim()
                 .parse()
                 .expect("stdout output should contain the grandchild pid");
+        }
+    }
+}
+
+/// Kills the tracked grandchild on drop — including panic unwinding — but only
+/// after confirming the pid still belongs to the test's `sleep 30`, so a
+/// recycled pid never receives a stray SIGKILL.
+struct DescendantGuard(libc::pid_t);
+
+impl Drop for DescendantGuard {
+    fn drop(&mut self) {
+        let observed = Command::new("/bin/ps")
+            .args(["-o", "command=", "-p", &self.0.to_string()])
+            .output();
+        if let Ok(observed) = observed
+            && String::from_utf8_lossy(&observed.stdout).contains("sleep 30")
+        {
+            let _ = unsafe { libc::kill(self.0, libc::SIGKILL) };
         }
     }
 }
@@ -1010,7 +1075,6 @@ fn wait_for_process_death(pid: libc::pid_t) -> bool {
             return true;
         }
         if Instant::now() >= deadline {
-            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
             return false;
         }
         thread::sleep(Duration::from_millis(10));

@@ -567,6 +567,10 @@ fn run_process(
             cancelled.load(Ordering::Acquire),
         ) {
             ProcessSupervision::Exited => {
+                // A leader that exits while descendants remain (for example
+                // `sh -c 'sleep 30 & exit 0'`) must not leak them past the
+                // run's terminal frame, including after an accepted cancel.
+                kill_process_group(&mut child);
                 break (
                     child_status
                         .expect("completed child should have status")
