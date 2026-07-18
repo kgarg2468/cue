@@ -34,3 +34,10 @@
 **Decision:** The end-state specification, represented by stable rows in `traceability.md`, is authoritative for completion; milestone labels do not reduce scope.
 **Rationale:** The supplied specification explicitly describes the full product, not an MVP.
 **Consequences:** A requirement is complete only when its ledger row has implementation and verification evidence and an accepted PR reference where applicable.
+
+## ADR-006 — Orphaned loop locks may be broken before the 90-minute staleness window
+
+**Status:** accepted, 2026-07-18
+**Decision:** A `.loop/LOCK` may be taken over before its heartbeat reaches the 90-minute staleness threshold only when there is affirmative evidence the owning session is dead: the recorded owner process no longer exists, no agent session is active for it, the heartbeat has never refreshed since acquisition, and no file or commit activity has occurred since. The takeover must preserve the old lock file (renamed with an `.orphaned.<epoch>` suffix) and be recorded in `progress.md`.
+**Rationale:** Cycle 6 found a lock left by a session that died mid-cycle-5; waiting for nominal staleness would have idled four consecutive firings with zero safety benefit, since the evidence bar rules out a live competing writer.
+**Consequences:** Future firings apply the evidence checklist instead of blind timeout-waiting; absent that evidence, the 90-minute rule remains binding.
