@@ -47,6 +47,7 @@ public enum CloseStdinResult: Equatable {
 
 public enum ProcessEvent: Equatable {
     case output(runID: String, stream: ProcessOutputStream, output: String)
+    case metadata(runID: String, pid: Int, durationMilliseconds: Int, redactions: Int)
     case exit(runID: String, exitCode: Int?, errorCode: ProcessExitErrorCode? = nil)
 }
 
@@ -410,6 +411,19 @@ public enum IPCClient {
                 throw IPCClientError.invalidProcessEvent
             }
             return .output(runID: expectedRunID, stream: stream, output: output)
+        case "run_metadata":
+            // Decode the fields currently consumed by the app; richer process/environment
+            // metadata remains future client work. Extra wire fields are intentionally ignored.
+            guard
+                let pid = json["pid"] as? Int,
+                let durationMilliseconds = json["duration_ms"] as? Int,
+                let redactions = json["redactions"] as? Int
+            else {
+                throw IPCClientError.invalidProcessEvent
+            }
+            return .metadata(
+                runID: expectedRunID, pid: pid,
+                durationMilliseconds: durationMilliseconds, redactions: redactions)
         case "run_exit":
             let exitCode: Int?
             if json["exit_code"] is NSNull {

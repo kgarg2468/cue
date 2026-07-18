@@ -1,0 +1,45 @@
+# M1 slice: run metadata + secret redaction (S10-010)
+
+Spec: section 10 local runtime responsibilities — "redact secrets from logs" and
+"record process and environment metadata" (lines 656-657); feeds section 14 audit-log
+fields (final status, output artifacts).
+
+## Behavior
+- Every spawned run emits exactly one run_metadata frame after the final run_output
+  and before run_exit, on all terminal paths (natural exit, timed_out, cancelled):
+  pid, pgid, executable, arguments, working_directory, started_at/finished_at
+  (RFC3339 UTC), duration_ms, environment_variable_names (sorted NAMES only — never
+  values), and the run's total redaction count. Spawn-failed runs emit only the
+  spawn_failed run_exit.
+- run_output (stdout and stderr) is scanned before emission; matches of a
+  conservative pattern set are replaced with [REDACTED]: AWS AKIA ids, GitHub
+  gh?_/github_pat_ tokens, Slack xox?- tokens, OpenAI-style sk- keys, Bearer
+  credentials (keeping the word Bearer), key=value / key: value assignments for
+  api_key/secret/token/password/passwd/authorization (keeping the key name), and PEM
+  private-key blocks (unterminated BEGIN redacts to end of frame). Patterns are
+  compiled once (OnceLock, regex crate).
+- Known limitation (documented in code): a secret split across two pipe read chunks
+  can escape redaction.
+- Swift ProcessEvent gains .metadata(runID, pid, durationMilliseconds, redactions)
+  decoding run_metadata; richer field decoding flagged as future work.
+
+## Provenance
+- Implementation: Codex gpt-5.6-sol worker, high effort, six-file allowlist
+  (/tmp/worker-meta/). The worker process was killed by the orchestrator's command
+  timeout during its own verification phase; its diff was complete (+445/−15, all
+  files inside the allowlist) and compiled. The orchestrator completed the one
+  remaining gap directly (a pre-existing stdin test needed the new
+  run_metadata-before-run_exit ordering; <10-line edit) and ran all verification.
+
+## Evidence
+- red-evidence.log — the two feature tests fail against unmodified origin/main
+  (run_metadata_frame_precedes_run_exit_with_process_details,
+  secrets_are_redacted_from_streamed_output); spawn_failure_emits_no_metadata_frame
+  is an absence-guard that passes on both.
+- cargo-test.log — green: 15 lib + 13 health + 30 process_lifecycle.
+- Stress: metadata/redaction tests 4/4 repeated runs.
+- verify-m0-parity.log — full CI-parity green, 20-test Swift run includes the
+  real-backend redaction/metadata test.
+- runtime-demo.log — release binary: stdout "export AWS_KEY=[REDACTED]", stderr
+  "password=[REDACTED]", metadata pid/pgid/63 env names/duration 15ms/redactions 2,
+  frame order run_metadata then run_exit, SIGTERM exit 0 with socket removed.
