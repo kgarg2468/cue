@@ -333,6 +333,79 @@ fn cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_te
 }
 
 #[test]
+fn cancel_kills_descendant_processes() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "cancel-descendant-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 30_000,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+
+    assert_eq!(
+        cancel_process(&backend.socket_path, "cancel-descendant-run")["status"],
+        "accepted"
+    );
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "cancelled"
+    }));
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after cancellation"
+    );
+}
+
+#[test]
+fn timeout_kills_descendant_processes() {
+    let backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "timeout-descendant-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 500,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let frames: Vec<serde_json::Value> = reader
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("frame should read")).expect("frame JSON"))
+        .collect();
+    assert!(frames.last().is_some_and(|frame| {
+        frame["type"] == "run_exit" && frame["error_code"] == "timed_out"
+    }));
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after timeout"
+    );
+}
+
+#[test]
 fn duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -908,6 +981,40 @@ fn process_exists(pid: u32) -> bool {
         .status()
         .expect("process observation should run")
         .success()
+}
+
+fn read_grandchild_pid(reader: &mut BufReader<UnixStream>) -> libc::pid_t {
+    loop {
+        let mut frame = String::new();
+        reader
+            .read_line(&mut frame)
+            .expect("grandchild pid output should be readable");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame JSON");
+        if frame["type"] == "run_output" && frame["stream"] == "stdout" {
+            return frame["output"]
+                .as_str()
+                .expect("stdout output should be a string")
+                .trim()
+                .parse()
+                .expect("stdout output should contain the grandchild pid");
+        }
+    }
+}
+
+fn wait_for_process_death(pid: libc::pid_t) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn cancel_process(socket_path: &Path, run_id: &str) -> serde_json::Value {

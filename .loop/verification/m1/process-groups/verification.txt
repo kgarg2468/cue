@@ -1,0 +1,39 @@
+M1 process-group termination slice verification — 2026-07-18
+
+Slice: every run is spawned as the leader of its own process group
+(Command::process_group(0)), and all five kill sites in run_process
+(cancel, timeout, set_nonblocking failure, both drain-thread spawn
+failures) now SIGKILL the whole group via kill_process_group() with a
+direct child.kill() fallback, so shell-spawned descendants cannot
+survive cancellation or timeout. libc 0.2 added to backend deps.
+
+Provenance: implemented by a Codex gpt-5.6-terra worker (high effort)
+against an exact three-file allowlist (backend/Cargo.toml,
+backend/src/lib.rs, backend/tests/process_lifecycle.rs). The worker's
+sandbox blocked Unix-socket binding, so all integration verification
+below was performed by the orchestrator in this workspace. Cargo.lock
+picked up the libc entry during local builds and is included in the
+change. Note: the worker's lib.rs diff was accidentally reverted during
+red-verification and reapplied verbatim from the reviewed patch.
+
+TDD red evidence: with the new tests present but lib.rs unmodified,
+cancel_kills_descendant_processes and timeout_kills_descendant_processes
+both failed on "grandchild sleep process <pid> should be dead" — the
+grandchild survived child.kill(). Green after applying the lib.rs change.
+
+Evidence in this directory:
+- cargo-test.log — full backend suite green: 9 lib + 13 + 16 integration
+  (14 prior + the 2 new descendant-kill tests). New tests also passed
+  5/5 stress reruns.
+- verify-m0-parity.log — full CI parity gate green: ledger validation,
+  cargo fmt/clippy/test, swift format lint --strict, release builds,
+  swift test (17/17), health handshake "backend ok".
+- runtime-demo.log — release binary: /bin/sh run prints its background
+  grandchild pid (ps shows the grandchild in the run's own pgid, not the
+  backend's); cancel accepted on a second connection; cancelled terminal
+  0.01s later; grandchild sleep (with ~30s remaining) dead 0.01s after
+  cancel.
+
+Known environmental note (unchanged): cleanup_does_not_unlink_replacement_socket
+fails in checkouts whose path pushes the socket path past SUN_LEN; passes
+here and in CI.

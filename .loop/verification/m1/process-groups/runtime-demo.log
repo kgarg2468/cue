@@ -1,0 +1,8 @@
+  PID  PGID COMMAND
+60877 60876 sleep 30
+FRAME: {'version': 1, 'type': 'run_output', 'run_id': 'demo-pg', 'stream': 'stdout', 'output': '60877\n'}
+GRANDCHILD PID: 60877
+CANCEL RESPONSE: {'version': 1, 'type': 'cancel_response', 'run_id': 'demo-pg', 'status': 'accepted'}
+FRAME: {'version': 1, 'type': 'run_exit', 'run_id': 'demo-pg', 'exit_code': None, 'error_code': 'cancelled'}
+RUN_EXIT after 0.01s: exit_code=None error_code=cancelled
+GRANDCHILD 60877 DEAD 0.01s after cancel (had ~30s of sleep remaining)
