@@ -14,6 +14,7 @@ public enum ProcessOutputStream: String, Equatable {
 
 public enum ProcessExitErrorCode: String, Equatable {
     case spawnFailed = "spawn_failed"
+    case worktreeFailed = "worktree_failed"
     case capacityExhausted = "capacity_exhausted"
     case timedOut = "timed_out"
     case cancelled = "cancelled"
@@ -129,6 +130,7 @@ public enum IPCClient {
         timeoutMilliseconds: Int,
         pty: Bool = false,
         inputWaitDetectMilliseconds: Int? = nil,
+        worktreeRepository: String? = nil,
         onEvent: (ProcessEvent) -> Void
     ) throws {
         let descriptor = try connect(to: socketPath)
@@ -141,6 +143,7 @@ public enum IPCClient {
             timeoutMilliseconds: timeoutMilliseconds,
             pty: pty,
             inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
+            worktreeRepository: worktreeRepository,
             to: descriptor
         )
         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
@@ -169,17 +172,22 @@ public enum IPCClient {
         arguments: [String],
         timeoutMilliseconds: Int,
         pty: Bool = false,
-        inputWaitDetectMilliseconds: Int? = nil
+        inputWaitDetectMilliseconds: Int? = nil,
+        worktreeRepository: String? = nil
     ) -> String {
         let ptyField = pty ? ",\"pty\":true" : ""
         let inputWaitDetectField =
             inputWaitDetectMilliseconds.map {
                 ",\"input_wait_detect_milliseconds\":\($0)"
             } ?? ""
+        let worktreeRepositoryField =
+            worktreeRepository.map {
+                ",\"worktree_repository\":\(jsonString($0))"
+            } ?? ""
         return "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),"
             + "\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),"
             + "\"timeout_milliseconds\":\(timeoutMilliseconds)\(ptyField)"
-            + "\(inputWaitDetectField)}\n"
+            + "\(inputWaitDetectField)\(worktreeRepositoryField)}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -266,6 +274,7 @@ public enum IPCClient {
         timeoutMilliseconds: Int,
         pty: Bool,
         inputWaitDetectMilliseconds: Int?,
+        worktreeRepository: String?,
         to descriptor: Int32
     ) throws {
         try suppressSIGPIPE(on: descriptor)
@@ -277,7 +286,8 @@ public enum IPCClient {
                     arguments: arguments,
                     timeoutMilliseconds: timeoutMilliseconds,
                     pty: pty,
-                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds
+                    inputWaitDetectMilliseconds: inputWaitDetectMilliseconds,
+                    worktreeRepository: worktreeRepository
                 ).utf8
             ), to: descriptor)
     }

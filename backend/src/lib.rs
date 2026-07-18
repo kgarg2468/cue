@@ -22,8 +22,11 @@ const MAX_CONCURRENT_CLIENTS: usize = 8;
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const INPUT_WAIT_CPU_QUIET_NANOSECONDS: u64 = 30_000_000;
+const WORKTREE_ROOT_DIRECTORY_NAME: &str = "capture-delegate-worktrees";
+const MAX_SANITIZED_RUN_ID_BYTES: usize = 48;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
     let write_fd = SHUTDOWN_PIPE_WRITE_FD.load(Ordering::Relaxed);
@@ -54,6 +57,8 @@ struct Request {
     data: Option<String>,
     #[serde(default)]
     pty: Option<bool>,
+    #[serde(default)]
+    worktree_repository: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -107,6 +112,10 @@ struct RunMetadataResponse<'a> {
     duration_ms: u64,
     environment_variable_names: Vec<String>,
     redactions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -879,6 +888,18 @@ fn handle_connection(
             }
             "start_process" => {
                 let pty = request.pty.unwrap_or(false);
+                let worktree_repository = match request.worktree_repository {
+                    None => None,
+                    Some(value) => {
+                        let Some(repository) = value
+                            .as_str()
+                            .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
+                        else {
+                            return write_protocol_error(&mut stream, "invalid_start_process");
+                        };
+                        Some(PathBuf::from(repository))
+                    }
+                };
                 let input_wait_detect_milliseconds = match request.input_wait_detect_milliseconds {
                     None => None,
                     Some(value) => {
@@ -948,6 +969,7 @@ fn handle_connection(
                                 timeout,
                                 pty,
                                 input_wait_detect_milliseconds,
+                                worktree_repository,
                             },
                             process_slot,
                             registration,
@@ -1236,6 +1258,142 @@ struct StartProcessOptions {
     timeout: Duration,
     pty: bool,
     input_wait_detect_milliseconds: Option<u64>,
+    worktree_repository: Option<PathBuf>,
+}
+
+struct RunWorktree {
+    root: PathBuf,
+    repository: PathBuf,
+    path: PathBuf,
+    branch: String,
+    cleaned: bool,
+}
+
+struct WorktreeSetupError {
+    worktree: Option<RunWorktree>,
+}
+
+impl RunWorktree {
+    fn create(repository: PathBuf, run_id: &str) -> Result<Self, WorktreeSetupError> {
+        let root = worktree_root().map_err(|_| WorktreeSetupError { worktree: None })?;
+        let sanitized_run_id = sanitize_run_id(run_id);
+        let nonce = worktree_nonce();
+        let directory_name = format!("run-{sanitized_run_id}-{nonce}");
+        let path = root.join(directory_name);
+        fs::create_dir(&path).map_err(|_| WorktreeSetupError { worktree: None })?;
+        let branch = format!("capture-delegate/run-{sanitized_run_id}-{nonce}");
+        let worktree = Self {
+            root,
+            repository,
+            path,
+            branch,
+            cleaned: false,
+        };
+        if fs::set_permissions(&worktree.path, fs::Permissions::from_mode(0o700)).is_err() {
+            return Err(WorktreeSetupError {
+                worktree: Some(worktree),
+            });
+        }
+        let added = Command::new("git")
+            .arg("-C")
+            .arg(&worktree.repository)
+            .args(["worktree", "add"])
+            .arg(&worktree.path)
+            .arg("-b")
+            .arg(&worktree.branch)
+            .arg("HEAD")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !added {
+            return Err(WorktreeSetupError {
+                worktree: Some(worktree),
+            });
+        }
+        Ok(worktree)
+    }
+
+    fn cleanup(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+
+        let removed = Command::new("git")
+            .arg("-C")
+            .arg(&self.repository)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !removed && self.path.parent() == Some(self.root.as_path()) {
+            let _ = fs::remove_dir_all(&self.path);
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&self.repository)
+                .args(["worktree", "prune"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.repository)
+            .args(["branch", "-D"])
+            .arg(&self.branch)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+impl Drop for RunWorktree {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn worktree_root() -> io::Result<PathBuf> {
+    let root = std::env::temp_dir().join(WORKTREE_ROOT_DIRECTORY_NAME);
+    fs::create_dir_all(&root)?;
+    let metadata = fs::symlink_metadata(&root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::other("worktree root is not a directory"));
+    }
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    Ok(root)
+}
+
+fn sanitize_run_id(run_id: &str) -> String {
+    let mut sanitized = String::with_capacity(MAX_SANITIZED_RUN_ID_BYTES);
+    let mut previous_was_dot = false;
+    for character in run_id.chars() {
+        if sanitized.len() >= MAX_SANITIZED_RUN_ID_BYTES {
+            break;
+        }
+        let allowed = character.is_ascii_alphanumeric()
+            || matches!(character, '_' | '-')
+            || (character == '.' && !previous_was_dot);
+        let character = if allowed { character } else { '-' };
+        previous_was_dot = character == '.';
+        sanitized.push(character);
+    }
+    if sanitized.is_empty() {
+        sanitized.push_str("run");
+    }
+    sanitized
+}
+
+fn worktree_nonce() -> String {
+    let nanoseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = WORKTREE_NONCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{:x}-{nanoseconds:x}-{sequence:x}", std::process::id())
 }
 
 struct ActivityClock {
@@ -1447,14 +1605,43 @@ fn run_process(
         timeout,
         pty,
         input_wait_detect_milliseconds,
+        worktree_repository,
     } = options;
     let stream = Arc::new(Mutex::new(stream));
+    let mut worktree = match worktree_repository {
+        Some(repository) => match RunWorktree::create(repository, &run_id) {
+            Ok(worktree) => Some(worktree),
+            Err(error) => {
+                drop(registration);
+                let terminal_result = write_json_frame(
+                    &stream,
+                    &RunExitResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "run_exit",
+                        run_id: &run_id,
+                        exit_code: None,
+                        error_code: Some("worktree_failed"),
+                    },
+                );
+                if let Some(mut worktree) = error.worktree {
+                    worktree.cleanup();
+                }
+                return terminal_result;
+            }
+        },
+        None => None,
+    };
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
     let wall_clock_started = SystemTime::now();
-    let working_directory = std::env::current_dir()
-        .map(|directory| directory.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let working_directory = worktree.as_ref().map_or_else(
+        || {
+            std::env::current_dir()
+                .map(|directory| directory.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        },
+        |worktree| worktree.path.to_string_lossy().into_owned(),
+    );
     let mut environment_variable_names: Vec<String> = std::env::vars_os()
         .map(|(name, _)| name.to_string_lossy().into_owned())
         .collect();
@@ -1479,6 +1666,9 @@ fn run_process(
         let slave_fd = slave.as_raw_fd();
         let mut command = Command::new(&executable);
         command.args(&arguments);
+        if let Some(worktree) = worktree.as_ref() {
+            command.current_dir(&worktree.path);
+        }
         // SAFETY: configure_pty_child performs only child-local session and descriptor setup.
         unsafe {
             command.pre_exec(move || configure_pty_child(slave_fd));
@@ -1505,14 +1695,17 @@ fn run_process(
         // A PTY has one merged output stream; child stderr is reported as stdout here.
         (child, Some(master))
     } else {
-        let mut child = match Command::new(&executable)
+        let mut command = Command::new(&executable);
+        command
             .args(&arguments)
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        if let Some(worktree) = worktree.as_ref() {
+            command.current_dir(&worktree.path);
+        }
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => {
                 // A failed spawn has no process metadata and emits only its terminal frame.
@@ -1743,6 +1936,10 @@ fn run_process(
         duration_ms,
         environment_variable_names,
         redactions: redactions.load(Ordering::Relaxed),
+        worktree_path: worktree
+            .as_ref()
+            .map(|worktree| worktree.path.to_string_lossy().into_owned()),
+        worktree_branch: worktree.as_ref().map(|worktree| worktree.branch.clone()),
     };
     let metadata_result = (|| {
         let frame_is_too_large = |response: &RunMetadataResponse<'_>| -> io::Result<bool> {
@@ -1773,6 +1970,9 @@ fn run_process(
             error_code,
         },
     );
+    if let Some(worktree) = worktree.as_mut() {
+        worktree.cleanup();
+    }
     metadata_result?;
     run_exit_result?;
     stdout_result?;
