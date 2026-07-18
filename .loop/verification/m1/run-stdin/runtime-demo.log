@@ -1,0 +1,7 @@
+send_input -> {'version': 1, 'type': 'input_response', 'run_id': 'demo', 'status': 'accepted'}
+frame: {'version': 1, 'type': 'run_output', 'run_id': 'demo', 'stream': 'stdout', 'output': 'hello from runtime demo\n'}
+echo latency 0.02s
+close_stdin -> {'version': 1, 'type': 'close_stdin_response', 'run_id': 'demo', 'status': 'accepted'}
+terminal: {'version': 1, 'type': 'run_exit', 'run_id': 'demo', 'exit_code': 0}
+unknown-run send_input -> {'version': 1, 'type': 'input_response', 'run_id': 'demo', 'status': 'not_found'}
+backend exit: 0 socket removed: True

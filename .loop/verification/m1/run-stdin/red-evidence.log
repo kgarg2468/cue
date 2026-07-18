@@ -1,0 +1,12 @@
+  left: String("unknown_request_type")
+ right: "invalid_send_input"
+
+
+failures:
+    input_controls_on_unknown_runs_return_not_found
+    malformed_input_controls_return_typed_errors
+    send_input_and_close_stdin_drive_a_cat_run_to_natural_exit
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `--test process_lifecycle`

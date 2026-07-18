@@ -239,6 +239,60 @@ func pausedAndResumedProcess() throws {
             == .exit(runID: "swift-pause-run", exitCode: nil, errorCode: .cancelled))
 }
 
+@Test("Swift sends input, closes stdin, and observes cat exit naturally")
+func catInputAndStdinClose() throws {
+    guard let backendBinary = ProcessInfo.processInfo.environment["CAPTURE_DELEGATE_BACKEND_BINARY"]
+    else { throw NSError(domain: "CaptureDelegateIntegrationTests", code: 1) }
+
+    let directory = URL(filePath: "/private/tmp")
+        .appending(
+            path: "capture-delegate-stdin-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let socket = directory.appending(path: "backend.sock")
+    let backend = try startBackend(binary: backendBinary, socket: socket)
+    defer {
+        if backend.isRunning { backend.terminate() }
+        backend.waitUntilExit()
+    }
+
+    let outputReceived = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+    let collector = IntegrationEventCollector()
+    Thread {
+        defer { finished.signal() }
+        do {
+            try IPCClient.startProcess(
+                socketPath: socket.path(), runID: "swift-stdin-run", executable: "/bin/cat",
+                arguments: [], timeoutMilliseconds: 10_000
+            ) { event in
+                collector.append(event)
+                if case .output(_, .stdout, let output) = event, output.contains("hello\n") {
+                    outputReceived.signal()
+                }
+            }
+        } catch { collector.record(error) }
+    }.start()
+
+    let registrationDeadline = Date().addingTimeInterval(2)
+    var inputResult: SendInputResult = .notFound
+    repeat {
+        inputResult = try IPCClient.sendInput(
+            socketPath: socket.path(), runID: "swift-stdin-run", data: "hello\n")
+        if inputResult == .notFound { Thread.sleep(forTimeInterval: 0.01) }
+    } while inputResult == .notFound && Date() < registrationDeadline
+    #expect(inputResult == .accepted)
+    #expect(outputReceived.wait(timeout: .now() + 2) == .success)
+    #expect(
+        try IPCClient.closeStdin(socketPath: socket.path(), runID: "swift-stdin-run")
+            == .accepted)
+    #expect(finished.wait(timeout: .now() + 2) == .success)
+    #expect(collector.error == nil)
+    #expect(
+        collector.events.last
+            == .exit(runID: "swift-stdin-run", exitCode: 0, errorCode: nil))
+}
+
 private final class IntegrationEventCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [ProcessEvent] = []

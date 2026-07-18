@@ -1,0 +1,70 @@
+# M1 slice: run stdin semantics (send_input / close_stdin)
+
+Spec: section 9 adapter API `answerClarification(runId, answer)`; section 10 local
+runtime responsibilities (input to running agents; S10-001, groundwork for S10-009).
+Waiting-input DETECTION remains pending (expected on the PTY slice).
+
+## Behavior
+- start_process now spawns children with piped stdin (previously the child inherited
+  the backend's stdin — a hygiene bug). Children that read stdin now block until
+  input/EOF instead of reading the backend's descriptor.
+- send_input {run_id, data}: input_response accepted|not_found. Accepted means the
+  input WILL be delivered (modulo racing exit): input sent in the register-to-spawn
+  window is buffered and flushed in order when the child's stdin is published,
+  mirroring the pause-before-pgid pattern. Writes to an open stdin happen under a
+  per-run mutex, never under the global registry mutex; a full pipe blocks only the
+  requesting client's connection thread.
+- close_stdin {run_id}: close_stdin_response accepted|not_found, idempotent. A close
+  while pending keeps buffered input and delivers it before EOF at publication.
+  Terminal branches tear stdin down (drop handle / discard buffer) so no writes
+  outlive a run and the child sees EOF.
+- Malformed variants return typed errors invalid_send_input / invalid_close_stdin.
+- Swift IPCClient adds sendInput/closeStdin + SendInputResult/CloseStdinResult
+  mirroring pauseProcess patterns.
+
+## Provenance
+- Implementation: Codex gpt-5.6-sol worker, high effort, four-file allowlist
+  (/tmp/worker-stdin/); diff gate clean (+415 across exactly the allowlisted files).
+- Orchestrator-found defect: the worker's send_input dropped data in the
+  register-to-publish window (its sandbox cannot run socket integration tests; the
+  cat test failed deterministically). Fixed by a second sol worker (single-file
+  allowlist, /tmp/worker-stdin-fix/): RunStdin::{Pending{buffer,closed},Open,Closed}
+  state machine under one per-run mutex, plus a unit test covering
+  buffer-then-close-then-publish ordering.
+
+## Evidence
+- red-evidence.log — all three new Rust integration tests fail against unmodified
+  origin/main impl (unknown_request_type / error frames).
+- cargo-test.log — green: 12 lib + 13 health + 25 process_lifecycle.
+- Stress: new stdin tests 8/8 consecutive green runs.
+- verify-m0-parity.log — full CI-parity script green, 19-test Swift run includes
+  "Swift sends input, closes stdin, and observes cat exit naturally".
+- runtime-demo.log — release binary: send_input accepted → echo 0.02s,
+  close_stdin accepted → run_exit exit_code 0 (no error_code), post-exit send_input
+  not_found, SIGTERM exit 0 with socket removed.
+
+## Independent review dispositions (Codex gpt-5.6-sol, high; /tmp/worker-stdin/review/)
+- [blocker] send_input blocked in write_all holding the per-run stdin mutex; 8 concurrent
+  senders on a full pipe (paused child) could consume every IPC worker slot and wedge the
+  service including cancel. CONFIRMED. Fixed: senders only enqueue under the mutex; all
+  pipe writes moved to the run's supervision thread.
+- [blocker] publish_stdin flushed the pending buffer synchronously on the supervision
+  thread before publish_pgid; a full pipe blocked timeout/cancel forever. CONFIRMED.
+  Fixed: publication only stores a non-blocking handle; drain_stdin runs right after
+  publication and on every supervision tick, stopping on WouldBlock.
+- [major] accepted was returned when delivery was knowably impossible (after an
+  acknowledged close, or after EPIPE on a live child). CONFIRMED. Fixed: input_response
+  gains status "closed"; hard pipe errors close the boundary, clear undeliverable bytes,
+  and drop the handle; Swift SendInputResult adds .closed.
+- [major] close_stdin while pending did not stop later sends from appending, so close was
+  not a stable input boundary. CONFIRMED. Fixed: closed rejects all later sends with
+  "closed" while already-buffered bytes still drain before EOF.
+Fix worker: second/third Codex sol dispatch (/tmp/worker-stdin-fix/, /tmp/worker-stdin-fix2/),
+diff-gated. Regression tests: close_stdin_establishes_a_stable_input_boundary,
+cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full, plus unit tests for
+buffer-then-close-then-publish ordering and close-rejects-later-input.
+Post-fix evidence: cargo-test-postfix.log (13 lib + 13 + 27 integration; stdin tests 8/8
+stress), verify-m0-parity-postfix.log (green, 19 Swift tests), runtime-demo-postfix.log
+(echo 0.03s; post-close send -> closed; 700 KiB enqueued on a paused run in 0.35s, cancel
+accepted 0.00s with cancelled terminal; SIGTERM exit 0, socket removed).
+Known limitation (flagged, future work): the per-run stdin queue is unbounded.
