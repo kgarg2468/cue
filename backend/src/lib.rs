@@ -18,6 +18,7 @@ const PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_OUTPUT_CHUNK_BYTES: usize = 1024;
 const CLIENT_IO_TIMEOUT: Duration = Duration::from_millis(250);
+const OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_CLIENTS: usize = 8;
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -129,6 +130,53 @@ struct RunExitResponse<'a> {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
+}
+
+struct ClientWriter {
+    stream: Mutex<UnixStream>,
+    dead: AtomicBool,
+}
+
+impl ClientWriter {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream: Mutex::new(stream),
+            dead: AtomicBool::new(false),
+        }
+    }
+
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    fn mark_dead(&self) {
+        self.dead.store(true, Ordering::Release);
+    }
+
+    fn dead_error() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "client connection is unusable after a frame write failure",
+        )
+    }
+
+    fn write_frame_bytes(&self, frame: &[u8]) -> io::Result<()> {
+        if self.is_dead() {
+            return Err(Self::dead_error());
+        }
+        let mut stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.write_frame_bytes_locked(&mut stream, frame)
+    }
+
+    fn write_frame_bytes_locked(&self, stream: &mut UnixStream, frame: &[u8]) -> io::Result<()> {
+        if self.is_dead() {
+            return Err(Self::dead_error());
+        }
+        write_serialized_frame(stream, frame).inspect_err(|_| self.mark_dead())
+    }
 }
 
 #[derive(Serialize)]
@@ -985,13 +1033,31 @@ fn handle_connection(
                         },
                     );
                 };
-                stream.set_write_timeout(None)?;
+                if let Err(error) = stream.set_write_timeout(Some(OUTPUT_WRITE_TIMEOUT)) {
+                    drop(registration);
+                    drop(process_slot);
+                    let writer = Arc::new(ClientWriter::new(stream));
+                    let _ = write_client_json_frame(
+                        &writer,
+                        &RunExitResponse {
+                            version: PROTOCOL_VERSION,
+                            response_type: "run_exit",
+                            run_id: &run_id,
+                            exit_code: None,
+                            error_code: Some("internal_error"),
+                        },
+                    );
+                    return Err(error);
+                }
+                let writer = Arc::new(ClientWriter::new(stream));
+                let worker_writer = Arc::clone(&writer);
+                let worker_run_id = run_id.clone();
                 if let Err(error) = thread::Builder::new()
                     .name("capture-delegate-process".to_owned())
                     .spawn(move || {
                         let _ = run_process(
-                            stream,
-                            run_id,
+                            worker_writer,
+                            worker_run_id,
                             executable,
                             arguments,
                             StartProcessOptions {
@@ -1005,6 +1071,16 @@ fn handle_connection(
                         );
                     })
                 {
+                    let _ = write_client_json_frame(
+                        &writer,
+                        &RunExitResponse {
+                            version: PROTOCOL_VERSION,
+                            response_type: "run_exit",
+                            run_id: &run_id,
+                            exit_code: None,
+                            error_code: Some("internal_error"),
+                        },
+                    );
                     return Err(io::Error::other(format!(
                         "process worker spawn error: {error}"
                     )));
@@ -1301,6 +1377,82 @@ struct RunWorktree {
 
 struct WorktreeSetupError {
     worktree: Option<RunWorktree>,
+}
+
+struct RunTerminal {
+    writer: Arc<ClientWriter>,
+    run_id: String,
+    registration: Option<RunRegistration>,
+    worktree: Option<RunWorktree>,
+    cleanup_blocker: Option<CleanupBlocker>,
+    emitted: bool,
+}
+
+impl RunTerminal {
+    fn new(writer: Arc<ClientWriter>, run_id: String, registration: RunRegistration) -> Self {
+        Self {
+            writer,
+            run_id,
+            registration: Some(registration),
+            worktree: None,
+            cleanup_blocker: None,
+            emitted: false,
+        }
+    }
+
+    fn install_worktree(&mut self, worktree: Option<RunWorktree>) {
+        self.cleanup_blocker = worktree.as_ref().map(|_| {
+            self.registration
+                .as_ref()
+                .expect("run registration should exist before terminal emission")
+                .acquire_cleanup_blocker()
+        });
+        self.worktree = worktree;
+    }
+
+    fn registration(&self) -> &RunRegistration {
+        self.registration
+            .as_ref()
+            .expect("run registration should exist before terminal emission")
+    }
+
+    fn emit(&mut self, exit_code: Option<i32>, error_code: Option<&'static str>) -> io::Result<()> {
+        if self.emitted {
+            return Ok(());
+        }
+        self.emitted = true;
+        // The run id must be released before the terminal frame is written so a
+        // client that observes run_exit can immediately reuse the id.
+        drop(self.registration.take());
+        let terminal_result = write_client_json_frame(
+            &self.writer,
+            &RunExitResponse {
+                version: PROTOCOL_VERSION,
+                response_type: "run_exit",
+                run_id: &self.run_id,
+                exit_code,
+                error_code,
+            },
+        );
+        if let Some(worktree) = self.worktree.as_mut() {
+            worktree.cleanup();
+        }
+        drop(self.cleanup_blocker.take());
+        terminal_result
+    }
+}
+
+fn run_with_internal_error_terminal<F>(terminal: &mut RunTerminal, inner: F) -> io::Result<()>
+where
+    F: FnOnce(&mut RunTerminal) -> io::Result<()>,
+{
+    match inner(terminal) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = terminal.emit(None, Some("internal_error"));
+            Err(error)
+        }
+    }
 }
 
 impl RunWorktree {
@@ -1679,7 +1831,7 @@ fn configure_pty_child(slave_fd: libc::c_int) -> io::Result<()> {
 }
 
 fn run_process(
-    stream: UnixStream,
+    writer: Arc<ClientWriter>,
     run_id: String,
     executable: String,
     arguments: Vec<String>,
@@ -1687,49 +1839,39 @@ fn run_process(
     _process_slot: WorkerSlot,
     registration: RunRegistration,
 ) -> io::Result<()> {
+    let mut terminal = RunTerminal::new(writer, run_id, registration);
+    run_with_internal_error_terminal(&mut terminal, |terminal| {
+        run_process_inner(terminal, executable, arguments, options)
+    })
+}
+
+fn run_process_inner(
+    terminal: &mut RunTerminal,
+    executable: String,
+    arguments: Vec<String>,
+    options: StartProcessOptions,
+) -> io::Result<()> {
     let StartProcessOptions {
         timeout,
         pty,
         input_wait_detect_milliseconds,
         worktree_repository,
     } = options;
-    let stream = Arc::new(Mutex::new(stream));
-    let cleanup_blocker;
-    let mut worktree = match worktree_repository {
+    let run_id = terminal.run_id.clone();
+    match worktree_repository {
         Some(repository) => match RunWorktree::create(repository, &run_id) {
-            Ok(worktree) => Some(worktree),
+            Ok(worktree) => terminal.install_worktree(Some(worktree)),
             Err(error) => {
-                let cleanup_blocker = error
-                    .worktree
-                    .as_ref()
-                    .map(|_| registration.acquire_cleanup_blocker());
-                drop(registration);
-                let terminal_result = write_json_frame(
-                    &stream,
-                    &RunExitResponse {
-                        version: PROTOCOL_VERSION,
-                        response_type: "run_exit",
-                        run_id: &run_id,
-                        exit_code: None,
-                        error_code: Some("worktree_failed"),
-                    },
-                );
-                if let Some(mut worktree) = error.worktree {
-                    worktree.cleanup();
-                }
-                drop(cleanup_blocker);
-                return terminal_result;
+                terminal.install_worktree(error.worktree);
+                return terminal.emit(None, Some("worktree_failed"));
             }
         },
-        None => None,
-    };
-    cleanup_blocker = worktree
-        .as_ref()
-        .map(|_| registration.acquire_cleanup_blocker());
+        None => terminal.install_worktree(None),
+    }
     // The timeout deadline deliberately keeps ticking while the process group is paused.
     let timeout_started = Instant::now();
     let wall_clock_started = SystemTime::now();
-    let working_directory = worktree.as_ref().map_or_else(
+    let working_directory = terminal.worktree.as_ref().map_or_else(
         || {
             std::env::current_dir()
                 .map(|directory| directory.to_string_lossy().into_owned())
@@ -1744,29 +1886,12 @@ fn run_process(
     let (mut child, pty_master) = if pty {
         let (master, slave) = match open_pseudo_terminal() {
             Ok(terminal) => terminal,
-            Err(_) => {
-                drop(registration);
-                let terminal_result = write_json_frame(
-                    &stream,
-                    &RunExitResponse {
-                        version: PROTOCOL_VERSION,
-                        response_type: "run_exit",
-                        run_id: &run_id,
-                        exit_code: None,
-                        error_code: Some("spawn_failed"),
-                    },
-                );
-                if let Some(worktree) = worktree.as_mut() {
-                    worktree.cleanup();
-                }
-                drop(cleanup_blocker);
-                return terminal_result;
-            }
+            Err(_) => return terminal.emit(None, Some("spawn_failed")),
         };
         let slave_fd = slave.as_raw_fd();
         let mut command = Command::new(&executable);
         command.args(&arguments);
-        if let Some(worktree) = worktree.as_ref() {
+        if let Some(worktree) = terminal.worktree.as_ref() {
             command.current_dir(&worktree.path);
         }
         // SAFETY: configure_pty_child performs only child-local session and descriptor setup.
@@ -1775,28 +1900,13 @@ fn run_process(
         }
         let child = match command.spawn() {
             Ok(child) => child,
-            Err(_) => {
-                drop(registration);
-                let terminal_result = write_json_frame(
-                    &stream,
-                    &RunExitResponse {
-                        version: PROTOCOL_VERSION,
-                        response_type: "run_exit",
-                        run_id: &run_id,
-                        exit_code: None,
-                        error_code: Some("spawn_failed"),
-                    },
-                );
-                if let Some(worktree) = worktree.as_mut() {
-                    worktree.cleanup();
-                }
-                drop(cleanup_blocker);
-                return terminal_result;
-            }
+            Err(_) => return terminal.emit(None, Some("spawn_failed")),
         };
         drop(slave);
         let master = Arc::new(master);
-        registration.publish_pty_master(Arc::clone(&master));
+        terminal
+            .registration()
+            .publish_pty_master(Arc::clone(&master));
         // A PTY has one merged output stream; child stderr is reported as stdout here.
         (child, Some(master))
     } else {
@@ -1807,33 +1917,19 @@ fn run_process(
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(worktree) = worktree.as_ref() {
+        if let Some(worktree) = terminal.worktree.as_ref() {
             command.current_dir(&worktree.path);
         }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => {
                 // A failed spawn has no process metadata and emits only its terminal frame.
-                drop(registration);
-                let terminal_result = write_json_frame(
-                    &stream,
-                    &RunExitResponse {
-                        version: PROTOCOL_VERSION,
-                        response_type: "run_exit",
-                        run_id: &run_id,
-                        exit_code: None,
-                        error_code: Some("spawn_failed"),
-                    },
-                );
-                if let Some(worktree) = worktree.as_mut() {
-                    worktree.cleanup();
-                }
-                drop(cleanup_blocker);
-                return terminal_result;
+                return terminal.emit(None, Some("spawn_failed"));
             }
         };
-        if let Err(error) =
-            registration.publish_stdin(child.stdin.take().expect("piped stdin should be available"))
+        if let Err(error) = terminal
+            .registration()
+            .publish_stdin(child.stdin.take().expect("piped stdin should be available"))
         {
             kill_process_group(&mut child);
             let _ = child.wait();
@@ -1853,11 +1949,11 @@ fn run_process(
         )
     });
     if let Some(activity) = activity.as_deref() {
-        registration.drain_stdin_with_activity(activity);
+        terminal.registration().drain_stdin_with_activity(activity);
     } else {
-        registration.drain_stdin();
+        terminal.registration().drain_stdin();
     }
-    registration.publish_pgid(pgid);
+    terminal.registration().publish_pgid(pgid);
     let (process_output, stderr) = if let Some(master) = pty_master {
         (ProcessOutput::Pty(master), None)
     } else {
@@ -1877,9 +1973,9 @@ fn run_process(
         (ProcessOutput::Pipe(stdout), Some(stderr))
     };
 
-    let control = Arc::clone(&registration.control);
+    let control = Arc::clone(&terminal.registration().control);
     let redactions = Arc::new(AtomicUsize::new(0));
-    let stdout_writer = Arc::clone(&stream);
+    let stdout_writer = Arc::clone(&terminal.writer);
     let stdout_run_id = run_id.clone();
     let stdout_control = Arc::clone(&control);
     let stdout_redactions = Arc::clone(&redactions);
@@ -1915,7 +2011,7 @@ fn run_process(
     let stderr_drain = if pty {
         None
     } else {
-        let stderr_writer = Arc::clone(&stream);
+        let stderr_writer = Arc::clone(&terminal.writer);
         let stderr_run_id = run_id.clone();
         let stderr_control = Arc::clone(&control);
         let stderr_redactions = Arc::clone(&redactions);
@@ -1947,7 +2043,14 @@ fn run_process(
 
     let mut input_wait_was_paused = false;
     let (exit_code, error_code) = loop {
-        let child_status = child.try_wait()?;
+        let child_status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         match classify_process_supervision(
             child_status.is_some(),
             timeout_started.elapsed() >= timeout,
@@ -1959,7 +2062,7 @@ fn run_process(
                 // run's terminal frame, including after an accepted cancel.
                 kill_process_group(&mut child);
                 // The try_wait-to-retire window matches the pre-existing kill-after-reap pgid-reuse window.
-                registration.retire();
+                terminal.registration().retire();
                 break (
                     child_status
                         .expect("completed child should have status")
@@ -1969,19 +2072,19 @@ fn run_process(
             }
             ProcessSupervision::TimedOut => {
                 kill_process_group(&mut child);
-                registration.retire();
+                terminal.registration().retire();
                 break (child.wait()?.code(), Some("timed_out"));
             }
             ProcessSupervision::Cancelled => {
                 kill_process_group(&mut child);
-                registration.retire();
+                terminal.registration().retire();
                 break (child.wait()?.code(), Some("cancelled"));
             }
             ProcessSupervision::Running => {
                 if let Some(activity) = activity.as_deref() {
-                    registration.drain_stdin_with_activity(activity);
+                    terminal.registration().drain_stdin_with_activity(activity);
                 } else {
-                    registration.drain_stdin();
+                    terminal.registration().drain_stdin();
                 }
                 let mut disarm_input_wait = false;
                 if control.paused.load(Ordering::SeqCst) {
@@ -2004,7 +2107,12 @@ fn run_process(
                         && control.stdin_is_idle()
                     {
                         match write_input_waiting_frame_if_quiet(
-                            &stream, &run_id, pgid, &control, activity, episode,
+                            &terminal.writer,
+                            &run_id,
+                            pgid,
+                            &control,
+                            activity,
+                            episode,
                         ) {
                             Ok(true) => episode.fired = true,
                             Ok(false) => {}
@@ -2046,10 +2154,14 @@ fn run_process(
         duration_ms,
         environment_variable_names,
         redactions: redactions.load(Ordering::Relaxed),
-        worktree_path: worktree
+        worktree_path: terminal
+            .worktree
             .as_ref()
             .map(|worktree| worktree.path.to_string_lossy().into_owned()),
-        worktree_branch: worktree.as_ref().map(|worktree| worktree.branch.clone()),
+        worktree_branch: terminal
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.branch.clone()),
     };
     let metadata_result = (|| {
         let frame_is_too_large = |response: &RunMetadataResponse<'_>| -> io::Result<bool> {
@@ -2061,29 +2173,16 @@ fn run_process(
         if frame_is_too_large(&metadata)? {
             metadata.arguments = &[];
         }
-        write_json_frame(&stream, &metadata)
+        write_client_json_frame(&terminal.writer, &metadata)
     })();
-    // The run id must be released before the terminal frame is written so a
-    // client that observes run_exit can immediately reuse the id.
-    drop(registration);
-    let run_exit_result = write_json_frame(
-        &stream,
-        &RunExitResponse {
-            version: PROTOCOL_VERSION,
-            response_type: "run_exit",
-            run_id: &run_id,
-            exit_code: if error_code.is_some() {
-                None
-            } else {
-                exit_code
-            },
-            error_code,
+    let run_exit_result = terminal.emit(
+        if error_code.is_some() {
+            None
+        } else {
+            exit_code
         },
+        error_code,
     );
-    if let Some(worktree) = worktree.as_mut() {
-        worktree.cleanup();
-    }
-    drop(cleanup_blocker);
     metadata_result?;
     run_exit_result?;
     stdout_result?;
@@ -2093,7 +2192,7 @@ fn run_process(
 #[cfg(test)]
 fn drain_process_output<R: Read>(
     reader: R,
-    stream: Arc<Mutex<UnixStream>>,
+    stream: Arc<ClientWriter>,
     run_id: String,
     output_stream: &'static str,
 ) -> io::Result<()> {
@@ -2110,7 +2209,7 @@ fn drain_process_output<R: Read>(
 
 fn drain_process_output_until_cancelled<R: Read>(
     mut reader: R,
-    stream: Arc<Mutex<UnixStream>>,
+    stream: Arc<ClientWriter>,
     run_id: String,
     output_stream: &'static str,
     control: Arc<RunControl>,
@@ -2145,12 +2244,7 @@ fn drain_process_output_until_cancelled<R: Read>(
                 stream: output_stream,
                 output,
             };
-            if let Err(error) =
-                write_json_frame_with_activity(&stream, &response, activity.as_deref())
-            {
-                control.cancelled.store(true, Ordering::Release);
-                return Err(error);
-            }
+            write_client_json_frame_with_activity(&stream, &response, activity.as_deref())?;
         }
     }
     if !control.cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
@@ -2163,18 +2257,14 @@ fn drain_process_output_until_cancelled<R: Read>(
             stream: output_stream,
             output,
         };
-        write_json_frame_with_activity(&stream, &response, activity.as_deref()).inspect_err(
-            |_| {
-                control.cancelled.store(true, Ordering::Release);
-            },
-        )?;
+        write_client_json_frame_with_activity(&stream, &response, activity.as_deref())?;
     }
     Ok(())
 }
 
 fn drain_pty_output_until_cancelled(
     master: Arc<File>,
-    stream: Arc<Mutex<UnixStream>>,
+    stream: Arc<ClientWriter>,
     run_id: String,
     control: Arc<RunControl>,
     redactions: Arc<AtomicUsize>,
@@ -2231,12 +2321,7 @@ fn drain_pty_output_until_cancelled(
                 stream: "stdout",
                 output,
             };
-            if let Err(error) =
-                write_json_frame_with_activity(&stream, &response, activity.as_deref())
-            {
-                control.cancelled.store(true, Ordering::Release);
-                return Err(error);
-            }
+            write_client_json_frame_with_activity(&stream, &response, activity.as_deref())?;
         }
     }
     if !control.cancelled.load(Ordering::Acquire) && !utf8_carry.is_empty() {
@@ -2249,11 +2334,7 @@ fn drain_pty_output_until_cancelled(
             stream: "stdout",
             output,
         };
-        write_json_frame_with_activity(&stream, &response, activity.as_deref()).inspect_err(
-            |_| {
-                control.cancelled.store(true, Ordering::Release);
-            },
-        )?;
+        write_client_json_frame_with_activity(&stream, &response, activity.as_deref())?;
     }
     Ok(())
 }
@@ -2367,16 +2448,21 @@ fn write_json_frame<T: Serialize>(stream: &Arc<Mutex<UnixStream>>, response: &T)
     write_serialized_frame(&mut stream, &frame)
 }
 
-fn write_json_frame_with_activity<T: Serialize>(
-    stream: &Arc<Mutex<UnixStream>>,
+fn write_client_json_frame<T: Serialize>(
+    writer: &Arc<ClientWriter>,
+    response: &T,
+) -> io::Result<()> {
+    let frame = serialize_json_frame(response)?;
+    writer.write_frame_bytes(&frame)
+}
+
+fn write_client_json_frame_with_activity<T: Serialize>(
+    writer: &Arc<ClientWriter>,
     response: &T,
     activity: Option<&ActivityClock>,
 ) -> io::Result<()> {
     let frame = serialize_json_frame(response)?;
-    let mut stream = stream
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    write_serialized_frame(&mut stream, &frame)?;
+    writer.write_frame_bytes(&frame)?;
     if let Some(activity) = activity {
         activity.record();
     }
@@ -2384,18 +2470,24 @@ fn write_json_frame_with_activity<T: Serialize>(
 }
 
 fn write_input_waiting_frame_if_quiet(
-    stream: &Arc<Mutex<UnixStream>>,
+    writer: &Arc<ClientWriter>,
     run_id: &str,
     pid: libc::pid_t,
     control: &RunControl,
     activity: &ActivityClock,
     episode: &InputWaitEpisode,
 ) -> io::Result<bool> {
-    let mut stream = match stream.try_lock() {
+    if writer.is_dead() {
+        return Err(ClientWriter::dead_error());
+    }
+    let mut stream = match writer.stream.try_lock() {
         Ok(stream) => stream,
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
     };
+    if writer.is_dead() {
+        return Err(ClientWriter::dead_error());
+    }
     if activity.snapshot() != episode.activity_nanoseconds {
         return Ok(false);
     }
@@ -2435,7 +2527,7 @@ fn write_input_waiting_frame_if_quiet(
         quiet_for_milliseconds,
     };
     let frame = serialize_json_frame(&response)?;
-    write_serialized_frame(&mut stream, &frame)?;
+    writer.write_frame_bytes_locked(&mut stream, &frame)?;
     drop(stdin);
     Ok(true)
 }
@@ -2454,19 +2546,126 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRuns, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision,
-        RegisterRunError, RunWorktree, SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots,
-        classify_process_supervision, command_succeeds_within, drain_process_output,
-        handle_connection, redact_output,
+        ActiveRuns, ClientWriter, MAX_CONCURRENT_PROCESSES, PIPE_DRAIN_POLL_INTERVAL,
+        ProcessSupervision, RegisterRunError, RunTerminal, RunWorktree, SendInputStatus,
+        SocketCleanup, SocketIdentity, WorkerSlots, classify_process_supervision,
+        command_succeeds_within, drain_process_output, handle_connection, redact_output,
+        run_with_internal_error_terminal,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::{Command, Stdio};
+    use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn client_writer_stops_after_the_first_failed_frame_write() {
+        let (stream, mut peer) = UnixStream::pair().expect("socket pair should open");
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(20)))
+            .expect("write timeout should configure");
+        let writer = ClientWriter::new(stream);
+        let frame = vec![b'x'; 4 * 1024];
+
+        let first_error = (0..100_000).find_map(|_| writer.write_frame_bytes(&frame).err());
+
+        let first_error = first_error.expect("a full socket should reject a bounded write");
+        assert!(matches!(
+            first_error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(writer.is_dead());
+
+        peer.set_nonblocking(true)
+            .expect("peer should become nonblocking");
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            match peer.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("buffered bytes should drain: {error}"),
+            }
+        }
+
+        assert!(writer.write_frame_bytes(b"must-not-be-written\n").is_err());
+        assert!(matches!(
+            peer.read(&mut buffer),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    #[test]
+    fn injected_internal_error_emits_one_terminal_frame_and_releases_the_run_id() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("internal-run".to_owned())
+            .expect("run should register");
+        let (stream, peer) = UnixStream::pair().expect("socket pair should open");
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .expect("read timeout should configure");
+        let writer = Arc::new(ClientWriter::new(stream));
+        let mut terminal =
+            RunTerminal::new(Arc::clone(&writer), "internal-run".to_owned(), registration);
+
+        let result = run_with_internal_error_terminal(&mut terminal, |_| {
+            Err(std::io::Error::other("injected inner failure"))
+        });
+
+        assert!(result.is_err());
+        assert!(!runs.cancel("internal-run"));
+        let mut reader = BufReader::new(peer);
+        let mut frame = String::new();
+        reader
+            .read_line(&mut frame)
+            .expect("internal terminal frame should be readable");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("frame should be JSON");
+        assert_eq!(frame["type"], "run_exit");
+        assert_eq!(frame["run_id"], "internal-run");
+        assert!(frame["exit_code"].is_null());
+        assert_eq!(frame["error_code"], "internal_error");
+        let mut extra = String::new();
+        assert!(matches!(
+            reader.read_line(&mut extra),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+        ));
+    }
+
+    #[test]
+    fn injected_internal_error_writes_nothing_after_client_death() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("dead-client-run".to_owned())
+            .expect("run should register");
+        let (stream, mut peer) = UnixStream::pair().expect("socket pair should open");
+        peer.set_nonblocking(true)
+            .expect("peer should become nonblocking");
+        let writer = Arc::new(ClientWriter::new(stream));
+        writer.mark_dead();
+        let mut terminal = RunTerminal::new(
+            Arc::clone(&writer),
+            "dead-client-run".to_owned(),
+            registration,
+        );
+
+        let result = run_with_internal_error_terminal(&mut terminal, |_| {
+            Err(std::io::Error::other("injected inner failure"))
+        });
+
+        assert!(result.is_err());
+        let mut buffer = [0_u8; 1];
+        assert!(matches!(
+            peer.read(&mut buffer),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
 
     #[test]
     fn completed_child_wins_over_an_elapsed_timeout() {
@@ -2841,7 +3040,7 @@ mod tests {
             chunks: vec![bytes[..1024].to_vec(), bytes[1024..].to_vec()],
         };
         let (client, mut server) = UnixStream::pair().expect("socket pair should open");
-        let stream = Arc::new(Mutex::new(client));
+        let stream = Arc::new(ClientWriter::new(client));
 
         drain_process_output(reader, Arc::clone(&stream), "unit-run".to_owned(), "stdout")
             .expect("output drain should succeed");
