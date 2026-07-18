@@ -373,6 +373,16 @@ fn cancel_kills_descendant_processes() {
 }
 
 #[test]
+fn sigterm_kills_active_run_groups_and_removes_socket() {
+    assert_signal_shutdown(libc::SIGTERM, true);
+}
+
+#[test]
+fn sigint_kills_active_run_groups() {
+    assert_signal_shutdown(libc::SIGINT, false);
+}
+
+#[test]
 fn timeout_kills_descendant_processes() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -1078,6 +1088,63 @@ fn wait_for_process_death(pid: libc::pid_t) -> bool {
             return false;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_signal_shutdown(signal: libc::c_int, assert_socket_removed: bool) {
+    let mut backend = start_backend();
+    let request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": "signal-shutdown-run",
+        "executable": "/bin/sh",
+        "arguments": ["-c", "sleep 30 & echo $!; wait"],
+        "timeout_milliseconds": 30_000,
+    });
+    let mut stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout should configure");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("start request should write");
+    let mut reader = BufReader::new(stream);
+    let grandchild_pid = read_grandchild_pid(&mut reader);
+    let _cleanup = DescendantGuard(grandchild_pid);
+
+    let started = Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(backend.child.id() as libc::pid_t, signal) },
+        0,
+        "signal should be delivered to the backend"
+    );
+    let deadline = started + Duration::from_secs(6);
+    let status = loop {
+        if let Some(status) = backend
+            .child
+            .try_wait()
+            .expect("backend exit should be observable")
+        {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "backend should exit promptly after receiving signal {signal}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(status.code(), Some(0), "backend should exit successfully");
+    assert!(
+        wait_for_process_death(grandchild_pid),
+        "grandchild sleep process {grandchild_pid} should be dead after backend shutdown"
+    );
+    if assert_socket_removed {
+        assert!(
+            !backend.socket_path.exists(),
+            "backend socket should be removed during shutdown"
+        );
     }
 }
 

@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,18 @@ const CLIENT_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONCURRENT_CLIENTS: usize = 8;
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
+    let write_fd = SHUTDOWN_PIPE_WRITE_FD.load(Ordering::Relaxed);
+    if write_fd >= 0 {
+        let byte = [1_u8];
+        // SAFETY: the handler only writes one byte to the self-pipe descriptor;
+        // write is async-signal-safe and does not retain the buffer pointer.
+        let _ = unsafe { libc::write(write_fd, byte.as_ptr().cast(), byte.len()) };
+    }
+}
 
 #[derive(Deserialize)]
 struct Request {
@@ -122,6 +134,34 @@ impl ActiveRuns {
         };
         cancelled.store(true, Ordering::Release);
         true
+    }
+
+    fn cancel_all(&self) {
+        let runs = self
+            .runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for cancelled in runs.values() {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    fn wait_until_empty(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .runs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+        }
     }
 }
 
@@ -239,14 +279,20 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
     remove_stale_socket(socket_path)?;
     let listener = UnixListener::bind(socket_path)?;
     let bound_metadata = fs::symlink_metadata(socket_path)?;
+    let bound_identity = SocketIdentity::from_metadata(&bound_metadata);
     let _cleanup = SocketCleanup {
         path: socket_path.to_path_buf(),
-        identity: SocketIdentity::from_metadata(&bound_metadata),
+        identity: bound_identity,
     };
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     let worker_slots = WorkerSlots::new(MAX_CONCURRENT_CLIENTS);
     let process_slots = WorkerSlots::new(MAX_CONCURRENT_PROCESSES);
     let active_runs = ActiveRuns::new();
+    install_shutdown_handler(
+        active_runs.clone(),
+        socket_path.to_path_buf(),
+        bound_identity,
+    )?;
 
     loop {
         let worker_slot = worker_slots.acquire();
@@ -269,6 +315,87 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
             eprintln!("IPC worker spawn error: {error}");
         }
     }
+}
+
+fn install_shutdown_handler(
+    active_runs: ActiveRuns,
+    socket_path: PathBuf,
+    bound_identity: SocketIdentity,
+) -> io::Result<()> {
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: pipe receives storage for exactly two file descriptors.
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let read_fd = pipe_fds[0];
+    let write_fd = pipe_fds[1];
+    SHUTDOWN_PIPE_WRITE_FD.store(write_fd, Ordering::Relaxed);
+
+    // SAFETY: a zeroed sigaction is initialized below before being installed.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = handle_shutdown_signal as *const () as usize;
+    action.sa_flags = 0;
+    // SAFETY: action owns valid storage for a signal mask.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: action is fully initialized, and the old action is not requested.
+    if unsafe { libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: action is fully initialized, and the old action is not requested.
+    if unsafe { libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+
+    if let Err(error) = thread::Builder::new()
+        .name("capture-delegate-shutdown".to_owned())
+        .spawn(move || {
+            let mut byte = [0_u8];
+            loop {
+                // SAFETY: read_fd is the open read end of the self-pipe and byte
+                // provides writable storage for the requested single byte.
+                let bytes_read =
+                    unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), byte.len()) };
+                if bytes_read > 0 {
+                    break;
+                }
+                if bytes_read == -1
+                    && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                return;
+            }
+
+            active_runs.cancel_all();
+            let _ = active_runs.wait_until_empty(Duration::from_secs(5));
+            if let Ok(metadata) = fs::symlink_metadata(&socket_path)
+                && SocketIdentity::from_metadata(&metadata) == bound_identity
+            {
+                let _ = fs::remove_file(&socket_path);
+            }
+            std::process::exit(0);
+        })
+    {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn close_shutdown_pipe(read_fd: libc::c_int, write_fd: libc::c_int) {
+    SHUTDOWN_PIPE_WRITE_FD.store(-1, Ordering::Relaxed);
+    // SAFETY: both descriptors were returned by pipe and are closed at most once
+    // along these setup-error paths.
+    let _ = unsafe { libc::close(read_fd) };
+    // SAFETY: as above, this is the matching write descriptor from pipe.
+    let _ = unsafe { libc::close(write_fd) };
 }
 
 fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
