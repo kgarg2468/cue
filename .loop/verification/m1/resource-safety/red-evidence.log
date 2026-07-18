@@ -1,0 +1,58 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling memchr v2.8.0
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling regex-syntax v0.8.11
+   Compiling libc v0.2.186
+   Compiling serde_json v1.0.150
+   Compiling itoa v1.0.18
+   Compiling aho-corasick v1.1.4
+   Compiling regex-automata v0.4.16
+   Compiling syn v2.0.117
+   Compiling regex v1.13.1
+   Compiling serde_derive v1.0.228
+   Compiling capture_delegate_backend v0.1.0 (/private/tmp/cue-resource-safety-red.e0V6ox/backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.56s
+     Running tests/process_lifecycle.rs (/private/tmp/cue-resource-safety-red.e0V6ox/target/debug/deps/process_lifecycle-bc1e9043f46530e8)
+
+running 1 test
+
+thread 'capacity_exhausted_input_keeps_the_control_connection_usable' (132226466) panicked at backend/tests/process_lifecycle.rs:1108:14:
+control request should write: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test capacity_exhausted_input_keeps_the_control_connection_usable ... FAILED
+
+failures:
+
+failures:
+    capacity_exhausted_input_keeps_the_control_connection_usable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 57 filtered out; finished in 0.38s
+
+error: test failed, to rerun pass `-p capture_delegate_backend --test process_lifecycle`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/process_lifecycle.rs (/private/tmp/cue-resource-safety-red.e0V6ox/target/debug/deps/process_lifecycle-bc1e9043f46530e8)
+
+running 1 test
+Preparing worktree (new branch 'capture-delegate/run-startup-orphan-1')
+HEAD is now at a2f44d7 initial
+Preparing worktree (new branch 'capture-delegate/run-startup-live-1')
+HEAD is now at a2f44d7 initial
+
+thread 'startup_removes_dead_owner_worktrees_without_touching_live_owners' (132226831) panicked at backend/tests/process_lifecycle.rs:3058:5:
+startup should remove the dead-owner worktree
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test startup_removes_dead_owner_worktrees_without_touching_live_owners ... FAILED
+
+failures:
+
+failures:
+    startup_removes_dead_owner_worktrees_without_touching_live_owners
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 57 filtered out; finished in 3.39s
+
+error: test failed, to rerun pass `-p capture_delegate_backend --test process_lifecycle`
+EXPECTED_RED cap_status=101 orphan_status=101 base=7a0869b

@@ -1059,6 +1059,118 @@ fn send_input_and_close_stdin_drive_a_cat_run_to_natural_exit() {
 }
 
 #[test]
+fn capacity_exhausted_input_keeps_the_control_connection_usable() {
+    let backend = start_backend();
+    let run_id = "pending-stdin-cap-run";
+    let start_request = serde_json::json!({
+        "version": 1,
+        "type": "start_process",
+        "run_id": run_id,
+        "executable": "/bin/sh",
+        "arguments": ["-c", "cat >/dev/null"],
+        "timeout_milliseconds": 10_000,
+    });
+    let mut start_stream =
+        UnixStream::connect(&backend.socket_path).expect("start client should connect");
+    start_stream
+        .set_read_timeout(Some(Duration::from_secs(12)))
+        .expect("start timeout should configure");
+    start_stream
+        .write_all(format!("{start_request}\n").as_bytes())
+        .expect("start request should write");
+    assert_eq!(
+        wait_for_registered_input_control(
+            &backend.socket_path,
+            serde_json::json!({
+                "version": 1,
+                "type": "send_input",
+                "run_id": run_id,
+                "data": "",
+            }),
+        )["status"],
+        "accepted"
+    );
+    assert_eq!(
+        control_process(&backend.socket_path, "pause_process", run_id)["status"],
+        "accepted"
+    );
+
+    let control = UnixStream::connect(&backend.socket_path).expect("control client should connect");
+    control
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("control timeout should configure");
+    let mut control = BufReader::new(control);
+    let fragment = "x".repeat(7_000);
+    let mut send_and_read = |request: serde_json::Value| {
+        control
+            .get_mut()
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("control request should write");
+        read_json_frame(&mut control)
+    };
+    let mut capacity_exhausted = false;
+    for _ in 0..512 {
+        let request = serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": run_id,
+            "data": fragment.as_str(),
+        });
+        let response = send_and_read(request);
+        match response["status"].as_str() {
+            Some("accepted") => {}
+            Some("capacity_exhausted") => {
+                capacity_exhausted = true;
+                break;
+            }
+            status => {
+                panic!("input chunk should be accepted or capacity-exhausted, got {status:?}")
+            }
+        }
+    }
+    assert!(
+        capacity_exhausted,
+        "a bounded series of paused input chunks should reach the pending-cap rejection"
+    );
+    assert_eq!(
+        control_process(&backend.socket_path, "resume_process", run_id)["status"],
+        "accepted"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let response = send_and_read(serde_json::json!({
+            "version": 1,
+            "type": "send_input",
+            "run_id": run_id,
+            "data": "z",
+        }));
+        match response["status"].as_str() {
+            Some("accepted") => break,
+            Some("capacity_exhausted") if Instant::now() < deadline => thread::yield_now(),
+            Some("capacity_exhausted") => {
+                panic!("one-byte input should be accepted after the resumed run drains stdin")
+            }
+            status => {
+                panic!("one-byte input should be accepted or capacity-exhausted, got {status:?}")
+            }
+        }
+    }
+    assert_eq!(
+        send_and_read(serde_json::json!({
+            "version": 1,
+            "type": "close_stdin",
+            "run_id": run_id,
+        }))["status"],
+        "accepted",
+        "close_stdin should remain usable on the same connection"
+    );
+
+    let frames = read_through_terminal(&mut BufReader::new(start_stream));
+    assert_eq!(frames.last().expect("terminal frame")["exit_code"], 0);
+}
+
+#[test]
 fn input_wait_fires_for_a_quiet_pipe_run() {
     let backend = start_backend();
     let request = serde_json::json!({
@@ -2795,6 +2907,21 @@ fn worktree_test_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn reaped_test_pid() -> libc::pid_t {
+    let mut child = Command::new("/usr/bin/true")
+        .spawn()
+        .expect("true should spawn");
+    let pid = child.id() as libc::pid_t;
+    assert!(child.wait().expect("true should reap").success());
+    // SAFETY: pid came from a child which has already been reaped.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    pid
+}
+
 fn read_through_terminal(reader: &mut BufReader<UnixStream>) -> Vec<serde_json::Value> {
     let mut frames = Vec::new();
     loop {
@@ -2878,6 +3005,95 @@ fn worktree_root_entries() -> Vec<PathBuf> {
     };
     entries.sort();
     entries
+}
+
+#[test]
+fn startup_removes_dead_owner_worktrees_without_touching_live_owners() {
+    let _guard = worktree_test_guard();
+    let repository = ScratchGitRepository::new();
+    let root = std::env::temp_dir().join("capture-delegate-worktrees");
+    fs::create_dir_all(root.join(".owners")).expect("owners directory should be created");
+    let root = root
+        .canonicalize()
+        .expect("managed root should canonicalize");
+    let nonce = TEMP_GIT_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let orphan_name = format!("run-startup-orphan-{}-{nonce}", std::process::id());
+    let live_name = format!("run-startup-live-{}-{nonce}", std::process::id());
+    let orphan_branch = format!("capture-delegate/run-startup-orphan-{nonce}");
+    let live_branch = format!("capture-delegate/run-startup-live-{nonce}");
+    let orphan = root.join(&orphan_name);
+    let live = root.join(&live_name);
+    for (path, branch) in [(&orphan, &orphan_branch), (&live, &live_branch)] {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repository.path)
+                .args(["worktree", "add"])
+                .arg(path)
+                .arg("-b")
+                .arg(branch)
+                .arg("HEAD")
+                .status()
+                .expect("git worktree add should run")
+                .success()
+        );
+    }
+    let dead_pid = reaped_test_pid();
+    fs::write(
+        root.join(".owners").join(&orphan_name),
+        format!("{dead_pid}\n"),
+    )
+    .expect("orphan sidecar should write");
+    fs::write(
+        root.join(".owners").join(&live_name),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("live sidecar should write");
+
+    let backend = start_backend();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while orphan.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !orphan.exists(),
+        "startup should remove the dead-owner worktree"
+    );
+    assert!(
+        !branch_exists(&repository.path, &orphan_branch),
+        "startup should remove the dead-owner managed branch"
+    );
+    assert!(
+        live.exists(),
+        "startup must preserve the live-owner worktree"
+    );
+    assert!(
+        branch_exists(&repository.path, &live_branch),
+        "startup must preserve the live-owner branch"
+    );
+
+    drop(backend);
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository.path)
+            .args(["worktree", "remove", "--force"])
+            .arg(&live)
+            .status()
+            .expect("live worktree cleanup should run")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repository.path)
+            .args(["branch", "-D"])
+            .arg(&live_branch)
+            .status()
+            .expect("live branch cleanup should run")
+            .success()
+    );
+    let _ = fs::remove_file(root.join(".owners").join(&live_name));
 }
 
 #[test]

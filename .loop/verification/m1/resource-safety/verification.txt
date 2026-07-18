@@ -1,0 +1,63 @@
+M1 resource-safety closeout — cycle 17 — 2026-07-18
+
+Scope
+-----
+- Bound each run's queued, not-yet-written stdin to 1,048,576 bytes.
+- Return typed `capacity_exhausted` without accepting a partial frame, while
+  keeping the control connection usable for an immediate retry and close.
+- Persist worktree ownership in private `.owners` sidecars and reclaim only
+  provably dead-owner `run-*` worktrees during backend startup.
+- Authenticate the candidate worktree's reciprocal canonical Git-admin
+  backlink before any repository-level Git command can run.
+
+TDD / focused runtime evidence
+------------------------------
+- `red-evidence.log`: both new real-runtime behaviors failed against archived
+  origin/main `7a0869b` as expected (stdin retry hit BrokenPipe; dead-owner
+  worktree survived startup). The recorded exit statuses are 101 and 101.
+- `capacity-runtime.log`: the release-path backend reaches the 1 MiB pending
+  cap against a paused `/bin/cat`, returns `capacity_exhausted`, later accepts a
+  fitting retry after resume/drain on the same socket, accepts `close_stdin`,
+  and exits normally. 1 passed, 0 failed.
+- `orphan-startup-runtime.log`: a real backend startup removes the authentic
+  dead-owner worktree/managed branch while preserving the live-owner peer.
+  1 passed, 0 failed.
+- `backlink-authentication.log`: forged metadata copied from a foreign real
+  worktree cannot select that repository for prune/branch deletion; the
+  candidate is removed through the guarded local fallback while the foreign
+  managed branch/admin entry remain. 1 passed, 0 failed.
+
+Full ADR-007 gate
+-----------------
+- `verify-m0-parity.log` is a fresh post-fix `scripts/verify-m0.sh` run and
+  exits 0: cargo fmt, clippy with warnings denied, release builds, health
+  handshake, 26 Rust library tests, 13 health/socket tests, 58 process
+  lifecycle tests, and 25 Swift tests all pass. The log ends `backend ok`.
+- `git diff --check` passes.
+- Source diff is restricted to the four planned implementation/test files.
+
+Review disposition
+------------------
+- Independent Opus 4.8 cross-family review: PASS, no blocker or major. It
+  recorded only non-blocking residuals: the intentional 250 ms idle bound on
+  a reused control socket, bounded client-slot pinning, theoretical test PID
+  reuse, conservative leakage if sidecar creation fails, Swift enum evolution,
+  and the expected fact that authenticated recovery writes to a user repo.
+- Initial independent Sol final review: CHANGES_REQUIRED for one confirmed
+  MAJOR. A forged candidate `.git` pointer could select a stale admin entry in
+  a foreign repository and delete that repository's managed-prefix branch.
+- Fix: recovery now requires a real non-symlink candidate `.git`, canonical
+  absolute admin structure, and a reciprocal canonical admin `gitdir` backlink
+  equal to the exact candidate `.git`. Authentication failure performs only a
+  rechecked direct-child deletion and no Git operation. The regression was
+  proven red before the fix and green after it.
+- Final independent gpt-5.6-sol review: PASS. The prior MAJOR is resolved, no
+  new blocker/major exists, the full post-fix parity and targeted logs are
+  green, and the remaining check/use windows are outside the stated same-user
+  private-root threat boundary.
+
+Result
+------
+The final S10-001 resource-safety remainder is implemented and independently
+reviewed. M1 IPC/process lifecycle is ready to close; M2 domain/persistence is
+the next roadmap dependency, but the autonomous loop is paused for user testing.
