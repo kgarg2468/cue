@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,18 @@ const CLIENT_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONCURRENT_CLIENTS: usize = 8;
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const PIPE_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
+    let write_fd = SHUTDOWN_PIPE_WRITE_FD.load(Ordering::Relaxed);
+    if write_fd >= 0 {
+        let byte = [1_u8];
+        // SAFETY: the handler only writes one byte to the self-pipe descriptor;
+        // write is async-signal-safe and does not retain the buffer pointer.
+        let _ = unsafe { libc::write(write_fd, byte.as_ptr().cast(), byte.len()) };
+    }
+}
 
 #[derive(Deserialize)]
 struct Request {
@@ -83,28 +95,45 @@ struct CancelResponse<'a> {
 
 #[derive(Clone)]
 struct ActiveRuns {
-    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    state: Arc<Mutex<ActiveRunsState>>,
+}
+
+struct ActiveRunsState {
+    runs: HashMap<String, Arc<AtomicBool>>,
+    shutting_down: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RegisterRunError {
+    Duplicate,
+    ShuttingDown,
 }
 
 impl ActiveRuns {
     fn new() -> Self {
         Self {
-            runs: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(ActiveRunsState {
+                runs: HashMap::new(),
+                shutting_down: false,
+            })),
         }
     }
 
-    fn register(&self, run_id: String) -> Result<RunRegistration, ()> {
+    fn register(&self, run_id: String) -> Result<RunRegistration, RegisterRunError> {
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut runs = self
-            .runs
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if runs.contains_key(&run_id) {
-            return Err(());
+        if state.shutting_down {
+            return Err(RegisterRunError::ShuttingDown);
         }
-        runs.insert(run_id.clone(), Arc::clone(&cancelled));
+        if state.runs.contains_key(&run_id) {
+            return Err(RegisterRunError::Duplicate);
+        }
+        state.runs.insert(run_id.clone(), Arc::clone(&cancelled));
         Ok(RunRegistration {
-            runs: Arc::clone(&self.runs),
+            state: Arc::clone(&self.state),
             run_id,
             cancelled,
         })
@@ -112,9 +141,10 @@ impl ActiveRuns {
 
     fn cancel(&self, run_id: &str) -> bool {
         let cancelled = self
-            .runs
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .runs
             .get(run_id)
             .cloned();
         let Some(cancelled) = cancelled else {
@@ -123,25 +153,56 @@ impl ActiveRuns {
         cancelled.store(true, Ordering::Release);
         true
     }
+
+    fn begin_shutdown(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.shutting_down = true;
+        for cancelled in state.runs.values() {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    fn wait_until_empty(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .runs
+                .is_empty()
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(PIPE_DRAIN_POLL_INTERVAL);
+        }
+    }
 }
 
 struct RunRegistration {
-    runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    state: Arc<Mutex<ActiveRunsState>>,
     run_id: String,
     cancelled: Arc<AtomicBool>,
 }
 
 impl Drop for RunRegistration {
     fn drop(&mut self) {
-        let mut runs = self
-            .runs
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if runs
+        if state
+            .runs
             .get(&self.run_id)
             .is_some_and(|cancelled| Arc::ptr_eq(cancelled, &self.cancelled))
         {
-            runs.remove(&self.run_id);
+            state.runs.remove(&self.run_id);
         }
     }
 }
@@ -236,17 +297,52 @@ impl Drop for SocketCleanup {
 }
 
 pub fn run(socket_path: &Path) -> io::Result<()> {
+    // SAFETY: a zeroed signal set is initialized before it is used.
+    let mut shutdown_signals: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: shutdown_signals owns valid storage for a signal set.
+    if unsafe { libc::sigemptyset(&mut shutdown_signals) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: shutdown_signals is initialized and SIGTERM is a valid signal.
+    if unsafe { libc::sigaddset(&mut shutdown_signals, libc::SIGTERM) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: shutdown_signals is initialized and SIGINT is a valid signal.
+    if unsafe { libc::sigaddset(&mut shutdown_signals, libc::SIGINT) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: shutdown_signals is initialized and the previous mask is not requested.
+    let mask_result =
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &shutdown_signals, std::ptr::null_mut()) };
+    if mask_result != 0 {
+        return Err(io::Error::from_raw_os_error(mask_result));
+    }
+
     remove_stale_socket(socket_path)?;
     let listener = UnixListener::bind(socket_path)?;
     let bound_metadata = fs::symlink_metadata(socket_path)?;
+    let bound_identity = SocketIdentity::from_metadata(&bound_metadata);
     let _cleanup = SocketCleanup {
         path: socket_path.to_path_buf(),
-        identity: SocketIdentity::from_metadata(&bound_metadata),
+        identity: bound_identity,
     };
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     let worker_slots = WorkerSlots::new(MAX_CONCURRENT_CLIENTS);
     let process_slots = WorkerSlots::new(MAX_CONCURRENT_PROCESSES);
     let active_runs = ActiveRuns::new();
+    install_shutdown_handler(
+        active_runs.clone(),
+        socket_path.to_path_buf(),
+        bound_identity,
+    )?;
+    // The shutdown thread inherits this blocked mask; only the main thread is unblocked here.
+    // SAFETY: shutdown_signals is initialized and the previous mask is not requested.
+    let mask_result = unsafe {
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &shutdown_signals, std::ptr::null_mut())
+    };
+    if mask_result != 0 {
+        return Err(io::Error::from_raw_os_error(mask_result));
+    }
 
     loop {
         let worker_slot = worker_slots.acquire();
@@ -269,6 +365,117 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
             eprintln!("IPC worker spawn error: {error}");
         }
     }
+}
+
+fn install_shutdown_handler(
+    active_runs: ActiveRuns,
+    socket_path: PathBuf,
+    bound_identity: SocketIdentity,
+) -> io::Result<()> {
+    let mut pipe_fds = [-1; 2];
+    // SAFETY: pipe receives storage for exactly two file descriptors.
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let read_fd = pipe_fds[0];
+    let write_fd = pipe_fds[1];
+    if let Err(error) = configure_shutdown_pipe(read_fd, write_fd) {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(error);
+    }
+    SHUTDOWN_PIPE_WRITE_FD.store(write_fd, Ordering::Relaxed);
+
+    // SAFETY: a zeroed sigaction is initialized below before being installed.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = handle_shutdown_signal as *const () as usize;
+    action.sa_flags = 0;
+    // SAFETY: action owns valid storage for a signal mask.
+    if unsafe { libc::sigemptyset(&mut action.sa_mask) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: action is fully initialized, and the old action is not requested.
+    if unsafe { libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: action is fully initialized, and the old action is not requested.
+    if unsafe { libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) } == -1 {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(io::Error::last_os_error());
+    }
+
+    if let Err(error) = thread::Builder::new()
+        .name("capture-delegate-shutdown".to_owned())
+        .spawn(move || {
+            let mut byte = [0_u8];
+            loop {
+                // SAFETY: read_fd is the open read end of the self-pipe and byte
+                // provides writable storage for the requested single byte.
+                let bytes_read =
+                    unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), byte.len()) };
+                if bytes_read > 0 {
+                    break;
+                }
+                if bytes_read == -1
+                    && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                return;
+            }
+
+            active_runs.begin_shutdown();
+            let _ = active_runs.wait_until_empty(Duration::from_secs(5));
+            if let Ok(metadata) = fs::symlink_metadata(&socket_path)
+                && SocketIdentity::from_metadata(&metadata) == bound_identity
+            {
+                let _ = fs::remove_file(&socket_path);
+            }
+            std::process::exit(0);
+        })
+    {
+        close_shutdown_pipe(read_fd, write_fd);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn configure_shutdown_pipe(read_fd: libc::c_int, write_fd: libc::c_int) -> io::Result<()> {
+    for fd in [read_fd, write_fd] {
+        // SAFETY: fd is an open descriptor returned by pipe.
+        let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if descriptor_flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd is open and descriptor_flags preserves its existing descriptor flags.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    // SAFETY: write_fd is the open write descriptor returned by pipe.
+    let status_flags = unsafe { libc::fcntl(write_fd, libc::F_GETFL) };
+    if status_flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: write_fd is open and status_flags preserves its existing status flags.
+    if unsafe { libc::fcntl(write_fd, libc::F_SETFL, status_flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+fn close_shutdown_pipe(read_fd: libc::c_int, write_fd: libc::c_int) {
+    SHUTDOWN_PIPE_WRITE_FD.store(-1, Ordering::Relaxed);
+    // SAFETY: both descriptors were returned by pipe and are closed at most once
+    // along these setup-error paths.
+    let _ = unsafe { libc::close(read_fd) };
+    // SAFETY: as above, this is the matching write descriptor from pipe.
+    let _ = unsafe { libc::close(write_fd) };
 }
 
 fn remove_stale_socket(socket_path: &Path) -> io::Result<()> {
@@ -372,7 +579,22 @@ fn handle_connection(
                 let timeout = Duration::from_millis(timeout_milliseconds);
                 let registration = match active_runs.register(run_id.clone()) {
                     Ok(registration) => registration,
-                    Err(()) => return write_protocol_error(&mut stream, "duplicate_run_id"),
+                    Err(RegisterRunError::Duplicate) => {
+                        return write_protocol_error(&mut stream, "duplicate_run_id");
+                    }
+                    Err(RegisterRunError::ShuttingDown) => {
+                        let stream = Arc::new(Mutex::new(stream));
+                        return write_json_frame(
+                            &stream,
+                            &RunExitResponse {
+                                version: PROTOCOL_VERSION,
+                                response_type: "run_exit",
+                                run_id: &run_id,
+                                exit_code: None,
+                                error_code: Some("cancelled"),
+                            },
+                        );
+                    }
                 };
                 let Some(process_slot) = process_slots.try_acquire() else {
                     drop(registration);
@@ -781,12 +1003,14 @@ fn write_protocol_error(stream: &mut UnixStream, code: &'static str) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveRuns, MAX_CONCURRENT_PROCESSES, ProcessSupervision, SocketCleanup, SocketIdentity,
-        WorkerSlots, classify_process_supervision, drain_process_output, handle_connection,
+        ActiveRuns, MAX_CONCURRENT_PROCESSES, ProcessSupervision, RegisterRunError, SocketCleanup,
+        SocketIdentity, WorkerSlots, classify_process_supervision, drain_process_output,
+        handle_connection,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -817,6 +1041,22 @@ mod tests {
         drop(registration);
         assert!(!runs.cancel("run-1"));
         assert!(runs.register("run-1".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn shutdown_cancels_existing_runs_and_rejects_new_registrations() {
+        let runs = ActiveRuns::new();
+        let registration = runs
+            .register("existing-run".to_owned())
+            .expect("registration should succeed before shutdown");
+
+        runs.begin_shutdown();
+
+        assert!(registration.cancelled.load(Ordering::Acquire));
+        assert!(matches!(
+            runs.register("new-run".to_owned()),
+            Err(RegisterRunError::ShuttingDown)
+        ));
     }
 
     #[test]

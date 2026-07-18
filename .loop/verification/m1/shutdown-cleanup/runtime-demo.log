@@ -1,0 +1,7 @@
+FRAME: {'version': 1, 'type': 'run_output', 'run_id': 'demo-shutdown', 'stream': 'stdout', 'output': '54741\n'}
+GRANDCHILD PID: 54741
+SOCKET EXISTS BEFORE: True
+SIGTERM SENT to backend 54671
+GRANDCHILD 54741 DEAD 0.03s after SIGTERM (had ~30s remaining)
+BACKEND DEAD 0.05s after SIGTERM
+SOCKET EXISTS AFTER: False

@@ -1,0 +1,68 @@
+M1 backend-shutdown cleanup slice verification — 2026-07-18
+
+Slice: SIGTERM/SIGINT now trigger coordinated shutdown via an
+async-signal-safe self-pipe handler and a dedicated shutdown thread:
+every active run's cancel flag is set (ActiveRuns::cancel_all), the
+registry is drained with a 5s bound (wait_until_empty, 10ms polls,
+supervision loops SIGKILL each run's process group as usual), the socket
+file is removed only if it is still the one this backend bound
+(SocketIdentity comparison), and the backend exits 0.
+
+Provenance: implemented by a Codex gpt-5.6-sol worker (high effort)
+within a two-file allowlist (backend/src/lib.rs,
+backend/tests/process_lifecycle.rs); diff gate clean. The worker's
+sandbox blocked Unix-socket binding, so all integration verification ran
+in the workspace.
+
+TDD red evidence: with the two signal tests present and lib.rs reverted,
+both failed at "backend should exit successfully" (signal-default
+termination, no cleanup). Green after restoring the implementation.
+
+Evidence in this directory:
+- cargo-test.log — full backend suite green: 9 lib + 13 + 19 integration
+  (17 prior + sigterm_kills_active_run_groups_and_removes_socket +
+  sigint_kills_active_run_groups). Signal tests 8/8 stress reruns.
+- verify-m0-parity.log — full CI parity gate green including Swift tests
+  and health handshake.
+- runtime-demo.log — release binary: run started, grandchild pid
+  observed, SIGTERM sent; grandchild (with ~30s of sleep remaining) dead
+  0.03s after the signal, backend exited 0 0.05s after, socket file
+  removed.
+
+Known environmental note (unchanged): the SUN_LEN socket-path library
+test fails in long-path checkouts; passes here and in CI.
+
+Independent review (Codex gpt-5.6-sol, high effort, static): one blocker, two
+major, one minor. All four verified against the code and FIXED in a follow-up
+commit (implemented by a Codex gpt-5.6-sol worker, high effort; diff-gated to
+backend/src/lib.rs, +137/-24):
+- FIXED (blocker): shutdown did not close process admission atomically — a
+  start_process registering after cancel_all received a fresh unflagged
+  cancellation bool, so exit(0) after the 5s drain could orphan its process
+  group. ActiveRuns now guards a single mutex-protected state
+  {runs, shutting_down}; begin_shutdown (renamed from cancel_all) sets the
+  flag and cancels existing runs under one lock, and register returns
+  ShuttingDown, which the handler answers with a terminal run_exit
+  (exit_code null, error_code "cancelled"). New unit test
+  shutdown_cancels_existing_runs_and_rejects_new_registrations.
+- FIXED (major): self-pipe fds lacked FD_CLOEXEC, so every supervised child
+  inherited both ends (a child could trigger or suppress backend shutdown).
+  Both fds now get FD_CLOEXEC via fcntl immediately after pipe().
+- FIXED (major): the signal handler wrote to a blocking pipe while the
+  shutdown thread reads exactly one byte; sustained signals could fill the
+  pipe and wedge a handler running on the shutdown thread. The write end is
+  now O_NONBLOCK; the handler already ignores write errors, so EAGAIN means
+  a wake byte is queued.
+- FIXED (minor): SIGTERM/SIGINT arriving between socket bind and sigaction
+  took the default disposition, skipping cleanup. run() now blocks both
+  signals via pthread_sigmask before stale-socket removal/bind and unblocks
+  on the main thread only after the handler is installed (the shutdown
+  thread deliberately inherits the blocked mask).
+
+Post-fix evidence: cargo fmt/clippy clean; cargo test all green (10 lib
+including the new shutdown-admission test + 13 + 19 integration); signal
+shutdown tests 8/8 stress reruns; full verify-m0 parity green
+(verify-m0-parity-postfix.log). The FD_CLOEXEC/O_NONBLOCK/sigmask hardening
+has no dedicated automated test (would need an fd-introspection harness);
+covered by review verification and unchanged behavior of the existing
+signal-shutdown integration tests.
