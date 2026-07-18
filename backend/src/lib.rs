@@ -132,6 +132,7 @@ struct RunStdinState {
     closed: bool,
     handle: Option<RunStdinHandle>,
     veof_sent: bool,
+    last_pty_byte_was_newline: bool,
 }
 
 enum RunStdinHandle {
@@ -166,6 +167,7 @@ impl RunControl {
                 closed: false,
                 handle: None,
                 veof_sent: false,
+                last_pty_byte_was_newline: true,
             }),
         }
     }
@@ -231,6 +233,9 @@ impl RunControl {
                     state.handle.take();
                 }
                 Ok(written) => {
+                    if matches!(state.handle, Some(RunStdinHandle::Pty(_))) {
+                        state.last_pty_byte_was_newline = state.buffer[written - 1] == b'\n';
+                    }
                     state.buffer.drain(..written);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -245,25 +250,15 @@ impl RunControl {
 
         if state.closed && state.buffer.is_empty() {
             if matches!(state.handle, Some(RunStdinHandle::Pty(_))) && !state.veof_sent {
-                let write_result = state
-                    .handle
-                    .as_mut()
-                    .expect("published PTY master should be present")
-                    .write(&[0x04]);
-                match write_result {
-                    Ok(0) => {
-                        state.handle.take();
-                    }
-                    Ok(_) => {
-                        state.veof_sent = true;
-                        state.handle.take();
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => {
-                        state.handle.take();
-                    }
-                }
+                let veof_count = if state.last_pty_byte_was_newline {
+                    1
+                } else {
+                    2
+                };
+                state.buffer.extend(std::iter::repeat_n(0x04, veof_count));
+                state.veof_sent = true;
+                // A PTY has no half-close: if the child disables ICANON, VEOF cannot signal EOF,
+                // so close_stdin only establishes the closed send boundary.
             } else {
                 state.handle.take();
             }

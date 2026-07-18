@@ -43,3 +43,29 @@ Evidence (this directory):
   exactly one 'hello-pty\r\n' (echo off), close_stdin accepted → VEOF → cat
   exits 0 naturally; (3) AKIA key redacted under pty, metadata redactions=1,
   frame order [run_metadata, run_exit]; SIGTERM → exit 0, socket removed.
+
+# Independent review dispositions (gpt-5.6-sol, high effort; report: review-report.md)
+
+- 0 blockers.
+- Major: single VEOF after a non-newline tail only flushes the partial line
+  (child blocks until timeout) — CONFIRMED, FIXED: delivery queue tracks the
+  last written byte; close appends one VEOF, or two after a partial line, all
+  through the same nonblocking machinery. Red evidence: new partial-line test
+  fails on pre-fix code (red-evidence.log tail); runtime demo shows natural
+  exit in 0.55s post-fix. ICANON-off remains an inherent PTY limitation
+  (no half-close), documented in code.
+- Major: drain-thread-spawn failure after successful spawn emits zero terminal
+  frames — CONFIRMED as the same pre-existing limitation class already flagged
+  on the pipe path in the run-metadata slice (thread/resource exhaustion);
+  deferred to the future durability slice covering both branches. Not fixed
+  here by design; noted as accepted.
+- Minor: missing PTY timeout coverage / cancel metadata ordering — FIXED
+  (pty_run_times_out_like_pipe_runs; cancel test now asserts run_metadata
+  immediately precedes the terminal frame).
+- Minor: Swift wire format for pty unpinned — FIXED (asserts default request
+  contains no "pty"; pty:true serializes exactly one "pty":true).
+- Reviewer notes confirmed sound: fd lifecycle, setsid pgid invariant,
+  cancel/timeout during poll, no busy-loop, non-pty path untouched.
+
+Post-fix evidence: cargo-test-postfix.log (15+13+39), verify-m0-parity-postfix.log
+(exit 0, 21 Swift tests), runtime-demo-postfix.log.

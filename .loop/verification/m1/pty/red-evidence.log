@@ -18,3 +18,12 @@ failures:
 test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.32s
 
 error: test failed, to rerun pass `--test process_lifecycle`
+(eval):4: command not found: timeout
+
+
+failures:
+    pty_close_stdin_flushes_a_partial_line_to_eof
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 38 filtered out; finished in 2.28s
+
+error: test failed, to rerun pass `--test process_lifecycle`
