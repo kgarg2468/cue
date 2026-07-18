@@ -1,0 +1,8 @@
+fresh_loginwindow_started=2026-07-17T18:57:46-07:00
+launch_verification_runs=10
+launch_verification_passes=10
+observed_process_type=regular_foreground
+observed_native_window_count=1
+visual_inspection=nonblank native window with centered Capture → Delegate text
+screenshot=.loop/verification/m0/fresh-login/app.png
+product_source_changed=false
