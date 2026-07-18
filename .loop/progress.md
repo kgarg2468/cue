@@ -167,3 +167,12 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Final pre-merge local parity run on PR #19 head `e8671d0` (only `.loop` state files beyond the verified code commit `7199894`): exit 0 (`verify-m0-premerge.log`). Gate change documented in a PR #19 comment; squash-merged as `9c36a5f`; branch deleted.
 - Closeout: S10-010 → done with evidence; S10-001 implementation notes updated (redaction/metadata delivered; PTY, worktree, input-wait detection, durable cleanup remain); state.json → ready, billing blocker cleared (moot under ADR-007), active_pr null.
 - Next cycle: one bounded M1 slice — PTY support (unlocks waiting-input detection S10-009), or durable run state.
+
+## Cycle 13 — 2026-07-18
+
+- Slice: M1 PTY runs (`pty: true` on start_process). Branch `loop/m1-pty`, PR #21, squash-merged as `8e58f7d`.
+- Implementation (sol worker, high effort, diff-gated +661/−84 then fix round +136/−19): openpty before spawn; child pre_exec setsid + TIOCSCTTY + dup2 slave onto fds 0/1/2 (no process_group(0) on the pty branch — setsid preserves pgid==pid for cancel/pause/kill); slave ECHO cleared only; single nonblocking close-on-exec master shared via Arc<File> between a poll(50ms) drain thread and the existing stdin queue; output always stream "stdout" (stderr inherently merged); redaction/chunking/metadata unchanged. Swift IPCClient gained `pty: Bool = false`, serialized only when true.
+- ADR-007 gate: red evidence (5 pty tests fail vs main; partial-line test fails vs pre-fix code), cargo 15 lib + 13 health + 39 lifecycle green, `verify-m0.sh` exit 0 pre- and post-fix (21 Swift tests), runtime demos (tty detection with CRLF merge, echo-off input round trip with natural VEOF exit, redaction+metadata order, SIGTERM cancel, partial-line close → exit 0 in 0.55s). Evidence: `.loop/verification/m1/pty/`.
+- Independent sol review: 0 blockers, 2 majors, 2 minors. Fixed: partial-line VEOF (queue tracks written tail, appends double VEOF), pty timeout + cancel metadata-order tests, Swift wire-format pinning. Accepted/deferred: drain-thread-spawn failure yielding zero terminal frames — same pre-existing class as the pipe path; goes to the durability slice.
+- Closeout: traceability S10-001 PTY portion recorded; state.json cycle 13.
+- Next cycle: waiting-input detection (S10-009, now unlocked by PTY) or durable run state.
