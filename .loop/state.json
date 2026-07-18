@@ -3,7 +3,7 @@
   "cycle": 3,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": "loop/m1-process-streaming",
-  "active_pr": null,
+  "active_pr": 5,
   "job_id": "809366a7",
   "cadence": "every 10 minutes",
   "created_date": "2026-07-17",
@@ -20,6 +20,6 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 3 implemented and locally verified the first bounded M1 process-streaming slice on loop/m1-process-streaming: direct argv launch, callback stdout/stderr events, typed spawn/capacity terminal failures, bounded process admission, health continuity, UTF-8 preservation, disconnect cleanup, and descendant-pipe resilience. Independent correctness and security reviews are clear. M1 remains in progress; commit, PR, CI, and merge are pending.",
+  "last_cycle_summary": "Cycle 3 implemented, locally verified, and opened PR #5 for the first bounded M1 process-streaming slice: direct argv launch, callback stdout/stderr events, typed spawn/capacity terminal failures, bounded process admission, health continuity, UTF-8 preservation, disconnect cleanup, and descendant-pipe resilience. Independent correctness and security reviews are clear. M1 remains in progress; CI and merge are pending.",
   "updated_at": "2026-07-18"
 }
