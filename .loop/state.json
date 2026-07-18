@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 12,
+  "cycle": 13,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,7 +20,7 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 12 (firings 12-41): after 29 identical billing-blocked probes, the user directed retiring CI and substituting sol-based verification (ADR-007). Final local parity run on PR #19 head e8671d0 exit 0; PR #19 squash-merged as 9c36a5f, branch deleted. S10-010 done; S10-001 updated. Next: PTY support (unlocks waiting-input detection S10-009) or durable run state.",
+  "last_cycle_summary": "Cycle 13: delivered M1 PTY slice (PR #21, merged 8e58f7d under ADR-007 gate). openpty + setsid/TIOCSCTTY controlling terminal, echo-off canonical input, merged stdout/stderr drain with poll-based nonblocking reads, VEOF close (double VEOF after a partial line, per sol review Major 1), redaction/metadata/cancel/timeout parity; Swift IPCClient pty:true opt-in pinned on the wire. Red evidence, cargo 15+13+39 green, verify-m0 parity exit 0 pre- and post-fix, four runtime demos. Sol review: 0 blockers; Major 2 (drain-thread spawn failure => zero terminal frames) accepted as the pre-existing pipe-path limitation class, deferred to a durability slice. Next cycle: waiting-input detection (S10-009, now unlocked by PTY) or durable run state.",
   "updated_at": "2026-07-18",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
