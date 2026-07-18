@@ -1,0 +1,4 @@
+FRAME: {'version': 1, 'type': 'run_output', 'run_id': 'demo-natural-exit', 'stream': 'stdout', 'output': '16272\n'}
+FRAME: {'version': 1, 'type': 'run_exit', 'run_id': 'demo-natural-exit', 'exit_code': 0}
+GRANDCHILD PID: 16272
+GRANDCHILD 16272 DEAD 0.00s after natural leader exit (had ~30s of sleep remaining)
