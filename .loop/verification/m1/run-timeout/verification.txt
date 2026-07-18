@@ -39,3 +39,10 @@ Deferred/nonblocking:
 - PTY, pause/resume/cancel, descendant process-group termination, waiting-input detection, redaction/metadata, persistence, and UI remain pending M1/later slices.
 
 VERDICT: PASS; M1 remains in progress.
+
+Delivery:
+- PR #7 exact final head: a6693cc
+- Required CI: both verify-m0 runs passed
+- Squash merge: 305837089f2792257a36285f01a7c77808c1bf8e
+- Merged at: 2026-07-18T07:39:33Z
+- Remote branch deleted
