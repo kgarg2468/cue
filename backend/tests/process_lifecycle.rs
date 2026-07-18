@@ -371,10 +371,17 @@ fn duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown() {
         cancel_process(&backend.socket_path, "reused-run")["status"],
         "accepted"
     );
-    let _: Vec<String> = first_reader
-        .lines()
-        .map(|line| line.expect("terminal should read"))
-        .collect();
+    loop {
+        let mut frame = String::new();
+        first_reader
+            .read_line(&mut frame)
+            .expect("first run frame should read");
+        let frame: serde_json::Value = serde_json::from_str(&frame).expect("first run frame JSON");
+        if frame["type"] == "run_exit" {
+            assert_eq!(frame["error_code"], "cancelled");
+            break;
+        }
+    }
 
     let mut reused =
         UnixStream::connect(&backend.socket_path).expect("reused client should connect");
@@ -428,22 +435,23 @@ fn cancellation_and_timeout_races_emit_one_terminal_without_hanging() {
             .write_all(format!("{request}\n").as_bytes())
             .expect("start request should write");
         let mut reader = BufReader::new(stream);
-        let mut output = String::new();
+        let mut first = String::new();
         reader
-            .read_line(&mut output)
-            .expect("prior output should read");
+            .read_line(&mut first)
+            .expect("first frame should read");
+        let first: serde_json::Value = serde_json::from_str(&first).expect("first frame JSON");
         let _ = cancel_process(&backend.socket_path, &run_id);
-        let frames: Vec<serde_json::Value> = reader
-            .lines()
-            .map(|line| {
+        let frames: Vec<serde_json::Value> = std::iter::once(first)
+            .chain(reader.lines().map(|line| {
                 serde_json::from_str(&line.expect("frame should read")).expect("frame JSON")
-            })
+            }))
             .collect();
         let terminals: Vec<_> = frames
             .iter()
             .filter(|frame| frame["type"] == "run_exit")
             .collect();
         assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0], frames.last().expect("frames are nonempty"));
         assert!(matches!(
             terminals[0]["error_code"].as_str(),
             Some("cancelled" | "timed_out")

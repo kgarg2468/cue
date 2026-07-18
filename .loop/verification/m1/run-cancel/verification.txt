@@ -30,3 +30,26 @@ Known environmental note: cleanup_does_not_unlink_replacement_socket fails in
 any checkout whose path pushes the test socket path past SUN_LEN (104 bytes on
 macOS); it fails identically on clean origin/main in such paths and passes
 here and in CI. Not caused or touched by this slice.
+
+Independent review (Codex gpt-5.6-sol, high effort): no blockers; five major
+and three minor findings. Dispositions after code verification:
+- FIXED: run id released only after the terminal frame was written, so a
+  client observing run_exit could get a spurious duplicate_run_id on
+  immediate reuse. Registration now drops before every terminal write
+  (normal, capacity_exhausted, spawn_failed paths); the reuse test now
+  restarts the id immediately after reading run_exit instead of waiting
+  for EOF, exercising the ordering deterministically.
+- FIXED: the cancel/timeout race test assumed the first frame is output;
+  a terminal-first result on a slow machine broke the count assertion. The
+  first frame is now included in the frame list and the single terminal is
+  asserted to be last. Both race-sensitive tests passed 5/5 stress reruns.
+- FLAGGED (inherent race semantics, follow-up in M1): a cancel accepted
+  moments before natural exit, timeout expiry, or between registration and
+  spawn can yield an exited/timed_out/capacity/spawn terminal after an
+  accepted cancel response. Exactly one terminal is still emitted and the
+  run terminates; precise terminal attribution ordering is future M1 work.
+- FLAGGED (pre-existing, tracked in S10-011 pending work): a connected but
+  never-reading client stalls drain-thread socket writes (write timeout is
+  intentionally None for backpressure survival), retaining the process slot
+  and now also the run id until disconnect. Waiting-input detection and
+  cleanup remain pending M1 scope.
