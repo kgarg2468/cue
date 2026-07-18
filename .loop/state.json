@@ -1,6 +1,6 @@
 {
   "status": "ready",
-  "cycle": 14,
+  "cycle": 15,
   "active_milestone": "M1 IPC/process lifecycle",
   "branch": null,
   "active_pr": null,
@@ -20,7 +20,7 @@
     "auto_expires": true
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 14: delivered M1 waiting-input detection (S10-009; PR #23, merged 1ad2785 under ADR-007 gate). Opt-in input_wait_detect_milliseconds on start_process; at most one run_input_waiting frame per quiet episode (output idle past threshold + empty stdin queue + CPU-quiescent child via proc_pidinfo); pipe and PTY runs; Swift parameter + .inputWaiting decode case. Sol review found 1 blocker (blocking writer lock could wedge supervision under client backpressure), 1 major (paused runs fired spurious frames), 1 minor (flaky busy test) \u2014 all confirmed and fixed pre-merge; emission is now try_lock with error-disarm, paused runs are suppressed with resume rebaseline. Lifecycle suite 46 tests, ~5s wall (old 20M-iteration test dominated at ~44s). Next cycle: durable run state or temp/worktree cleanup (S10-001 remainder); deferred durability slice covers zero-terminal-frame resource errors.",
-  "updated_at": "2026-07-18",
+  "last_cycle_summary": "Cycle 15: delivered M1 worktree isolation + cleanup (S10-001 remainder). sol worker implemented opt-in worktree_repository on start_process: private 0700 worktree under a canonicalized managed temp root, generated capture-delegate/run-<sanitized-id>-<nonce> branch, worktree_path/worktree_branch in run_metadata, terminal-first synchronous cleanup, worktree_failed terminal frames; Swift worktreeRepository param + .worktreeFailed. Orchestrator fixed a macOS /var->/private/var test comparison and a swift-format violation. Red evidence (6 tests fail vs main), full suite green, parity exit 0, runtime demo green. sol review: 3 blockers/6 majors/3 minors \u2014 confirmed+fixed: shutdown-vs-cleanup race (cleanup-blocker guard on ActiveRuns), path canonicalization hardening, bounded kill-on-deadline git runner (hook hangs), branch-ownership preflight before branch -D, nonce-collision test pinning, timeout/spawn-failure cleanup tests, 0700 assertion. Dispositioned as pre-existing/accepted: write-timeout wedge class and zero-terminal-frame error paths (deferred durability slice), disconnect bounded by mandatory timeout, old-backend silent field-ignore (pty precedent). PR #25 squash-merged (2a5406b). Post-fix suite: 18 lib + 13 health_socket + 54 process_lifecycle Rust, 24 Swift. Next cycle: durable run state, or the deferred durability slice (zero-terminal-frame resource errors, write-timeout wedge, unbounded stdin queue).",
+  "updated_at": "2026-07-18T21:50:50.660488+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
