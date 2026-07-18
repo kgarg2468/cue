@@ -23,7 +23,7 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 ## Global release controls
 
 - M0 is verified: M0-FOUNDATION-001 passed fresh-login native-window re-verification, and PR `#1` remains merged as `3e6cf85`.
-- M1 remains active on `loop/m1-run-timeout` after PR #5 merged as `9f40024`. The direct-process/streaming slice is verified, and the bounded per-run timeout slice is locally verified; PR/CI/merge and later M1 lifecycle slices remain pending.
+- M1 remains active on `loop/m1-run-timeout` in PR #7 after PR #5 merged as `9f40024`. The direct-process/streaming slice is verified, and the bounded per-run timeout slice is locally verified; CI/merge and later M1 lifecycle slices remain pending.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - M14 may close only against the full specification, including positioning and qualitative success criteria.
