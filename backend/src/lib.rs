@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -457,6 +458,13 @@ fn classify_process_supervision(
     }
 }
 
+fn kill_process_group(child: &mut std::process::Child) {
+    // SAFETY: a negative process ID targets the child's process group; no Rust-managed memory is
+    // accessed or retained by kill.
+    let _ = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    let _ = child.kill();
+}
+
 fn run_process(
     stream: UnixStream,
     run_id: String,
@@ -470,6 +478,7 @@ fn run_process(
     let timeout_started = Instant::now();
     let mut child = match Command::new(executable)
         .args(arguments)
+        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -499,7 +508,7 @@ fn run_process(
         .expect("piped stderr should be available");
 
     if let Err(error) = set_nonblocking(&stdout).and_then(|_| set_nonblocking(&stderr)) {
-        let _ = child.kill();
+        kill_process_group(&mut child);
         let _ = child.wait();
         return Err(error);
     }
@@ -521,7 +530,7 @@ fn run_process(
         }) {
         Ok(drain) => drain,
         Err(error) => {
-            let _ = child.kill();
+            kill_process_group(&mut child);
             let _ = child.wait();
             return Err(error);
         }
@@ -543,7 +552,7 @@ fn run_process(
         Ok(drain) => drain,
         Err(error) => {
             cancelled.store(true, Ordering::Release);
-            let _ = child.kill();
+            kill_process_group(&mut child);
             let _ = child.wait();
             let _ = stdout_drain.join();
             return Err(error);
@@ -558,6 +567,10 @@ fn run_process(
             cancelled.load(Ordering::Acquire),
         ) {
             ProcessSupervision::Exited => {
+                // A leader that exits while descendants remain (for example
+                // `sh -c 'sleep 30 & exit 0'`) must not leak them past the
+                // run's terminal frame, including after an accepted cancel.
+                kill_process_group(&mut child);
                 break (
                     child_status
                         .expect("completed child should have status")
@@ -566,11 +579,11 @@ fn run_process(
                 );
             }
             ProcessSupervision::TimedOut => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 break (child.wait()?.code(), Some("timed_out"));
             }
             ProcessSupervision::Cancelled => {
-                let _ = child.kill();
+                kill_process_group(&mut child);
                 break (child.wait()?.code(), Some("cancelled"));
             }
             ProcessSupervision::Running => thread::sleep(PIPE_DRAIN_POLL_INTERVAL),

@@ -1,0 +1,71 @@
+M1 process-group termination slice verification — 2026-07-18
+
+Slice: every run is spawned as the leader of its own process group
+(Command::process_group(0)), and all five kill sites in run_process
+(cancel, timeout, set_nonblocking failure, both drain-thread spawn
+failures) now SIGKILL the whole group via kill_process_group() with a
+direct child.kill() fallback, so shell-spawned descendants cannot
+survive cancellation or timeout. libc 0.2 added to backend deps.
+
+Provenance: implemented by a Codex gpt-5.6-terra worker (high effort)
+against an exact three-file allowlist (backend/Cargo.toml,
+backend/src/lib.rs, backend/tests/process_lifecycle.rs). The worker's
+sandbox blocked Unix-socket binding, so all integration verification
+below was performed by the orchestrator in this workspace. Cargo.lock
+picked up the libc entry during local builds and is included in the
+change. Note: the worker's lib.rs diff was accidentally reverted during
+red-verification and reapplied verbatim from the reviewed patch.
+
+TDD red evidence: with the new tests present but lib.rs unmodified,
+cancel_kills_descendant_processes and timeout_kills_descendant_processes
+both failed on "grandchild sleep process <pid> should be dead" — the
+grandchild survived child.kill(). Green after applying the lib.rs change.
+
+Evidence in this directory:
+- cargo-test.log — full backend suite green: 9 lib + 13 + 16 integration
+  (14 prior + the 2 new descendant-kill tests). New tests also passed
+  5/5 stress reruns.
+- verify-m0-parity.log — full CI parity gate green: ledger validation,
+  cargo fmt/clippy/test, swift format lint --strict, release builds,
+  swift test (17/17), health handshake "backend ok".
+- runtime-demo.log — release binary: /bin/sh run prints its background
+  grandchild pid (ps shows the grandchild in the run's own pgid, not the
+  backend's); cancel accepted on a second connection; cancelled terminal
+  0.01s later; grandchild sleep (with ~30s remaining) dead 0.01s after
+  cancel.
+
+Known environmental note (unchanged): cleanup_does_not_unlink_replacement_socket
+fails in checkouts whose path pushes the socket path past SUN_LEN; passes
+here and in CI.
+
+Independent review (Codex gpt-5.6-sol, high effort): no blockers; three
+major and two minor findings. Dispositions after code verification:
+- FIXED: natural leader exit skipped the group kill entirely (Exited
+  precedence), so `sh -c 'sleep 30 & exit 0'` leaked the descendant —
+  even after an accepted cancel. The Exited branch now kills the process
+  group before emitting the terminal frame; covered by the new
+  natural_leader_exit_kills_descendant_processes test (red-verified
+  against the unfixed branch) and runtime-demo-natural-exit.log (exit_code
+  0, grandchild dead 0.00s after run_exit with ~30s remaining).
+- FIXED: test cleanup SIGKILLed a raw pid after 5s (pid-reuse hazard) and
+  had no panic guard. Replaced with DescendantGuard: Drop-based cleanup
+  that verifies via ps that the pid still runs the test's `sleep 30`
+  before signalling, active on every exit path including panics.
+- FIXED: 500 ms run timeout left too little margin for spawn/pid-parse on
+  loaded runners, and read_grandchild_pid panicked opaquely on EOF or a
+  premature terminal. Timeout raised to 2 s with a 10 s client read
+  timeout (a first fix attempt set both to 2 s, which deterministically
+  raced — caught by 8x stress reruns); the pid reader now fails with
+  explicit messages on EOF or run_exit-before-pid.
+- FLAGGED (follow-up M1 backend-lifecycle slice): process_group(0) means
+  dev-terminal Ctrl-C signals the backend but no longer its runs, and
+  backend shutdown does not yet terminate active run groups; run stdin
+  also remains inherited pending waiting-input work.
+- FLAGGED (inherent, documented): kill(-pgid) after the leader is reaped
+  has a theoretical pgid-reuse window (shared with the pre-existing
+  cancel path); eliminating it needs leader-zombie retention or
+  kqueue-based tracking, out of scope here.
+
+Final state: cargo suite 9 lib + 13 + 17 integration green; three
+descendant tests 8/8 stress reruns; full verify-m0 parity green
+(verify-m0-parity.log, second run after review fixes).
