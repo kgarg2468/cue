@@ -1,7 +1,7 @@
 {
-  "status": "ready",
-  "cycle": 16,
-  "active_milestone": "M1 IPC/process lifecycle",
+  "status": "paused_user_testing",
+  "cycle": 17,
+  "active_milestone": "M2 Domain/persistence (next; not started)",
   "branch": null,
   "active_pr": null,
   "job_id": "a8a4fe0a",
@@ -10,17 +10,25 @@
   "expiry_date": "2026-07-25",
   "renew_at": "2026-07-24",
   "successor_job_id": null,
-  "renewal_status": "scheduled",
+  "renewal_status": "paused_by_user",
   "renewal_failure_transition": "If replacement creation fails by expiry, transition status to blocked_expired and record the failure in blockers; do not continue cycles under the expired job.",
   "recurring_job": {
     "id": "a8a4fe0a",
     "cadence_minutes": 10,
     "created_date": "2026-07-18",
     "expires_date": "2026-07-25",
-    "auto_expires": true
+    "auto_expires": true,
+    "paused": true,
+    "pause_reason": "User requested a hands-on test checkpoint after M1 before M2 starts."
   },
   "blockers": [],
-  "last_cycle_summary": "Cycle 16: delivered M1 run-termination durability (S10-001 durability remainder), retiring the write-wedge blocker class (PR #25 disposition) and the zero-terminal-frame major class (PRs #21/#25 dispositions). Bounded 5s post-admission write timeout with a torn-frame-safe ClientWriter dead-client flag (no byte after a torn frame; drains exit promptly; supervision joins; client death does not cancel the run); one-shot RunTerminal emitter guarantees a best-effort run_exit with additive internal_error code on every post-admission failure path, preserving id-release -> run_exit -> worktree-cleanup -> blocker-release order; Swift .internalError. sol review: 0 blockers, 1 major (detached drains past terminal emission on error paths) confirmed and fixed via centralized teardown; 3 test-soundness minors fixed with mutation checks. PR #27 squash-merged (36d3705). Tests: 22 lib + 13 health_socket + 56 process_lifecycle Rust, 25 Swift. Runtime demo: wedged run freed in ~5.1s, slow reader gets complete stream, ordinary framing unchanged. Next cycle: stdin-queue byte cap and/or crash-orphan durable cleanup (S10-001 final remainder), then M2 domain/persistence.",
-  "updated_at": "2026-07-18T22:28:02.723096+00:00",
+  "last_cycle_summary": "Cycle 17: completed the M1 resource-safety remainder and closed M1 through PR #29, squash-merged as 6f7d647. Each run now has an atomic 1 MiB pending-stdin cap with typed capacity_exhausted and immediate same-connection retry/close support. Private owner sidecars let startup reclaim only provably dead-owner managed worktrees; reciprocal canonical Git-admin backlink authentication prevents forged metadata from selecting a foreign repository. Full ADR-007 parity passed (26 lib + 13 health/socket + 58 lifecycle Rust, 25 Swift), Opus cross-family review passed, initial Sol review found one MAJOR cross-repository deletion risk, and the fix was red/green verified before final Sol PASS. M2 domain/persistence is next but has not started. Autonomous work is paused at the user's requested hands-on test checkpoint.",
+  "pause": {
+    "requested_by": "user",
+    "requested_at": "2026-07-18T23:28:41Z",
+    "reason": "Hands-on test checkpoint after M1 completion and before M2 begins.",
+    "resume_instruction": "Resume only after the user explicitly says to continue."
+  },
+  "updated_at": "2026-07-18T23:28:41+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo has no branch protection (free-plan private)."
 }
