@@ -15,6 +15,7 @@ public enum ProcessOutputStream: String, Equatable {
 public enum ProcessExitErrorCode: String, Equatable {
     case spawnFailed = "spawn_failed"
     case capacityExhausted = "capacity_exhausted"
+    case timedOut = "timed_out"
 }
 
 public enum ProcessEvent: Equatable {
@@ -41,6 +42,7 @@ public enum IPCClient {
         runID: String,
         executable: String,
         arguments: [String],
+        timeoutMilliseconds: Int,
         onEvent: (ProcessEvent) -> Void
     ) throws {
         let descriptor = try connect(to: socketPath)
@@ -50,6 +52,7 @@ public enum IPCClient {
             runID: runID,
             executable: executable,
             arguments: arguments,
+            timeoutMilliseconds: timeoutMilliseconds,
             to: descriptor
         )
         try readProcessEvents(from: descriptor, expectedRunID: runID, onEvent: onEvent)
@@ -75,9 +78,10 @@ public enum IPCClient {
     public static func startProcessRequest(
         runID: String,
         executable: String,
-        arguments: [String]
+        arguments: [String],
+        timeoutMilliseconds: Int
     ) -> String {
-        "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments))}\n"
+        "{\"version\":1,\"type\":\"start_process\",\"run_id\":\(jsonString(runID)),\"executable\":\(jsonString(executable)),\"arguments\":\(jsonStringArray(arguments)),\"timeout_milliseconds\":\(timeoutMilliseconds)}\n"
     }
 
     public static func validateHealthResponse(_ response: String) throws -> Bool {
@@ -141,12 +145,18 @@ public enum IPCClient {
         runID: String,
         executable: String,
         arguments: [String],
+        timeoutMilliseconds: Int,
         to descriptor: Int32
     ) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(
             Array(
-                startProcessRequest(runID: runID, executable: executable, arguments: arguments).utf8
+                startProcessRequest(
+                    runID: runID,
+                    executable: executable,
+                    arguments: arguments,
+                    timeoutMilliseconds: timeoutMilliseconds
+                ).utf8
             ), to: descriptor)
     }
 

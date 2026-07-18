@@ -83,3 +83,15 @@ Status: delivered through PR #5; M1 remains in progress
 - M1 remains incomplete. PTYs, explicit timeout, pause/resume/cancel, waiting-input detection, secret redaction/process metadata, durable run state, and remaining cleanup behavior are not claimed.
 
 Next cycle: select and implement the next bounded M1 slice from fresh `origin/main`; keep the milestone and partial traceability rows in progress.
+
+## Cycle 4 M1 per-run timeout — 2026-07-18
+
+Status: implemented and verified locally; PR, CI, and merge pending
+
+- Extended protocol-v1 `start_process` with required positive `timeout_milliseconds` and Swift `timeoutMilliseconds`; typed timeout completion is `run_exit` with `exit_code: null` and `error_code: timed_out`.
+- Started the timeout clock immediately before direct spawn, made observed child completion win over an elapsed deadline, and on timeout kill/reap the direct child, preserve preceding output, join drains, emit one terminal event last, and release process capacity.
+- Rejected invalid timeout shapes before admission while accepting the full positive JSON-u64 range; focused real timeout and capacity-release tests passed 10/10.
+- Full host verification passed 31 Rust tests, 15 Swift tests against the real backend, strict lints, release builds, and diff checks. Retained evidence: `.loop/verification/m1/run-timeout/verification.txt`.
+- Independent correctness/security review is clear. M1 remains incomplete for PTYs, public pause/resume/cancel, process-group termination, waiting-input detection, redaction/metadata, durable state, and remaining cleanup.
+
+Next cycle: commit and deliver this bounded timeout slice through its single PR; do not begin another M1 feature until merge and closeout gates pass.
