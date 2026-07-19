@@ -69,7 +69,7 @@ All capture entry points use the same state machine and permission gate.
 7. **Saved:** route to the new real Session Detail; a quiet checkmark confirmation is allowed.
 8. **Playback:** decrypt to memory, use an accessible native slider, show current/total time, and expose play/pause. Missing/corrupt/decrypt failure says “This recording couldn't be opened.”
 9. **Runtime disconnected:** neutral `Runtime · Offline`, with copy explaining that recording, notes, and playback do not need the future agent runtime.
-10. **Encryption/persistence failure:** “This capture couldn't be saved securely”; name the real key/disk cause; state that audio was not written unencrypted; provide working Try Again, explicit Export audio, and confirmed Discard. Never silently drop the finalized recording.
+10. **Encryption/persistence failure:** “This capture couldn't be saved securely”; name the real key/disk cause; tell the truth about where the recording currently lives — held in a private temporary file on this Mac, readable only by the user's own macOS account, which saving encrypts — rather than claiming it never touched disk unencrypted; provide working Try Again, explicit Export audio, and confirmed Discard. Never silently drop the finalized recording.
 
 ## Keyboard and accessibility
 

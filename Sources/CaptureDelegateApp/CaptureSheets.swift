@@ -76,8 +76,9 @@ struct PermissionDeniedView: View {
     }
 }
 
-/// State 10 — secure save failed. Names the real cause, affirms nothing was written unencrypted,
-/// and offers working Try Again / Export audio / Discard. The finalized recording is never dropped
+/// State 10 — secure save failed. Names the real cause, tells the truth about where the recording
+/// currently lives (a private temporary file on this Mac, held until the encrypted save lands), and
+/// offers working Try Again / Export audio / Discard. The finalized recording is never dropped
 /// silently: the sheet cannot be dismissed without an explicit choice.
 struct SaveFailureView: View {
     @ObservedObject var model: AppModel

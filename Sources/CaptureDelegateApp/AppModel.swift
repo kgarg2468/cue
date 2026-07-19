@@ -304,10 +304,10 @@ final class AppModel: ObservableObject {
         guard !isSaving, let pending = pendingCapture else { return }
         activeSheet = nil
         saveFailureMessage = nil
-        performSave(pending)
+        performSave(pending, recoveringFromFailure: true)
     }
 
-    private func performSave(_ pending: PendingCapture) {
+    private func performSave(_ pending: PendingCapture, recoveringFromFailure: Bool = false) {
         guard !isSaving else { return }
         guard let store else {
             saveFailureMessage =
@@ -341,6 +341,16 @@ final class AppModel: ObservableObject {
                 saveFailureMessage = nil
                 activeSheet = nil
                 await reloadSessions()
+                if recoveringFromFailure {
+                    // Retry path: the failure sheet was just dismissed and is still
+                    // animating out. Replacing the NavigationStack path while that
+                    // dismissal transition is in flight makes SwiftUI drop the
+                    // replacement, stranding the user on the live-capture view with no
+                    // Saved confirmation — the exact "looks like data loss" moment F8
+                    // flagged. Let the dismissal settle before routing so retry-success
+                    // lands on the saved capture just like a normal save.
+                    try? await Task.sleep(for: .milliseconds(400))
+                }
                 routeToSaved(session)
                 flashSavedConfirmation()
             case .failure(let error):
@@ -608,7 +618,8 @@ final class AppModel: ObservableObject {
     // MARK: Error copy
 
     /// Turns a store error into the contract's state-10 recovery copy, naming the real cause and
-    /// affirming that nothing was written to disk unencrypted.
+    /// telling the truth about where the recording currently lives: a private temporary file on this
+    /// Mac, readable only by the user's own account, which saving encrypts.
     static func saveFailureCopy(for error: SecureStoreError) -> String {
         let cause: String
         switch error {
@@ -622,9 +633,9 @@ final class AppModel: ObservableObject {
             cause = "the session record was missing"
         }
         return
-            "This capture couldn't be saved securely — \(cause). Your audio was not written to "
-            + "disk unencrypted; the recording is held safely so you can retry, export it, or "
-            + "discard it."
+            "This capture couldn't be saved securely — \(cause). Your recording is held in a "
+            + "private temporary file on this Mac, readable only by your macOS account; saving "
+            + "encrypts it. You can try again, export it, or discard it."
     }
 
     static func describe(_ error: Error) -> String {

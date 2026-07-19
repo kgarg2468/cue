@@ -66,6 +66,7 @@ struct MenuBarContentView: View {
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Start capture")
             .accessibilityHint("Starts a new microphone recording")
 
             recents
@@ -74,6 +75,7 @@ struct MenuBarContentView: View {
 
             Button("Open Main Window") { openMainWindow() }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Open main window")
         }
     }
 
@@ -99,6 +101,7 @@ struct MenuBarContentView: View {
                                     + Formatting.timer(session.duration)
                             )
                             .font(.caption)
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         }
@@ -106,6 +109,7 @@ struct MenuBarContentView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(SessionDisplay.title(session.title))
                     .accessibilityHint("Opens this capture")
                 }
             }
@@ -144,6 +148,7 @@ struct MenuBarContentView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .disabled(model.isSaving)
+                .accessibilityLabel(model.isPaused ? "Resume capture" : "Pause capture")
 
                 Button(role: .destructive) {
                     model.stopAndSave()
@@ -152,6 +157,7 @@ struct MenuBarContentView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .disabled(model.isSaving)
+                .accessibilityLabel("Stop and save capture")
             }
 
             Divider()
@@ -161,6 +167,7 @@ struct MenuBarContentView: View {
                 model.jumpToLiveCapture()
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Open main window")
         }
     }
 

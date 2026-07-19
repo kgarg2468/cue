@@ -34,7 +34,8 @@ struct ToolbarCaptureControl: View {
             } label: {
                 Label("New Capture", systemImage: "record.circle")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
+            .accessibilityLabel("New capture")
             .accessibilityHint("Starts a new microphone recording")
         }
     }

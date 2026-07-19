@@ -16,6 +16,10 @@ struct SessionDetailView: View {
 
     private var session: CaptureSession? { model.session(for: sessionID) }
 
+    private var deleteConfirmationTitle: String {
+        "Delete “\(session.map { SessionDisplay.title($0.title) } ?? "this capture")”?"
+    }
+
     var body: some View {
         Group {
             if let session {
@@ -30,21 +34,22 @@ struct SessionDetailView: View {
         .navigationTitle(session.map { SessionDisplay.title($0.title) } ?? "Capture")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(role: .destructive) {
+                Button {
                     showDeleteConfirmation = true
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
+                .accessibilityLabel("Delete capture")
                 .accessibilityHint("Deletes this capture")
                 .disabled(session == nil)
             }
         }
         .confirmationDialog(
-            "Delete this capture?",
+            deleteConfirmationTitle,
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button("Delete Capture", role: .destructive) {
                 model.delete(sessionID)
             }
             Button("Cancel", role: .cancel) {}

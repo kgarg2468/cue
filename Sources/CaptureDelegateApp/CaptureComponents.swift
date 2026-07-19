@@ -122,6 +122,7 @@ struct MomentRow: View {
                     .labelStyle(.titleOnly)
             }
             .font(.caption)
+            .monospacedDigit()
             .foregroundStyle(.secondary)
             .lineLimit(1)
         }

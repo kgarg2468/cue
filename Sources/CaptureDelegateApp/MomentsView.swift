@@ -32,11 +32,11 @@ struct MomentsView: View {
             Button("Cancel", role: .cancel) { renameTarget = nil }
         }
         .confirmationDialog(
-            "Delete this capture?",
+            "Delete “\(deleteTarget.map { SessionDisplay.title($0.title) } ?? "this capture")”?",
             isPresented: deleteBinding,
             titleVisibility: .visible
         ) {
-            Button("Delete", role: .destructive) {
+            Button("Delete Capture", role: .destructive) {
                 if let target = deleteTarget {
                     model.delete(target.id)
                 }
