@@ -67,8 +67,9 @@ struct CommandPaletteView: View {
                             if index == firstSessionIndex {
                                 SectionCaption(title: "Captures")
                             }
+                            // No explicit `.id` here: overriding the ForEach identity with the row
+                            // index leaves stale rows on screen when typing reshapes the list.
                             PaletteRow(item: item, isSelected: index == selection)
-                                .id(index)
                                 .contentShape(Rectangle())
                                 .onTapGesture { run(item) }
                         }
@@ -76,7 +77,8 @@ struct CommandPaletteView: View {
                     .padding(8)
                 }
                 .onChange(of: selection) { _, newValue in
-                    withAnimation(.none) { proxy.scrollTo(newValue, anchor: .center) }
+                    guard items.indices.contains(newValue) else { return }
+                    withAnimation(.none) { proxy.scrollTo(items[newValue].id, anchor: .center) }
                 }
             }
         }
