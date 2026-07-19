@@ -1,0 +1,42 @@
+warning: /Users/krishgarg/Library/org.swift.swiftpm/configuration is not accessible or not writable, disabling user-level cache features.
+warning: /Users/krishgarg/Library/org.swift.swiftpm/security is not accessible or not writable, disabling user-level cache features.
+warning: /Users/krishgarg/Library/Caches/org.swift.swiftpm is not accessible or not writable, disabling user-level cache features.
+warning: 'm15-opus': failed storing manifest for 'm15-opus' in cache: attempt to write a readonly database
+[0/1] Planning build
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.13s)
+Test Suite 'Selected tests' started at 2026-07-18 23:42:59.221.
+Test Suite 'CaptureDelegatePackageTests.xctest' started at 2026-07-18 23:42:59.222.
+Test Suite 'CaptureDelegatePackageTests.xctest' passed at 2026-07-18 23:42:59.222.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-07-18 23:42:59.222.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1743
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test "capture state machine excludes paused time and returns the original start date" started.
+◇ Test "capture sequencing errors are explicit and discard returns to idle" started.
+◇ Test "delete removes the session and subsequent access reports sessionNotFound" started.
+◇ Test "title and note updates persist across store instances" started.
+◇ Test "key failure preserves plaintext and creates no session files" started.
+◇ Test "playback reports duration for a generated audio fixture" started.
+◇ Test "save, list, and load round-trip encrypted audio and ordered metadata" started.
+◇ Test "capture start honestly rejects denied microphone authorization" started.
+◇ Test "corrupt encrypted audio reports corruptOrUndecryptable" started.
+◇ Test "disk failure leaves no partial session and preserves recovery audio" started.
+◇ Test "playback rejects corrupt audio data" started.
+◇ Test "successful save leaves no plaintext audio copy under the store root" started.
+✔ Test "capture sequencing errors are explicit and discard returns to idle" passed after 0.003 seconds.
+✔ Test "key failure preserves plaintext and creates no session files" passed after 0.005 seconds.
+✔ Test "delete removes the session and subsequent access reports sessionNotFound" passed after 0.009 seconds.
+✔ Test "corrupt encrypted audio reports corruptOrUndecryptable" passed after 0.009 seconds.
+✔ Test "playback reports duration for a generated audio fixture" passed after 0.010 seconds.
+✔ Test "capture start honestly rejects denied microphone authorization" passed after 0.010 seconds.
+✔ Test "playback rejects corrupt audio data" passed after 0.010 seconds.
+✔ Test "successful save leaves no plaintext audio copy under the store root" passed after 0.010 seconds.
+✔ Test "capture state machine excludes paused time and returns the original start date" passed after 0.011 seconds.
+✔ Test "title and note updates persist across store instances" passed after 0.012 seconds.
+✔ Test "save, list, and load round-trip encrypted audio and ordered metadata" passed after 0.012 seconds.
+✔ Test "disk failure leaves no partial session and preserves recovery audio" passed after 0.067 seconds.
+✔ Test run with 12 tests in 0 suites passed after 0.068 seconds.

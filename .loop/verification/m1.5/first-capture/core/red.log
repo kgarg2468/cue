@@ -1,0 +1,5 @@
+warning: /Users/krishgarg/Library/org.swift.swiftpm/configuration is not accessible or not writable, disabling user-level cache features.
+warning: /Users/krishgarg/Library/org.swift.swiftpm/security is not accessible or not writable, disabling user-level cache features.
+warning: /Users/krishgarg/Library/Caches/org.swift.swiftpm is not accessible or not writable, disabling user-level cache features.
+warning: 'm15-opus': failed storing manifest for 'm15-opus' in cache: attempt to write a readonly database
+error: 'm15-opus': Source files for target CaptureDelegateCore should be located under 'Sources/CaptureDelegateCore', or a custom sources path can be set with the 'path' property in Package.swift
