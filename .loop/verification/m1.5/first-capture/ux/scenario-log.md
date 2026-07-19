@@ -95,3 +95,43 @@ starts capture, verified live), ⌘⇧P pause, ⌘. stop & save, ⌘L jump to li
 `~/Library/Application Support/CaptureDelegate/sessions/` holds 5 encrypted
 test sessions (Standup notes with Sol 1:29; Untitled 2:58, 1:36, 0:06, 0:0x).
 All `.enc`-only (no plaintext `ftyp` markers); temp dir cleaned after saves.
+
+## Fix pass (cycle 18, post-review)
+
+Both independent reviews came back before merge: Opus visual review
+(approve-with-nits; F7 major, F8 ship-blocker, F3 resolved as neutral-is-
+correct + add delete confirmation, plus AX/taste nits) and Sol technical
+review (REQUEST-CHANGES; 1 blocker + 6 majors + 7 minors, see PR body).
+Per cycle-17 precedent, blocker/majors were fixed and re-reviewed before the
+pause:
+
+- Commit 4f47b78 (Sol worker): start/save single-flight guards; plaintext
+  temp lifecycle with PID + process-start-identity ownership, launch
+  reconciliation and termination cleanup; ordered non-optimistic mutation
+  pipeline; staged non-destructive export; corrupt-session-tolerant
+  `listWithProblems()`; playback timer deinit; pause/resume error surfacing;
+  stale staging-dir cleanup. Six new red/green core tests (18 total, green).
+- Commit 1fea360 (Opus worker + orchestrator): **F7 fixed** — ⌘K palette now
+  renders matching captures inline (cap 5 + overflow row, row 0 is the Enter
+  target, arrow-wrap, Escape closes); **F8 fixed** — root cause was a
+  NavigationStack path replacement issued during the failure sheet's dismissal
+  transition being dropped; retry now sequences routing after dismissal
+  (`recoveringFromFailure`), landing on the saved capture's detail; **F5
+  fixed** — AX labels on popover controls and idle toolbar button; honest
+  save-failure copy disclosing the private plaintext temp file; capture-named
+  delete confirmations in detail + Moments views; quieter toolbar New Capture;
+  tabular digits in moment rows.
+- Deferred findings recorded as ADR-009 (decisions.md): AAD/format
+  versioning, per-root store locking, Developer ID signing (blocked on user
+  identity), universal binary, testable AppModel target, F1 socket path,
+  F6 rebindable shortcut.
+
+**Delta retest status:** build/lint green and all 18 core tests pass on the
+fixed tree; the app was repackaged from it. The targeted Computer Use retest
+of the changed flows (palette inline rows, retry→saved-detail routing, delete
+dialogs, toolbar/AX spot-checks) could NOT run at closeout — the host Mac was
+on the lock screen (2:17 AM). The s7/s9 evidence sets therefore show the
+pre-fix behavior for F7/F8. A retest is scheduled for the morning; failing
+that, the user's hands-on pass covers exactly these flows. Note: repackaging
+changed the ad-hoc CDHash, so macOS will re-prompt for microphone on the
+first capture of the new bundle — expected, and itself a re-run of scenario 10.

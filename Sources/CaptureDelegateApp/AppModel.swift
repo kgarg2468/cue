@@ -334,7 +334,6 @@ final class AppModel: ObservableObject {
                 result = .failure(.ioFailure(error.localizedDescription))
             }
 
-            isSaving = false
             switch result {
             case .success(let session):
                 pendingCapture = nil
@@ -348,12 +347,16 @@ final class AppModel: ObservableObject {
                     // replacement, stranding the user on the live-capture view with no
                     // Saved confirmation — the exact "looks like data loss" moment F8
                     // flagged. Let the dismissal settle before routing so retry-success
-                    // lands on the saved capture just like a normal save.
+                    // lands on the saved capture just like a normal save. `isSaving`
+                    // stays true until routing completes so a capture started in this
+                    // window cannot be navigated away from.
                     try? await Task.sleep(for: .milliseconds(400))
                 }
                 routeToSaved(session)
+                isSaving = false
                 flashSavedConfirmation()
             case .failure(let error):
+                isSaving = false
                 saveFailureMessage = Self.saveFailureCopy(for: error)
                 activeSheet = .saveFailure
             }

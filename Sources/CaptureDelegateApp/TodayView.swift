@@ -83,7 +83,7 @@ private struct StrongCaptureCard: View {
                 Text("Record a meeting, a conversation, a presentation, or a passing idea.")
                     .font(.body)
                     .foregroundStyle(.secondary)
-                Label("It stays on this Mac, encrypted.", systemImage: "lock")
+                Label("It stays on this Mac — encrypted when saved.", systemImage: "lock")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

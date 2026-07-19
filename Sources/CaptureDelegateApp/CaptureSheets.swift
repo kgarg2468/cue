@@ -17,7 +17,7 @@ struct PermissionExplainerView: View {
                     "Recording uses the microphone on this Mac.",
                     systemImage: "waveform")
                 Label(
-                    "Your audio stays here, encrypted — it is never uploaded.",
+                    "Your audio stays here — encrypted when you save, never uploaded.",
                     systemImage: "lock")
             }
             .font(.callout)

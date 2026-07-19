@@ -29,7 +29,7 @@ chmod +x "$contents/MacOS/CaptureDelegateApp"
 
 # plutil, not PlistBuddy: PlistBuddy's -c parser cannot carry an apostrophe.
 plutil -replace NSMicrophoneUsageDescription \
-  -string "Capture Delegate records audio from this Mac's microphone only when you start a capture. Recordings stay on this Mac, encrypted." \
+  -string "Capture Delegate records audio from this Mac's microphone only when you start a capture. Recordings stay on this Mac and are encrypted when saved." \
   "$contents/Info.plist"
 
 # Ad-hoc signature so macOS privacy (TCC) attribution stays stable across rebuilds.
