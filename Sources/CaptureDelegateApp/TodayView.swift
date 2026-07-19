@@ -56,6 +56,7 @@ struct TodayView: View {
                         }
                         .buttonStyle(.plain)
                         .padding(.vertical, 8)
+                        .accessibilityLabel(SessionDisplay.title(session.title))
                         .accessibilityHint("Opens this capture")
                         if session.id != model.recentSessions.last?.id {
                             Divider()

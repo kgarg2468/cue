@@ -59,6 +59,7 @@ struct MomentsView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(SessionDisplay.title(session.title))
                 .accessibilityHint("Opens this capture")
                 .contextMenu {
                     Button("Open") { model.open(session) }

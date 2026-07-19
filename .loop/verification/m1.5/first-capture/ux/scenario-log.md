@@ -192,3 +192,37 @@ user present.
   alignment, predicate consistency, caption placement); one non-blocking
   adjacent note about the conditional caption being a lazy-container slow
   path.
+
+### Delta retest, resumed (2026-07-19, ~12:15–12:45 PDT, user go-ahead "its ready to be tested now")
+
+- **Palette post-fix render: PASS.** Query "untitled" on the repackaged
+  bundle now renders the "Captures" caption plus exactly the five real
+  session rows — zero ghost command rows
+  (`delta-06-palette-fixed-inline-results.png`).
+- **Enter target alignment: PASS.** Enter on the highlighted first result
+  opened that session's detail (12:53 AM capture,
+  `delta-07-palette-enter-opens-selected.png`).
+- **Delete dialog naming: PASS.** Toolbar trash on a session detail shows
+  “Delete "Untitled capture"?” with the display title, not the raw empty
+  string (`delta-08-delete-dialog-naming.png`).
+- **Full retry-save journey: PASS.** With the sessions directory made
+  read-only: mic explainer shows the honest pre-TCC copy
+  (`delta-09-mic-explainer-honest-copy.png`) → recording → stop → failure
+  sheet with honest copy (`delta-11-save-failure-sheet.png`) → plaintext temp
+  renamed to a `held-process-<pid>-…m4a` protection file on disk → directory
+  restored → Try Again → lands directly on the saved detail with the "Saved"
+  badge (`delta-12-retry-lands-on-saved-detail.png`) and the held- file is
+  consumed after the encrypted commit. The test capture was then removed via
+  the real delete flow; the user's five existing captures remain intact.
+- **NEW MINOR (fixed): session-row buttons exposed no accessible title.**
+  The Today recents, Moments, and Search row buttons carried only the
+  combined metadata as AXValue — no AXDescription — because the inner
+  `MomentRow`'s label does not survive SwiftUI's Button flattening. Fixed by
+  adding `.accessibilityLabel(SessionDisplay.title(session.title))` on the
+  Button itself in TodayView/MomentsView/SearchView, matching the existing
+  MenuBarViews pattern. Confirmed via the raw AX API
+  (`AXUIElementCopyAttributeValue`): every row button now reports
+  `AXDescription = "Untitled capture"` alongside the metadata AXValue.
+  (Inspection note: the System Events AppleScript bridge does not surface
+  AXDescription for these SwiftUI buttons — raw-API or Accessibility
+  Inspector is the reliable check.)

@@ -66,6 +66,7 @@ struct SearchView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(SessionDisplay.title(session.title))
                 .accessibilityHint("Opens this capture")
             }
             .listStyle(.inset)
