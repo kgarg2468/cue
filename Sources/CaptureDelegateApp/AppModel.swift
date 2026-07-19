@@ -310,6 +310,7 @@ final class AppModel: ObservableObject {
     private func performSave(_ pending: PendingCapture, recoveringFromFailure: Bool = false) {
         guard !isSaving else { return }
         guard let store else {
+            holdPendingAudioForRecovery()
             saveFailureMessage =
                 storeInitError ?? "The encrypted store could not be opened on this Mac."
             activeSheet = .saveFailure
@@ -357,10 +358,29 @@ final class AppModel: ObservableObject {
                 flashSavedConfirmation()
             case .failure(let error):
                 isSaving = false
+                holdPendingAudioForRecovery()
                 saveFailureMessage = Self.saveFailureCopy(for: error)
                 activeSheet = .saveFailure
             }
         }
+    }
+
+    /// After a failed save the finalized temp file is the only copy of the user's audio, and
+    /// launch reconciliation deletes process-owned recordings once this process is dead — so
+    /// quitting with the failure unresolved would silently lose the recording. Renaming the
+    /// file with the held- prefix moves it out of reconciliation's reach. If the rename itself
+    /// fails the original URL is kept, which is no worse than the pre-hold behavior.
+    private func holdPendingAudioForRecovery() {
+        guard let pending = pendingCapture,
+            let heldURL = try? CaptureEngine.markRecordingHeld(at: pending.audioFileURL),
+            heldURL != pending.audioFileURL
+        else { return }
+        pendingCapture = PendingCapture(
+            audioFileURL: heldURL,
+            title: pending.title,
+            note: pending.note,
+            createdAt: pending.createdAt,
+            duration: pending.duration)
     }
 
     private func routeToSaved(_ session: CaptureSession) {

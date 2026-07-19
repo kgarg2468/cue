@@ -198,6 +198,26 @@ public final class CaptureEngine: ObservableObject {
         scheduleUpdates()
     }
 
+    /// Files with this prefix are finalized recordings that an unresolved save failure still
+    /// owns. They may be the only copy of the user's audio, so reconciliation never removes
+    /// them — not even when their original owning process is gone.
+    public static let heldRecordingPrefix = "held-"
+
+    /// Move a finalized recording out of reconciliation's reach by renaming it with
+    /// ``heldRecordingPrefix``. Returns the recording's new URL; already-held files are
+    /// returned unchanged.
+    public static func markRecordingHeld(at url: URL) throws -> URL {
+        guard !url.lastPathComponent.hasPrefix(heldRecordingPrefix) else { return url }
+        let heldURL = url.deletingLastPathComponent()
+            .appendingPathComponent(heldRecordingPrefix + url.lastPathComponent)
+        do {
+            try FileManager.default.moveItem(at: url, to: heldURL)
+        } catch {
+            throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
+        }
+        return heldURL
+    }
+
     public func reconcileStaleRecordings() throws {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: recordingDirectory.path) else {
@@ -212,6 +232,7 @@ public final class CaptureEngine: ObservableObject {
             for entry in entries {
                 let values = try entry.resourceValues(forKeys: [.isRegularFileKey])
                 guard values.isRegularFile == true else { continue }
+                if entry.lastPathComponent.hasPrefix(Self.heldRecordingPrefix) { continue }
                 if let owner = Self.recordingOwner(for: entry) {
                     if owner.processIdentifier == processIdentifier,
                         owner.processInstanceIdentity == processInstanceIdentity

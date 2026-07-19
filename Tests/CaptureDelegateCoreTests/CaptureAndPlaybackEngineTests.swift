@@ -194,6 +194,9 @@ func captureReconciliationRespectsProcessOwnership() throws {
     let identityUnavailableRecording = recordingDirectory.appendingPathComponent(
         "process-\(identityUnavailableProcessID)-unknownlaunch-\(UUID().uuidString).m4a"
     )
+    let heldDeadOwnerRecording = recordingDirectory.appendingPathComponent(
+        "held-process-\(deadProcessID)-deadlaunch-\(UUID().uuidString).m4a"
+    )
     try Data("legacy orphan".utf8).write(to: legacyRecording)
     try Data("dead owner".utf8).write(to: deadProcessRecording)
     try Data("live foreign owner".utf8).write(to: liveForeignRecording)
@@ -201,6 +204,7 @@ func captureReconciliationRespectsProcessOwnership() throws {
     try Data("live owner with unavailable identity".utf8).write(
         to: identityUnavailableRecording
     )
+    try Data("held after save failure".utf8).write(to: heldDeadOwnerRecording)
     var currentProcessRecordingURL: URL?
     let engine = CaptureEngine(
         authorizationProvider: { .authorized },
@@ -244,8 +248,52 @@ func captureReconciliationRespectsProcessOwnership() throws {
     #expect(FileManager.default.fileExists(atPath: currentProcessRecording.path))
     #expect(FileManager.default.fileExists(atPath: liveForeignRecording.path))
     #expect(FileManager.default.fileExists(atPath: identityUnavailableRecording.path))
+    #expect(FileManager.default.fileExists(atPath: heldDeadOwnerRecording.path))
 
     try engine.discard()
+}
+
+@Test("held recordings survive reconciliation across a quit with an unresolved save failure")
+@MainActor
+func heldRecordingIsPreservedAcrossReconciliation() throws {
+    let recordingDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CaptureDelegateHeldRecordingTests", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: recordingDirectory) }
+    try FileManager.default.createDirectory(
+        at: recordingDirectory,
+        withIntermediateDirectories: true
+    )
+    let deadProcessID: Int32 = 8_001
+    let originalRecording = recordingDirectory.appendingPathComponent(
+        "process-\(deadProcessID)-deadlaunch-\(UUID().uuidString).m4a"
+    )
+    try Data("only copy of the user's audio".utf8).write(to: originalRecording)
+
+    let heldRecording = try CaptureEngine.markRecordingHeld(at: originalRecording)
+    #expect(heldRecording.lastPathComponent.hasPrefix(CaptureEngine.heldRecordingPrefix))
+    #expect(!FileManager.default.fileExists(atPath: originalRecording.path))
+    #expect(FileManager.default.fileExists(atPath: heldRecording.path))
+
+    // Marking an already-held recording is a no-op, not a double prefix.
+    #expect(try CaptureEngine.markRecordingHeld(at: heldRecording) == heldRecording)
+
+    // Simulate the next launch: the owning process is gone, reconciliation runs.
+    let engine = CaptureEngine(
+        authorizationProvider: { .authorized },
+        recorderFactory: { _ in FakeAudioRecorder() },
+        wallClock: { Date() },
+        monotonicClock: { 0 },
+        schedulesUpdates: false,
+        recordingDirectory: recordingDirectory,
+        processIdentifier: 8_002,
+        processLivenessProvider: { _ in false },
+        processInstanceIdentity: "nextlaunch",
+        processInstanceIdentityProvider: { _ in nil }
+    )
+    try engine.reconcileStaleRecordings()
+
+    #expect(FileManager.default.fileExists(atPath: heldRecording.path))
 }
 
 @Test("capture discard surfaces plaintext cleanup failure")
