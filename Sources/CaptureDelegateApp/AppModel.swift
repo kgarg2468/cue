@@ -158,7 +158,10 @@ final class AppModel: ObservableObject {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return [] }
         return sessions.filter { session in
-            session.title.lowercased().contains(query) || session.note.lowercased().contains(query)
+            // Match the displayed name, not the raw stored title — untitled captures render as
+            // "Untitled capture", so typing that must find them.
+            SessionDisplay.title(session.title).lowercased().contains(query)
+                || session.note.lowercased().contains(query)
         }
     }
 

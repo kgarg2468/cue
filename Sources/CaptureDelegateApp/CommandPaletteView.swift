@@ -92,7 +92,10 @@ struct CommandPaletteView: View {
         var items = commands.map { PaletteItem.command($0) }
         if !trimmed.isEmpty {
             let matches = model.sessions.filter {
-                $0.title.lowercased().contains(trimmed) || $0.note.lowercased().contains(trimmed)
+                // Match the displayed name, not the raw stored title — untitled captures render
+                // as "Untitled capture", so typing that must find them.
+                SessionDisplay.title($0.title).lowercased().contains(trimmed)
+                    || $0.note.lowercased().contains(trimmed)
             }
             items.append(
                 contentsOf: matches.prefix(Self.maxSessionRows).map { PaletteItem.session($0) })
