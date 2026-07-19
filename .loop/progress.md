@@ -207,3 +207,13 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Review: Opus 4.8 cross-family PASS with no blocker/major. The first independent Sol final review found one confirmed MAJOR: a forged `.git` pointer could select a stale worktree admin entry in a foreign repository and delete its managed-prefix branch. Fixed with reciprocal canonical backlink authentication and a red-before/green-after cross-repository regression. Final Sol disposition review: PASS, prior MAJOR resolved, no blocker/major remains.
 - Evidence: `.loop/verification/m1/resource-safety/` (red log, three focused green logs, full parity log, review chronology, verification summary). M1 is complete; M2 Domain/persistence is next and has not started.
 - User checkpoint: autonomous cycles are paused after this closeout. Resume only on an explicit user request after hands-on testing.
+
+## Control-plane reset after Cycle 17 — 2026-07-18
+
+Status: approved reset recorded; autonomous product work remains paused
+
+- Preserved the verified M0/M1 closeout and inserted M1.5 First Capture Journey as the next milestone: packaged native app, real microphone capture, pause/resume/stop, minimum Keychain-backed encrypted persistence, Today/Moments/session detail/playback, and relaunch.
+- Replaced backend-first future sequencing with visible vertical slices. Later domain/runtime work must include its user-facing surface; M11 now closes cohesion, accessibility, and polish rather than introducing deferred primary screens.
+- Added the UI-bearing slice gate: exact tested commit/build, named scenarios, real Computer Use on the packaged `.app`, retained `.loop/verification/<milestone>/<slice>/ux/` evidence, mandatory Opus UX contract + SwiftUI implementation + fresh independent visual review, independent Sol technical review, and `user_verdict: pending|approved|rejected`.
+- Kept ADR-007 local parity plus gpt-5.6-sol review and removed GitHub Actions as a future gate. Smoke/process counts, unit tests, previews, and mocks remain supporting evidence only; internal-only fixes are not product progress.
+- Old recurring job `a8a4fe0a` remains recorded as paused. No replacement scheduler exists; cancellation/replacement is pending after this reset and requires an explicit user resume. A UI rejection reopens the same milestone, and unavailable Opus or Computer Use blocks rather than weakens the gate.
