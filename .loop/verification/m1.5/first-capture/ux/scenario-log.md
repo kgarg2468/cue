@@ -125,8 +125,21 @@ pause:
   versioning, per-root store locking, Developer ID signing (blocked on user
   identity), universal binary, testable AppModel target, F1 socket path,
   F6 rebindable shortcut.
+- Commit 2016873 (orchestrator, after Sol delta re-review REQUEST-CHANGES):
+  minor #15 — `isSaving` now holds through retry routing so a capture started
+  in the 400 ms window can't be navigated away; honest copy in the permission
+  explainer, Today card, and mic usage description ("encrypted when saved",
+  not "encrypted").
+- Commit c82ed0d (orchestrator, after Sol's confirmation pass OBJECTed):
+  **data-loss blocker fixed** — quitting with an unresolved save failure used
+  to lose the only audio copy, because next-launch reconciliation deleted the
+  dead-owner temp file. Save failure now renames the temp with a `held-`
+  prefix; reconciliation always preserves `held-` files; retry/export/discard
+  follow the renamed URL. Two new red/green tests (19 core tests, green).
+  ADR-009 addendum rewritten to match implemented behavior (crash-window
+  residual deferred to M2's pending-capture manifest).
 
-**Delta retest status:** build/lint green and all 18 core tests pass on the
+**Delta retest status:** build/lint green and all 19 core tests pass on the
 fixed tree; the app was repackaged from it. The targeted Computer Use retest
 of the changed flows (palette inline rows, retry→saved-detail routing, delete
 dialogs, toolbar/AX spot-checks) could NOT run at closeout — the host Mac was
