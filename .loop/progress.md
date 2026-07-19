@@ -217,3 +217,12 @@ Status: approved reset recorded; autonomous product work remains paused
 - Added the UI-bearing slice gate: exact tested commit/build, named scenarios, real Computer Use on the packaged `.app`, retained `.loop/verification/<milestone>/<slice>/ux/` evidence, mandatory Opus UX contract + SwiftUI implementation + fresh independent visual review, independent Sol technical review, and `user_verdict: pending|approved|rejected`.
 - Kept ADR-007 local parity plus gpt-5.6-sol review and removed GitHub Actions as a future gate. Smoke/process counts, unit tests, previews, and mocks remain supporting evidence only; internal-only fixes are not product progress.
 - Old recurring job `a8a4fe0a` remains recorded as paused. No replacement scheduler exists; cancellation/replacement is pending after this reset and requires an explicit user resume. A UI rejection reopens the same milestone, and unavailable Opus or Computer Use blocks rather than weakens the gate.
+
+## Cycle 18 — M1.5 First Capture Journey started — 2026-07-18
+
+Status: implementation in progress; mandatory user checkpoint remains pre-merge
+
+- The user explicitly approved the UX-first reset and directed implementation through the first real capture checkpoint.
+- Fresh local baseline parity passed before the slice: 26 Rust library, 13 health/socket, 58 lifecycle, and 25 Swift tests, plus release builds and backend health.
+- A read-only fresh Opus 4.8 context authored the decision-complete M1.5 contract at `.loop/verification/m1.5/first-capture/ux/ux-contract.md`; implementation is routed to a separate Opus context in an isolated worktree.
+- The obsolete recurring job remains paused and therefore cannot run its old prompt. Scheduler controls are not exposed in this agent session, so replacement creation is recorded honestly as pending while this explicitly resumed manual cycle proceeds.
