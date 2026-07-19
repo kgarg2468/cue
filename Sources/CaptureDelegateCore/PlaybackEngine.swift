@@ -16,6 +16,12 @@ public final class PlaybackEngine: NSObject, ObservableObject, AVAudioPlayerDele
     private let player: AVAudioPlayer
     private var updateTimer: Timer?
 
+    var updateTimerForTesting: Timer? { updateTimer }
+
+    func startUpdatesForTesting() {
+        startUpdates()
+    }
+
     public init(data: Data) throws {
         do {
             player = try AVAudioPlayer(data: data)
@@ -25,6 +31,10 @@ public final class PlaybackEngine: NSObject, ObservableObject, AVAudioPlayerDele
         super.init()
         player.prepareToPlay()
         player.delegate = self
+    }
+
+    isolated deinit {
+        updateTimer?.invalidate()
     }
 
     public var duration: TimeInterval {

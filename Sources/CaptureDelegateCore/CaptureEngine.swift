@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import Darwin
 import Foundation
 
 public enum CaptureEngineState: Equatable, Sendable {
@@ -36,6 +37,11 @@ extension AVAudioRecorder: AudioRecording {}
 
 @MainActor
 public final class CaptureEngine: ObservableObject {
+    private struct RecordingOwner {
+        let processIdentifier: Int32
+        let processInstanceIdentity: String
+    }
+
     @Published public private(set) var state: CaptureEngineState = .idle
     @Published public private(set) var elapsed: TimeInterval = 0
     @Published public private(set) var level: Float = 0
@@ -46,6 +52,11 @@ public final class CaptureEngine: ObservableObject {
     private let wallClock: () -> Date
     private let monotonicClock: () -> TimeInterval
     private let schedulesUpdates: Bool
+    private let recordingDirectory: URL
+    private let processIdentifier: Int32
+    private let processLivenessProvider: (Int32) -> Bool
+    private let processInstanceIdentity: String
+    private let processInstanceIdentityProvider: (Int32) -> String?
 
     private var recorder: (any AudioRecording)?
     private var recordingURL: URL?
@@ -61,7 +72,8 @@ public final class CaptureEngine: ObservableObject {
             recorderFactory: Self.makeRecorder(at:),
             wallClock: Date.init,
             monotonicClock: { ProcessInfo.processInfo.systemUptime },
-            schedulesUpdates: true
+            schedulesUpdates: true,
+            recordingDirectory: Self.defaultRecordingDirectory()
         )
     }
 
@@ -70,13 +82,27 @@ public final class CaptureEngine: ObservableObject {
         recorderFactory: @escaping (URL) throws -> any AudioRecording,
         wallClock: @escaping () -> Date,
         monotonicClock: @escaping () -> TimeInterval,
-        schedulesUpdates: Bool
+        schedulesUpdates: Bool,
+        recordingDirectory: URL = CaptureEngine.defaultRecordingDirectory(),
+        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
+        processLivenessProvider: @escaping (Int32) -> Bool = CaptureEngine.isProcessRunning(_:),
+        processInstanceIdentity: String? = nil,
+        processInstanceIdentityProvider: @escaping (Int32) -> String? =
+            CaptureEngine.processStartIdentity(_:)
     ) {
         self.authorizationProvider = authorizationProvider
         self.recorderFactory = recorderFactory
         self.wallClock = wallClock
         self.monotonicClock = monotonicClock
         self.schedulesUpdates = schedulesUpdates
+        self.recordingDirectory = recordingDirectory
+        self.processIdentifier = processIdentifier
+        self.processLivenessProvider = processLivenessProvider
+        self.processInstanceIdentityProvider = processInstanceIdentityProvider
+        self.processInstanceIdentity =
+            processInstanceIdentity
+            ?? processInstanceIdentityProvider(processIdentifier)
+            ?? UUID().uuidString.replacingOccurrences(of: "-", with: "")
     }
 
     public nonisolated static func currentAuthorization() -> MicrophoneAuthorization {
@@ -112,37 +138,47 @@ public final class CaptureEngine: ObservableObject {
             throw CaptureEngineError.permissionDenied
         }
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("CaptureDelegateRecordings", isDirectory: true)
         do {
             try FileManager.default.createDirectory(
-                at: directory,
+                at: recordingDirectory,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o700],
-                ofItemAtPath: directory.path
+                ofItemAtPath: recordingDirectory.path
             )
         } catch {
             throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
         }
 
         let fileURL =
-            directory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("m4a")
+            recordingDirectory
+            .appendingPathComponent(
+                "process-\(processIdentifier)-\(processInstanceIdentity)-\(UUID().uuidString).m4a"
+            )
         let newRecorder: any AudioRecording
         do {
             newRecorder = try recorderFactory(fileURL)
-        } catch let error as CaptureEngineError {
-            throw error
         } catch {
-            throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
+            let factoryError = error
+            do {
+                try removeTemporaryFileIfPresent(at: fileURL)
+            } catch {
+                throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
+            }
+            if let factoryError = factoryError as? CaptureEngineError {
+                throw factoryError
+            }
+            throw CaptureEngineError.audioSessionFailure(factoryError.localizedDescription)
         }
         newRecorder.isMeteringEnabled = true
         guard newRecorder.record() else {
-            try? FileManager.default.removeItem(at: fileURL)
+            do {
+                try removeTemporaryFileIfPresent(at: fileURL)
+            } catch {
+                throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
+            }
             throw CaptureEngineError.audioSessionFailure(
                 "AVAudioRecorder failed to start recording"
             )
@@ -160,6 +196,46 @@ public final class CaptureEngine: ObservableObject {
         isReceivingAudio = false
         state = .recording(startedAt: startedAt)
         scheduleUpdates()
+    }
+
+    public func reconcileStaleRecordings() throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: recordingDirectory.path) else {
+            return
+        }
+        do {
+            let entries = try fileManager.contentsOfDirectory(
+                at: recordingDirectory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: []
+            )
+            for entry in entries {
+                let values = try entry.resourceValues(forKeys: [.isRegularFileKey])
+                guard values.isRegularFile == true else { continue }
+                if let owner = Self.recordingOwner(for: entry) {
+                    if owner.processIdentifier == processIdentifier,
+                        owner.processInstanceIdentity == processInstanceIdentity
+                    {
+                        continue
+                    }
+                    if processLivenessProvider(owner.processIdentifier) {
+                        guard
+                            let liveIdentity = processInstanceIdentityProvider(
+                                owner.processIdentifier
+                            )
+                        else {
+                            continue
+                        }
+                        if liveIdentity == owner.processInstanceIdentity {
+                            continue
+                        }
+                    }
+                }
+                try fileManager.removeItem(at: entry)
+            }
+        } catch {
+            throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
+        }
     }
 
     public func pause() throws {
@@ -206,13 +282,17 @@ public final class CaptureEngine: ObservableObject {
         }
         recorder.stop()
         let duration = accumulatedDuration
-        resetState(deleteTemporaryFile: false)
+        resetState()
         return (recordingURL, captureStartedAt, duration)
     }
 
-    public func discard() {
+    public func discard() throws {
         recorder?.stop()
-        resetState(deleteTemporaryFile: true)
+        let fileToDelete = recordingURL
+        resetState()
+        if let fileToDelete {
+            try removeTemporaryFileIfPresent(at: fileToDelete)
+        }
     }
 
     private static func makeRecorder(at url: URL) throws -> any AudioRecording {
@@ -229,6 +309,62 @@ public final class CaptureEngine: ObservableObject {
             )
         }
         return recorder
+    }
+
+    private static func defaultRecordingDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("CaptureDelegateRecordings", isDirectory: true)
+    }
+
+    private nonisolated static func isProcessRunning(_ processIdentifier: Int32) -> Bool {
+        guard processIdentifier > 0 else { return false }
+        if Darwin.kill(processIdentifier, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
+    }
+
+    private nonisolated static func processStartIdentity(
+        _ processIdentifier: Int32
+    ) -> String? {
+        guard processIdentifier > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let expectedSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            proc_pidinfo(
+                processIdentifier,
+                PROC_PIDTBSDINFO,
+                0,
+                pointer,
+                expectedSize
+            )
+        }
+        guard result == expectedSize else { return nil }
+        return "\(info.pbi_start_tvsec)x\(info.pbi_start_tvusec)"
+    }
+
+    private nonisolated static func recordingOwner(for url: URL) -> RecordingOwner? {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let prefix = "process-"
+        guard stem.hasPrefix(prefix) else { return nil }
+        let components = stem.dropFirst(prefix.count).split(
+            separator: "-",
+            maxSplits: 2,
+            omittingEmptySubsequences: false
+        )
+        guard
+            components.count == 3,
+            let processIdentifier = Int32(components[0]),
+            processIdentifier > 0,
+            !components[1].isEmpty,
+            UUID(uuidString: String(components[2])) != nil
+        else {
+            return nil
+        }
+        return RecordingOwner(
+            processIdentifier: processIdentifier,
+            processInstanceIdentity: String(components[1])
+        )
     }
 
     private func scheduleUpdates() {
@@ -284,9 +420,8 @@ public final class CaptureEngine: ObservableObject {
         self.activeIntervalStartedAt = nil
     }
 
-    private func resetState(deleteTemporaryFile: Bool) {
+    private func resetState() {
         stopUpdates()
-        let fileToDelete = recordingURL
         recorder = nil
         recordingURL = nil
         captureStartedAt = nil
@@ -297,9 +432,15 @@ public final class CaptureEngine: ObservableObject {
         elapsed = 0
         level = 0
         isReceivingAudio = false
+    }
 
-        if deleteTemporaryFile, let fileToDelete {
-            try? FileManager.default.removeItem(at: fileToDelete)
+    private func removeTemporaryFileIfPresent(at url: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            throw CaptureEngineError.audioSessionFailure(error.localizedDescription)
         }
     }
 }

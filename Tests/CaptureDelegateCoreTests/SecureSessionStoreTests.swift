@@ -267,3 +267,81 @@ func diskFailureIsAtomic() throws {
     #expect(FileManager.default.fileExists(atPath: plaintext.path))
     #expect(try Data(contentsOf: fixture.root) == Data("root path is now a file".utf8))
 }
+
+@Test("list skips corrupt sessions and reports per-entry diagnostics")
+func listSkipsCorruptSessionsWithDiagnostics() throws {
+    let fixture = try StoreFixture()
+    defer { fixture.cleanUp() }
+
+    let store = try SecureSessionStore(
+        rootDirectory: fixture.root,
+        keyProvider: FixedKeyProvider()
+    )
+    let healthy = try store.save(
+        audioFileURL: fixture.makeAudio(Data("healthy audio".utf8), named: "healthy"),
+        title: "Healthy",
+        note: "",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+        duration: 1
+    )
+    let corrupt = try store.save(
+        audioFileURL: fixture.makeAudio(Data("corrupt audio".utf8), named: "corrupt"),
+        title: "Corrupt",
+        note: "",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_100),
+        duration: 1
+    )
+    let corruptMetadata = fixture.root
+        .appendingPathComponent(corrupt.id.uuidString, isDirectory: true)
+        .appendingPathComponent("metadata.json.enc")
+    try Data("not encrypted metadata".utf8).write(to: corruptMetadata)
+
+    let result = try store.listWithProblems()
+
+    #expect(result.sessions == [healthy])
+    #expect(result.problems.count == 1)
+    #expect(result.problems.first?.entryName == corrupt.id.uuidString)
+    #expect(result.problems.first?.error == .corruptOrUndecryptable)
+    #expect(try store.list() == [healthy])
+}
+
+@Test("store initialization removes only stale staging directories")
+func initializationRemovesOnlyStaleStagingDirectories() throws {
+    let fixture = try StoreFixture()
+    defer { fixture.cleanUp() }
+
+    try FileManager.default.createDirectory(
+        at: fixture.root,
+        withIntermediateDirectories: true
+    )
+    let sessionID = UUID()
+    let stagingID = UUID()
+    let staleStaging = fixture.root.appendingPathComponent(
+        ".\(sessionID.uuidString).staging-\(stagingID.uuidString)",
+        isDirectory: true
+    )
+    let unrelatedHidden = fixture.root.appendingPathComponent(
+        ".keep-me",
+        isDirectory: true
+    )
+    let stagingLookalike = fixture.root.appendingPathComponent(
+        ".not-a-uuid.staging-\(stagingID.uuidString)",
+        isDirectory: true
+    )
+    try FileManager.default.createDirectory(at: staleStaging, withIntermediateDirectories: false)
+    try Data("partial encrypted data".utf8).write(
+        to: staleStaging.appendingPathComponent("audio.m4a.enc")
+    )
+    try FileManager.default.createDirectory(at: unrelatedHidden, withIntermediateDirectories: false)
+    try FileManager.default.createDirectory(
+        at: stagingLookalike, withIntermediateDirectories: false)
+
+    _ = try SecureSessionStore(
+        rootDirectory: fixture.root,
+        keyProvider: FixedKeyProvider()
+    )
+
+    #expect(!FileManager.default.fileExists(atPath: staleStaging.path))
+    #expect(FileManager.default.fileExists(atPath: unrelatedHidden.path))
+    #expect(FileManager.default.fileExists(atPath: stagingLookalike.path))
+}

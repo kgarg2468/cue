@@ -1,6 +1,16 @@
 import CryptoKit
 import Foundation
 
+public struct SecureSessionListProblem: Equatable, @unchecked Sendable {
+    public let entryName: String
+    public let error: SecureStoreError
+
+    public init(entryName: String, error: SecureStoreError) {
+        self.entryName = entryName
+        self.error = error
+    }
+}
+
 public final class SecureSessionStore: @unchecked Sendable {
     private static let audioFilename = "audio.m4a.enc"
     private static let metadataFilename = "metadata.json.enc"
@@ -23,12 +33,22 @@ public final class SecureSessionStore: @unchecked Sendable {
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
+            try Self.removeStaleStagingDirectories(
+                from: self.rootDirectory,
+                fileManager: fileManager
+            )
         } catch {
             throw SecureStoreError.ioFailure(error.localizedDescription)
         }
     }
 
     public func list() throws -> [CaptureSession] {
+        try listWithProblems().sessions
+    }
+
+    public func listWithProblems() throws -> (
+        sessions: [CaptureSession], problems: [SecureSessionListProblem]
+    ) {
         try lock.withLock {
             let key = try persistentKey()
             let fileManager = FileManager.default
@@ -43,20 +63,46 @@ public final class SecureSessionStore: @unchecked Sendable {
                 throw SecureStoreError.ioFailure(error.localizedDescription)
             }
 
-            return try entries.compactMap { entry in
+            var sessions: [CaptureSession] = []
+            var problems: [SecureSessionListProblem] = []
+            for entry in entries {
                 let values: URLResourceValues
                 do {
                     values = try entry.resourceValues(forKeys: [.isDirectoryKey])
                 } catch {
-                    throw SecureStoreError.ioFailure(error.localizedDescription)
+                    problems.append(
+                        SecureSessionListProblem(
+                            entryName: entry.lastPathComponent,
+                            error: .ioFailure(error.localizedDescription)
+                        )
+                    )
+                    continue
                 }
                 guard values.isDirectory == true else {
-                    return nil
+                    continue
                 }
-                return try loadSession(at: entry, using: key)
-            }.sorted { first, second in
+                do {
+                    sessions.append(try loadSession(at: entry, using: key))
+                } catch let error as SecureStoreError {
+                    problems.append(
+                        SecureSessionListProblem(
+                            entryName: entry.lastPathComponent,
+                            error: error
+                        )
+                    )
+                } catch {
+                    problems.append(
+                        SecureSessionListProblem(
+                            entryName: entry.lastPathComponent,
+                            error: .ioFailure(error.localizedDescription)
+                        )
+                    )
+                }
+            }
+            sessions.sort { first, second in
                 first.createdAt > second.createdAt
             }
+            return (sessions, problems)
         }
     }
 
@@ -171,6 +217,32 @@ public final class SecureSessionStore: @unchecked Sendable {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CaptureDelegate", isDirectory: true)
             .appendingPathComponent("sessions", isDirectory: true)
+    }
+
+    private static func removeStaleStagingDirectories(
+        from rootDirectory: URL,
+        fileManager: FileManager
+    ) throws {
+        let entries = try fileManager.contentsOfDirectory(
+            at: rootDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        )
+        for entry in entries where isStagingDirectoryName(entry.lastPathComponent) {
+            let values = try entry.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory == true else { continue }
+            try fileManager.removeItem(at: entry)
+        }
+    }
+
+    private static func isStagingDirectoryName(_ name: String) -> Bool {
+        guard name.first == ".", let separator = name.range(of: ".staging-") else {
+            return false
+        }
+        let sessionStart = name.index(after: name.startIndex)
+        let sessionID = String(name[sessionStart..<separator.lowerBound])
+        let stagingID = String(name[separator.upperBound...])
+        return UUID(uuidString: sessionID) != nil && UUID(uuidString: stagingID) != nil
     }
 
     private func sessionDirectory(for id: UUID) -> URL {

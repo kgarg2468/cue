@@ -59,6 +59,9 @@ final class AppModel: ObservableObject {
     private var keyMonitor: Any?
     private var runtimeTask: Task<Void, Never>?
     private var savedConfirmationTask: Task<Void, Never>?
+    private var storeMutationTask: Task<Void, Never>?
+    private var terminationObserver: NSObjectProtocol?
+    private var didReconcileTemporaryRecordings = false
     private let hud: CaptureHUDController
 
     init(engine: CaptureEngine) {
@@ -80,16 +83,30 @@ final class AppModel: ObservableObject {
     // MARK: Lifecycle
 
     func onLaunch() {
+        if !didReconcileTemporaryRecordings {
+            didReconcileTemporaryRecordings = true
+            do {
+                try engine.reconcileStaleRecordings()
+            } catch {
+                captureErrorMessage = Self.describe(error)
+            }
+        }
+        installTerminationObserver()
         installKeyMonitor()
         startRuntimeMonitor()
         Task { await reloadSessions() }
     }
 
     func tearDown() {
+        cleanUpLiveRecordingForTermination()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
         }
         keyMonitor = nil
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
+        terminationObserver = nil
         runtimeTask?.cancel()
         savedConfirmationTask?.cancel()
         hud.close()
@@ -114,7 +131,15 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            sessions = try await Task.detached { try store.list() }.value
+            let result = try await Task.detached { try store.listWithProblems() }.value
+            sessions = result.sessions
+            for problem in result.problems {
+                NSLog(
+                    "CaptureDelegate skipped unreadable session %@: %@",
+                    problem.entryName,
+                    String(describing: problem.error)
+                )
+            }
             loadErrorMessage = nil
         } catch {
             loadErrorMessage = Self.describe(error)
@@ -163,6 +188,11 @@ final class AppModel: ObservableObject {
     // MARK: Capture flow — start & permission gate (states 2/3/4)
 
     func requestStartCapture() {
+        guard !isSaving else { return }
+        if pendingCapture != nil {
+            activeSheet = .saveFailure
+            return
+        }
         guard !isCaptureActive else {
             jumpToLiveCapture()
             return
@@ -207,6 +237,15 @@ final class AppModel: ObservableObject {
     }
 
     private func beginRecording() {
+        guard !isSaving else { return }
+        if pendingCapture != nil {
+            activeSheet = .saveFailure
+            return
+        }
+        guard !isCaptureActive else {
+            jumpToLiveCapture()
+            return
+        }
         draftTitle = ""
         draftNote = ""
         do {
@@ -226,13 +265,17 @@ final class AppModel: ObservableObject {
     // MARK: Capture flow — pause / resume (states 4/5)
 
     func togglePauseResume() {
-        switch engine.state {
-        case .recording:
-            try? engine.pause()
-        case .paused:
-            try? engine.resume()
-        case .idle:
-            break
+        do {
+            switch engine.state {
+            case .recording:
+                try engine.pause()
+            case .paused:
+                try engine.resume()
+            case .idle:
+                break
+            }
+        } catch {
+            captureErrorMessage = Self.describe(error)
         }
     }
 
@@ -258,13 +301,14 @@ final class AppModel: ObservableObject {
     }
 
     func retrySave() {
-        guard let pending = pendingCapture else { return }
+        guard !isSaving, let pending = pendingCapture else { return }
         activeSheet = nil
         saveFailureMessage = nil
         performSave(pending)
     }
 
     private func performSave(_ pending: PendingCapture) {
+        guard !isSaving else { return }
         guard let store else {
             saveFailureMessage =
                 storeInitError ?? "The encrypted store could not be opened on this Mac."
@@ -333,11 +377,27 @@ final class AppModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = "Capture \(Formatting.exportStamp(pending.createdAt)).m4a"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+        let fileManager = FileManager.default
+        let stagedDestination = destination.deletingLastPathComponent().appendingPathComponent(
+            ".\(destination.lastPathComponent).export-\(UUID().uuidString)"
+        )
+        defer {
+            do {
+                try fileManager.removeItem(at: stagedDestination)
+            } catch let error as CocoaError where error.code == .fileNoSuchFile {
+                // A successful move/replace consumes the staged sibling.
+            } catch {
+                saveFailureMessage = error.localizedDescription
+                activeSheet = .saveFailure
             }
-            try FileManager.default.copyItem(at: pending.audioFileURL, to: destination)
+        }
+        do {
+            try fileManager.copyItem(at: pending.audioFileURL, to: stagedDestination)
+            if fileManager.fileExists(atPath: destination.path) {
+                _ = try fileManager.replaceItemAt(destination, withItemAt: stagedDestination)
+            } else {
+                try fileManager.moveItem(at: stagedDestination, to: destination)
+            }
             exportConfirmationVisible = true
         } catch {
             saveFailureMessage =
@@ -348,7 +408,17 @@ final class AppModel: ObservableObject {
 
     func discardPendingCapture() {
         if let pending = pendingCapture {
-            try? FileManager.default.removeItem(at: pending.audioFileURL)
+            do {
+                if FileManager.default.fileExists(atPath: pending.audioFileURL.path) {
+                    try FileManager.default.removeItem(at: pending.audioFileURL)
+                }
+            } catch {
+                saveFailureMessage = Self.saveFailureCopy(
+                    for: .ioFailure(error.localizedDescription)
+                )
+                activeSheet = .saveFailure
+                return
+            }
         }
         pendingCapture = nil
         saveFailureMessage = nil
@@ -356,31 +426,88 @@ final class AppModel: ObservableObject {
         activeSheet = nil
     }
 
-    // MARK: Session editing (optimistic, persisted best-effort off the main actor)
+    // MARK: Session editing
 
     func updateTitle(_ title: String, for id: UUID) {
-        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
-        guard sessions[index].title != title else { return }
-        sessions[index].title = title
-        guard let store else { return }
-        Task.detached { try? store.updateTitle(title, for: id) }
+        guard let store else {
+            loadErrorMessage = storeInitError
+            return
+        }
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        enqueueStoreMutation(
+            on: store,
+            mutation: { store in
+                try store.updateTitle(title, for: id)
+            },
+            onSuccess: { [weak self] in
+                guard let self, let index = self.sessions.firstIndex(where: { $0.id == id }) else {
+                    return
+                }
+                self.sessions[index].title = title
+            }
+        )
     }
 
     func updateNote(_ note: String, for id: UUID) {
-        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
-        guard sessions[index].note != note else { return }
-        sessions[index].note = note
-        guard let store else { return }
-        Task.detached { try? store.updateNote(note, for: id) }
+        guard let store else {
+            loadErrorMessage = storeInitError
+            return
+        }
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        enqueueStoreMutation(
+            on: store,
+            mutation: { store in
+                try store.updateNote(note, for: id)
+            },
+            onSuccess: { [weak self] in
+                guard let self, let index = self.sessions.firstIndex(where: { $0.id == id }) else {
+                    return
+                }
+                self.sessions[index].note = note
+            }
+        )
     }
 
     func delete(_ id: UUID) {
-        sessions.removeAll { $0.id == id }
-        if detailPath.last == .session(id) {
-            detailPath.removeLast()
+        guard let store else {
+            loadErrorMessage = storeInitError
+            return
         }
-        guard let store else { return }
-        Task.detached { try? store.delete(id) }
+        enqueueStoreMutation(
+            on: store,
+            mutation: { store in
+                try store.delete(id)
+            },
+            onSuccess: { [weak self] in
+                guard let self else { return }
+                self.sessions.removeAll { $0.id == id }
+                if self.detailPath.last == .session(id) {
+                    self.detailPath.removeLast()
+                }
+            }
+        )
+    }
+
+    private func enqueueStoreMutation(
+        on store: SecureSessionStore,
+        mutation: @escaping @Sendable (SecureSessionStore) throws -> Void,
+        onSuccess: @escaping @MainActor @Sendable () -> Void
+    ) {
+        let previousMutation = storeMutationTask
+        storeMutationTask = Task { [weak self] in
+            await previousMutation?.value
+            do {
+                try await Task.detached {
+                    try mutation(store)
+                }.value
+                onSuccess()
+            } catch {
+                guard let self else { return }
+                let mutationError = Self.describe(error)
+                await self.reloadSessions()
+                self.loadErrorMessage = mutationError
+            }
+        }
     }
 
     /// Decrypt a session's audio directly to memory for playback. Never writes plaintext to disk.
@@ -429,6 +556,28 @@ final class AppModel: ObservableObject {
                 return nil
             }
             return event
+        }
+    }
+
+    private func installTerminationObserver() {
+        guard terminationObserver == nil else { return }
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.cleanUpLiveRecordingForTermination()
+            }
+        }
+    }
+
+    private func cleanUpLiveRecordingForTermination() {
+        guard pendingCapture == nil, !isSaving, isCaptureActive else { return }
+        do {
+            try engine.discard()
+        } catch {
+            captureErrorMessage = Self.describe(error)
         }
     }
 
