@@ -148,3 +148,47 @@ pre-fix behavior for F7/F8. A retest is scheduled for the morning; failing
 that, the user's hands-on pass covers exactly these flows. Note: repackaging
 changed the ad-hoc CDHash, so macOS will re-prompt for microphone on the
 first capture of the new bundle — expected, and itself a re-run of scenario 10.
+
+## Delta retest (2026-07-19, ~02:45–03:15 PDT, machine unlocked by user)
+
+Tested bundle: packaged from the fixed tree at each step (worktree
+`.context/Capture Delegate.app`, verified by process start time + `pgrep`
+path). Driven by real Computer Use (System Events + screencapture) with the
+user present.
+
+- **Relaunch/Today (pass):** fresh launch shows the honest Today copy and the
+  user's own five captures from their 12:32–12:53 AM hands-on session
+  (`delta-01-relaunch-today.png`).
+- **NEW BUG (fixed): display-title search mismatch.** Typing "untitled" in the
+  ⌘K palette and ⌘F search matched the raw stored title — empty for untitled
+  captures — so five visible "Untitled capture" rows were unfindable. Fixed in
+  commit 2daee91: both predicates now match
+  `SessionDisplay.title(...)` + note (`delta-02-palette-inline-results.png`
+  shows the pre-fix miss rendering).
+- **NEW BLOCKER (fixed): palette ghost rows / Enter-target divergence.** With
+  query "untitled", the palette deterministically rendered four stale command
+  rows ("Start capture", "Go to Today", "Go to Moments", "Search captures")
+  plus one session row, while the underlying item array was entirely sessions
+  (`delta-03-palette-ghost-rows.png`; control query "xyz" rendered the empty
+  state correctly, `delta-05-palette-empty-state-control.png`). Empirical
+  proof of the mismatch: pressing Enter with "Start capture" highlighted
+  opened a session detail instead (`delta-04-ghost-row-enter-mismatch.png`).
+  Root cause: `.id(index)` on each row overrode the
+  `ForEach(id: \.element.id)` identity, so the LazyVStack never re-diffed
+  existing rows when typing reshaped the list. Fixed in commit dac0fe0
+  (identity removed; selection scroll now targets the element id). Build,
+  lint, and all 19 core tests green; both bundles repackaged.
+- **Interrupted:** the post-fix visual re-probe of the palette, the
+  retry→saved-detail routing re-run, and the delete-dialog/AX spot checks were
+  halted mid-flight: the user began actively using the machine (the app
+  window was closed while the probe ran, and continuing to inject keystrokes
+  risked typing into the user's foreground apps). These remain open for
+  either an idle-machine re-run or the user's hands-on pass; the fixes
+  themselves are committed and covered by the Sol re-review below.
+- **Gates on the fixed tree (dac0fe0):** full `scripts/verify-m0.sh` parity
+  from a fresh `/tmp` worktree exits 0; independent Sol (gpt-5.6-sol, xhigh)
+  review of commits 2daee91 + dac0fe0 returned **CONFIRM** with all five
+  checks PASS (identity restoration, scrollTo snapshot consistency, Enter
+  alignment, predicate consistency, caption placement); one non-blocking
+  adjacent note about the conditional caption being a lazy-container slow
+  path.
