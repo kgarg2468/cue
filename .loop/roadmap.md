@@ -25,7 +25,7 @@ The chain below is ordered. A milestone may begin only after all listed dependen
 
 - M0 is verified: M0-FOUNDATION-001 passed fresh-login native-window re-verification, and PR `#1` remains merged as `3e6cf85`.
 - M1 is complete through PR #29 (`6f7d647`): process/PTY launch, bounded event streaming and admission, timeout/cancel/pause/resume, process-tree and shutdown cleanup, stdin delivery and waiting-input detection, secret-redacted metadata, isolated worktrees, termination durability, a 1 MiB pending-stdin cap, and authenticated crash-orphan worktree recovery all pass the ADR-007 gate.
-- M1.5 First Capture Journey is the next dependency-ready milestone, but it has not started. The autonomous loop is paused at the user's checkpoint and must not resume without an explicit user instruction.
+- M1.5 First Capture Journey is implemented and packaged; PR #31 is open and paused at the ADR-008 pre-merge user checkpoint (`user_verdict: pending`). The full UX gate ran: Opus contract, Opus implementation, Computer Use on the packaged `.app`, fresh Opus visual review, independent Sol technical review, and a fixed-and-re-confirmed blocker/major pass (ADR-009 records the deliberate deferrals). The loop must not merge or advance to M2 without the user's verdict.
 - A single active milestone PR is permitted.
 - Each completion gate requires linked implementation evidence, verification evidence, and PR status in the ledger.
 - Product progress is a visible vertical slice. Subsequent domain/backend work must ship with its usable app surface; internal-only fixes may unblock a slice but do not count as product progress.
