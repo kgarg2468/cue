@@ -207,3 +207,32 @@ Next cycle: select one next bounded M1 lifecycle slice (pause/resume or descenda
 - Review: Opus 4.8 cross-family PASS with no blocker/major. The first independent Sol final review found one confirmed MAJOR: a forged `.git` pointer could select a stale worktree admin entry in a foreign repository and delete its managed-prefix branch. Fixed with reciprocal canonical backlink authentication and a red-before/green-after cross-repository regression. Final Sol disposition review: PASS, prior MAJOR resolved, no blocker/major remains.
 - Evidence: `.loop/verification/m1/resource-safety/` (red log, three focused green logs, full parity log, review chronology, verification summary). M1 is complete; M2 Domain/persistence is next and has not started.
 - User checkpoint: autonomous cycles are paused after this closeout. Resume only on an explicit user request after hands-on testing.
+
+## Control-plane reset after Cycle 17 — 2026-07-18
+
+Status: approved reset recorded; autonomous product work remains paused
+
+- Preserved the verified M0/M1 closeout and inserted M1.5 First Capture Journey as the next milestone: packaged native app, real microphone capture, pause/resume/stop, minimum Keychain-backed encrypted persistence, Today/Moments/session detail/playback, and relaunch.
+- Replaced backend-first future sequencing with visible vertical slices. Later domain/runtime work must include its user-facing surface; M11 now closes cohesion, accessibility, and polish rather than introducing deferred primary screens.
+- Added the UI-bearing slice gate: exact tested commit/build, named scenarios, real Computer Use on the packaged `.app`, retained `.loop/verification/<milestone>/<slice>/ux/` evidence, mandatory Opus UX contract + SwiftUI implementation + fresh independent visual review, independent Sol technical review, and `user_verdict: pending|approved|rejected`.
+- Kept ADR-007 local parity plus gpt-5.6-sol review and removed GitHub Actions as a future gate. Smoke/process counts, unit tests, previews, and mocks remain supporting evidence only; internal-only fixes are not product progress.
+- Old recurring job `a8a4fe0a` remains recorded as paused. No replacement scheduler exists; cancellation/replacement is pending after this reset and requires an explicit user resume. A UI rejection reopens the same milestone, and unavailable Opus or Computer Use blocks rather than weakens the gate.
+
+## Cycle 18 — M1.5 First Capture Journey started — 2026-07-18
+
+Status: implementation in progress; mandatory user checkpoint remains pre-merge
+
+- The user explicitly approved the UX-first reset and directed implementation through the first real capture checkpoint.
+- Fresh local baseline parity passed before the slice: 26 Rust library, 13 health/socket, 58 lifecycle, and 25 Swift tests, plus release builds and backend health.
+- A read-only fresh Opus 4.8 context authored the decision-complete M1.5 contract at `.loop/verification/m1.5/first-capture/ux/ux-contract.md`; implementation is routed to a separate Opus context in an isolated worktree.
+- The obsolete recurring job remains paused and therefore cannot run its old prompt. Scheduler controls are not exposed in this agent session, so replacement creation is recorded honestly as pending while this explicitly resumed manual cycle proceeds.
+
+## Cycle 18 closeout — M1.5 First Capture Journey paused for user verdict — 2026-07-19
+
+Status: PR #31 open into main; `user_verdict: pending` per ADR-008
+
+- Shipped the first visible product slice: microphone capture with pause/resume and live level, AES-GCM encrypted local session store with on-the-fly decrypting playback, Today/Moments/detail surfaces, menu bar popover, ⌥Space HUD, ⌘K palette with inline capture results, ⌘F search, runtime honesty chip, and the full permission and save-failure journeys. Packaged as ad-hoc-signed `Capture Delegate.app`.
+- Ran the complete ADR-008 UX gate: Opus UX contract, Opus SwiftUI implementation, real Computer Use on the packaged bundle (10 scenarios; screenshots, AX dumps, and `scenario-log.md` retained under `.loop/verification/m1.5/first-capture/ux/`), fresh independent Opus visual review (approve-with-nits), and independent gpt-5.6-sol technical review (REQUEST-CHANGES).
+- Fixed every blocker/major and re-reviewed per cycle-17 precedent: `4f47b78` core lifecycle/single-flight/mutation ordering; `1fea360` F7 inline palette results, F8 retry routing, F5 AX labels, honest copy, capture-named delete dialogs; `2016873` isSaving-through-routing + "encrypted when saved" copy; `c82ed0d` the quit-with-unresolved-save-failure data-loss blocker (save failure renames the temp `held-`; reconciliation always preserves `held-` files; two new red/green tests; 19 core tests green). Sol's final confirmation pass: CONFIRM, all checks passed. Deferrals are ADR-009 with a corrected addendum.
+- Verification: build + strict format lint green; `scripts/verify-m0.sh` exit 0 from a short-path worktree (repo path exceeds macOS SUN_LEN for the handshake socket — recorded limitation, full parity otherwise). The Computer Use delta retest of the post-review fixes was blocked by the locked host at closeout; it is scheduled for the morning and the user's hands-on pass covers the same flows.
+- User testing is fully staged: `Test Current Build.command` launches runtime + app; instructions in `.context/TESTING.md`. Approve → merge PR #31 and plan M2 (transcription/persistence); reject → reopen this slice with findings.

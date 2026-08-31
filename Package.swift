@@ -5,11 +5,13 @@ let package = Package(
     name: "CaptureDelegate",
     platforms: [.macOS(.v14)],
     products: [
+        .library(name: "CaptureDelegateCore", targets: ["CaptureDelegateCore"]),
         .library(name: "CaptureDelegateIPC", targets: ["CaptureDelegateIPC"]),
         .executable(name: "capture-delegate-health", targets: ["CaptureDelegateHealth"]),
         .executable(name: "CaptureDelegateApp", targets: ["CaptureDelegateApp"]),
     ],
     targets: [
+        .target(name: "CaptureDelegateCore"),
         .target(name: "CaptureDelegateIPC"),
         .executableTarget(
             name: "CaptureDelegateHealth",
@@ -17,7 +19,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "CaptureDelegateApp",
-            dependencies: ["CaptureDelegateIPC"]
+            dependencies: ["CaptureDelegateCore", "CaptureDelegateIPC"]
+        ),
+        .testTarget(
+            name: "CaptureDelegateCoreTests",
+            dependencies: ["CaptureDelegateCore"]
         ),
         .testTarget(
             name: "CaptureDelegateIPCTests",
