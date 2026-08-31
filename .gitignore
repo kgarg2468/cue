@@ -1,3 +1,7 @@
 /target/
 /.build/
 /.loop/LOCK
+
+# local loop-operation noise and private context
+.loop/busy/
+.context/
