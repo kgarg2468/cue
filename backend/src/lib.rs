@@ -1,6 +1,6 @@
 mod store;
 
-use crate::store::{Session, Source, Store};
+use crate::store::{RunRecord, Session, Source, Store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +46,7 @@ const LIST_SESSIONS_LIMIT: usize = 50;
 const MAX_SOURCE_TEXT_BYTES: usize = 4096;
 const MAX_SOURCE_SPEAKER_BYTES: usize = 256;
 const LIST_SOURCES_LIMIT: usize = 50;
+const LIST_RUNS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -87,8 +88,10 @@ struct Request {
     // omitted field: only omission means uncategorized.
     #[serde(default, deserialize_with = "deserialize_present")]
     kind: Option<Option<String>>,
-    #[serde(default)]
-    session_id: Option<String>,
+    // Double option as with `kind`: for a run link, only an omitted field means unlinked, so an
+    // explicit null has to stay distinguishable.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    session_id: Option<Option<String>>,
     // Untyped so a float, a negative, or a string is an error frame instead of a
     // dropped connection, matching timeout_milliseconds.
     #[serde(default)]
@@ -157,6 +160,15 @@ struct ListSourcesResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     sources: &'a [Source],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct ListRunsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    runs: &'a [RunRecord],
     truncated: bool,
 }
 
@@ -808,8 +820,10 @@ pub fn run(socket_path: &Path, store_path: &Path) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(mask_result));
     }
 
-    // Durable state must be usable before the socket advertises the service.
+    // Durable state must be usable before the socket advertises the service, and this
+    // backend must be the store's only owner before it may rewrite lifecycle state.
     let store = store::open_store(store_path)?;
+    let _store_owner = store::acquire_store_ownership(store_path)?;
     remove_stale_socket(socket_path)?;
     cleanup_orphaned_worktrees();
     let listener = UnixListener::bind(socket_path)?;
@@ -820,6 +834,12 @@ pub fn run(socket_path: &Path, store_path: &Path) -> io::Result<()> {
         identity: bound_identity,
     };
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+    // Runs still marked running belong to a backend that died mid-run. The store-ownership
+    // lock held above proves no live backend can be rewritten by this sweep, and running it
+    // before the accept loop means no client can read a page that claims a dead run is live.
+    // Startup recovery is mandatory: if the sweep cannot run, the backend must not serve
+    // stale lifecycle state.
+    store.mark_dangling_runs_interrupted()?;
     let worker_slots = WorkerSlots::new(MAX_CONCURRENT_CLIENTS);
     let process_slots = WorkerSlots::new(MAX_CONCURRENT_PROCESSES);
     let active_runs = ActiveRuns::new();
@@ -1126,7 +1146,9 @@ fn handle_connection(
                 // A span is stated in whole non-negative milliseconds; a float, a negative,
                 // or a string is a rejected field, not a rejected connection.
                 let (Some(session_id), Some(start_ms), Some(end_ms)) = (
-                    request.session_id,
+                    // A source always names its session, so an omitted and an explicitly null
+                    // session_id are the same missing field.
+                    request.session_id.flatten(),
                     request.start_ms.as_ref().and_then(milliseconds_field),
                     request.end_ms.as_ref().and_then(milliseconds_field),
                 ) else {
@@ -1183,8 +1205,8 @@ fn handle_connection(
             }
             "list_sources" => {
                 // A page can only be scoped to a session that exists, so a missing and an
-                // unknown session_id are the same answer.
-                let Some(session_id) = request.session_id else {
+                // unknown session_id are the same answer, and so is an explicitly null one.
+                let Some(session_id) = request.session_id.flatten() else {
                     return write_protocol_error(&mut stream, "unknown_session");
                 };
                 match store.session_exists(&session_id) {
@@ -1217,6 +1239,36 @@ fn handle_connection(
                         // Dropping from the end keeps the chronological start of the page.
                         Err(_) if !sources.is_empty() => {
                             sources.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_runs" => {
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut runs = match store.list_runs(LIST_RUNS_LIMIT + 1) {
+                    Ok(runs) => runs,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = runs.len() > LIST_RUNS_LIMIT;
+                runs.truncate(LIST_RUNS_LIMIT);
+                let frame = loop {
+                    let response = ListRunsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_runs_response",
+                        runs: &runs,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // The page is newest-first, so dropping from the end keeps the newest runs.
+                        Err(_) if !runs.is_empty() => {
+                            runs.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),
@@ -1261,6 +1313,23 @@ fn handle_connection(
                     return write_protocol_error(&mut stream, "invalid_start_process");
                 };
                 let timeout = Duration::from_millis(timeout_milliseconds);
+                // A run may stand alone, but a stated link must name a session that exists, and
+                // that is settled before the run id is admitted so a rejected run never occupies
+                // one. As with `kind`, only an omitted field states "no link".
+                let linked_session_id = match request.session_id {
+                    None => None,
+                    Some(None) => {
+                        return write_protocol_error(&mut stream, "invalid_start_process");
+                    }
+                    Some(Some(session_id)) => match store.session_exists(&session_id) {
+                        Ok(true) => Some(session_id),
+                        Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                        Err(error) => {
+                            eprintln!("store read error: {error}");
+                            return write_protocol_error(&mut stream, "store_unavailable");
+                        }
+                    },
+                };
                 let registration = match active_runs.register(run_id.clone()) {
                     Ok(registration) => registration,
                     Err(RegisterRunError::Duplicate) => {
@@ -1310,15 +1379,31 @@ fn handle_connection(
                     );
                     return Err(error);
                 }
+                // The record is written while the id is admitted and before the child exists, so a
+                // backend that dies mid-run leaves a record to mark interrupted.
+                let record = RunRecord::draft(&run_id, linked_session_id.as_deref(), &executable);
+                if let Err(error) = store.insert_run(&record) {
+                    eprintln!("store write error: {error}");
+                    drop(registration);
+                    drop(process_slot);
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                let record_key = RunRecordKey {
+                    store: store.clone(),
+                    id: record.id,
+                };
                 let writer = Arc::new(ClientWriter::new(stream));
-                let worker_writer = Arc::clone(&writer);
-                let worker_run_id = run_id.clone();
+                let terminal = RunTerminal::new(
+                    Arc::clone(&writer),
+                    run_id.clone(),
+                    registration,
+                    Some(record_key.clone()),
+                );
                 if let Err(error) = thread::Builder::new()
                     .name("capture-delegate-process".to_owned())
                     .spawn(move || {
                         let _ = run_process(
-                            worker_writer,
-                            worker_run_id,
+                            terminal,
                             executable,
                             arguments,
                             StartProcessOptions {
@@ -1328,10 +1413,18 @@ fn handle_connection(
                                 worktree_repository,
                             },
                             process_slot,
-                            registration,
                         );
                     })
                 {
+                    // No worker will ever reach a terminal frame, so this record is closed here
+                    // instead of being left to look live until the next restart.
+                    if let Err(error) =
+                        record_key
+                            .store
+                            .finish_run(&record_key.id, None, Some("internal_error"))
+                    {
+                        eprintln!("store write error: {error}");
+                    }
                     let _ = write_client_json_frame(
                         &writer,
                         &RunExitResponse {
@@ -1670,21 +1763,37 @@ struct WorktreeSetupError {
     worktree: Option<RunWorktree>,
 }
 
+/// Where a run's durable record lives, so the run can close it exactly once.
+#[derive(Clone)]
+struct RunRecordKey {
+    store: Store,
+    id: String,
+}
+
 struct RunTerminal {
     writer: Arc<ClientWriter>,
     run_id: String,
     registration: Option<RunRegistration>,
+    /// Taken by the single terminal emission, so the one-shot terminal frame is also a
+    /// one-shot durable close.
+    record: Option<RunRecordKey>,
     worktree: Option<RunWorktree>,
     cleanup_blocker: Option<CleanupBlocker>,
     emitted: bool,
 }
 
 impl RunTerminal {
-    fn new(writer: Arc<ClientWriter>, run_id: String, registration: RunRegistration) -> Self {
+    fn new(
+        writer: Arc<ClientWriter>,
+        run_id: String,
+        registration: RunRegistration,
+        record: Option<RunRecordKey>,
+    ) -> Self {
         Self {
             writer,
             run_id,
             registration: Some(registration),
+            record,
             worktree: None,
             cleanup_blocker: None,
             emitted: false,
@@ -1712,6 +1821,19 @@ impl RunTerminal {
             return Ok(());
         }
         self.emitted = true;
+        // The record is closed before the frame is written — and never while the client stream
+        // is locked — so a client that observes run_exit can already read a finished record.
+        // Store ownership rules out cross-process contention, so a failure here is local store
+        // breakage that retrying cannot fix: it is reported loudly, never withholds the
+        // terminal frame, and the row is corrected by the next startup sweep.
+        if let Some(record) = self.record.take()
+            && let Err(error) =
+                record
+                    .store
+                    .finish_run(&record.id, exit_code.map(i64::from), error_code)
+        {
+            eprintln!("store write error: run record left open: {error}");
+        }
         // The run id must be released before the terminal frame is written so a
         // client that observes run_exit can immediately reuse the id.
         drop(self.registration.take());
@@ -2323,15 +2445,12 @@ fn configure_pty_child(slave_fd: libc::c_int) -> io::Result<()> {
 }
 
 fn run_process(
-    writer: Arc<ClientWriter>,
-    run_id: String,
+    mut terminal: RunTerminal,
     executable: String,
     arguments: Vec<String>,
     options: StartProcessOptions,
     _process_slot: WorkerSlot,
-    registration: RunRegistration,
 ) -> io::Result<()> {
-    let mut terminal = RunTerminal::new(writer, run_id, registration);
     run_with_internal_error_terminal(&mut terminal, |terminal| {
         run_process_inner(terminal, executable, arguments, options)
     })
@@ -3269,8 +3388,12 @@ mod tests {
         peer.set_read_timeout(Some(std::time::Duration::from_millis(20)))
             .expect("read timeout should configure");
         let writer = Arc::new(ClientWriter::new(stream));
-        let mut terminal =
-            RunTerminal::new(Arc::clone(&writer), "internal-run".to_owned(), registration);
+        let mut terminal = RunTerminal::new(
+            Arc::clone(&writer),
+            "internal-run".to_owned(),
+            registration,
+            None,
+        );
 
         let result = run_with_internal_error_terminal(&mut terminal, |_| {
             Err(std::io::Error::other("injected inner failure"))
@@ -3313,6 +3436,7 @@ mod tests {
             Arc::clone(&writer),
             "typed-terminal-run".to_owned(),
             registration,
+            None,
         );
 
         let result = run_with_internal_error_terminal(&mut terminal, |terminal| {
@@ -3357,6 +3481,7 @@ mod tests {
             Arc::clone(&writer),
             "dead-client-run".to_owned(),
             registration,
+            None,
         );
 
         let result = run_with_internal_error_terminal(&mut terminal, |_| {

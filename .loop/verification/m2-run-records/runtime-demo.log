@@ -1,0 +1,47 @@
+# Runtime demo — durable run records on the real release binary (Mon Aug 31 20:44:54 PDT 2026)
+
+## 1. Hand-built v3 store (sessions+kind+sources, user_version 3)
+user_version before: 3
+user_version after open: 4
+
+## 2. Session-linked run completes; unknown session rejected before admission
+{"version":1,"type":"run_exit","run_id":"demo-run","exit_code":0}
+{"version":1,"type":"error","code":"unknown_session"}
+
+## 3. Live run visible as running, then backend SIGKILLed mid-run
+[{"run_id": "doomed", "status": "running", "exit_code": null}, {"run_id": "demo-run", "status": "exited", "exit_code": 0}]
+
+## 4. Restart: doomed run marked interrupted, history intact
+{
+    "version": 1,
+    "type": "list_runs_response",
+    "runs": [
+        {
+            "id": "run-14d6c-18d1159dd0597d20-1",
+            "run_id": "doomed",
+            "executable": "/bin/sleep",
+            "status": "interrupted",
+            "exit_code": null,
+            "started_at_ms": 1788234294592,
+            "ended_at_ms": 1788234295157
+        },
+        {
+            "id": "run-14d6c-18d1159dcf15cdd8-0",
+            "run_id": "demo-run",
+            "session_id": "ses_01",
+            "executable": "/usr/bin/true",
+            "status": "exited",
+            "exit_code": 0,
+            "started_at_ms": 1788234294571,
+            "ended_at_ms": 1788234294586
+        }
+    ],
+    "truncated": false
+}
+
+## 5. Store hygiene
+total 216
+-rw-------@ 1 krishgarg  wheel  24576 Aug 31 20:44 store.sqlite
+-rw-------@ 1 krishgarg  wheel  32768 Aug 31 20:44 store.sqlite-shm
+-rw-------@ 1 krishgarg  wheel  49472 Aug 31 20:44 store.sqlite-wal
+-rw-------@ 1 krishgarg  wheel      0 Aug 31 20:44 store.sqlite.lock

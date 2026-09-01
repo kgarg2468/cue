@@ -31,6 +31,21 @@ const MIGRATIONS: &[&str] = &[
         text TEXT NOT NULL
     );
     CREATE INDEX sources_by_session_and_start ON sources (session_id, start_ms, id)",
+    // A run record is one execution of a process. Client-chosen run ids are reusable, so the
+    // primary key is a fresh record id and run_id is only a label; the index serves the single
+    // read path, which walks every run newest-first.
+    "CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        session_id TEXT REFERENCES sessions(id),
+        executable TEXT NOT NULL,
+        status TEXT NOT NULL,
+        exit_code INTEGER,
+        error_code TEXT,
+        started_at_ms INTEGER NOT NULL,
+        ended_at_ms INTEGER
+    );
+    CREATE INDEX runs_by_start ON runs (started_at_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -61,6 +76,26 @@ pub(crate) struct Source {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) speaker: Option<String>,
     pub(crate) text: String,
+}
+
+/// One execution of a process, durable across restarts so a run outlives the connection that
+/// asked for it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct RunRecord {
+    pub(crate) id: String,
+    pub(crate) run_id: String,
+    /// Absent for a run that is not linked to a session; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_id: Option<String>,
+    pub(crate) executable: String,
+    pub(crate) status: String,
+    /// Always stated, null included, mirroring the terminal run_exit frame.
+    pub(crate) exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    pub(crate) started_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ended_at_ms: Option<i64>,
 }
 
 /// Durable state shared by every connection thread; SQLite serializes writes behind the mutex.
@@ -101,6 +136,24 @@ impl Source {
             end_ms,
             speaker: speaker.map(str::to_owned),
             text: text.to_owned(),
+        }
+    }
+}
+
+impl RunRecord {
+    /// A live record for a run that has just been admitted; the terminal columns stay open
+    /// until the run reaches its single terminal frame.
+    pub(crate) fn draft(run_id: &str, session_id: Option<&str>, executable: &str) -> RunRecord {
+        RunRecord {
+            id: record_id("run"),
+            run_id: run_id.to_owned(),
+            session_id: session_id.map(str::to_owned),
+            executable: executable.to_owned(),
+            status: "running".to_owned(),
+            exit_code: None,
+            error_code: None,
+            started_at_ms: now_milliseconds(),
+            ended_at_ms: None,
         }
     }
 }
@@ -207,6 +260,85 @@ impl Store {
         Ok(sources)
     }
 
+    pub(crate) fn insert_run(&self, run: &RunRecord) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO runs (id, run_id, session_id, executable, status, exit_code,
+                     error_code, started_at_ms, ended_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    run.id,
+                    run.run_id,
+                    run.session_id,
+                    run.executable,
+                    run.status,
+                    run.exit_code,
+                    run.error_code,
+                    run.started_at_ms,
+                    run.ended_at_ms
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// Closes one run record at its terminal frame.
+    pub(crate) fn finish_run(
+        &self,
+        id: &str,
+        exit_code: Option<i64>,
+        error_code: Option<&str>,
+    ) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "UPDATE runs SET status = 'exited', exit_code = ?2, error_code = ?3,
+                     ended_at_ms = ?4 WHERE id = ?1",
+                params![id, exit_code, error_code, now_milliseconds()],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// A record still marked running at open time belongs to a backend that died mid-run:
+    /// nothing will ever close it, so the crash is recorded instead.
+    pub(crate) fn mark_dangling_runs_interrupted(&self) -> io::Result<usize> {
+        self.connection()
+            .execute(
+                "UPDATE runs SET status = 'interrupted', ended_at_ms = ?1 WHERE status = 'running'",
+                params![now_milliseconds()],
+            )
+            .map_err(io::Error::other)
+    }
+
+    pub(crate) fn list_runs(&self, limit: usize) -> io::Result<Vec<RunRecord>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, run_id, session_id, executable, status, exit_code, error_code,
+                     started_at_ms, ended_at_ms FROM runs
+                 ORDER BY started_at_ms DESC, id DESC LIMIT ?1",
+            )
+            .map_err(io::Error::other)?;
+        let runs = statement
+            .query_map([limit as i64], |row| {
+                Ok(RunRecord {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    session_id: row.get(2)?,
+                    executable: row.get(3)?,
+                    status: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    error_code: row.get(6)?,
+                    started_at_ms: row.get(7)?,
+                    ended_at_ms: row.get(8)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<RunRecord>>>()
+            .map_err(io::Error::other)?;
+        Ok(runs)
+    }
+
     fn connection(&self) -> MutexGuard<'_, Connection> {
         self.connection
             .lock()
@@ -278,6 +410,39 @@ fn acquire_open_lock(path: &Path) -> io::Result<fs::File> {
         }
         thread::sleep(BUSY_RETRY_INTERVAL);
     }
+}
+
+/// Exclusive, lifetime ownership of a store by one backend process. Held for as long as the
+/// returned handle lives; the kernel releases it when the process exits, however it exits.
+/// Binding a socket proves nothing about the store, so the sweep of dangling runs (and every
+/// later write) is only safe once this lock is held. The lock is keyed by the canonical store
+/// path — a symlink alias must contend on the same lock, not mint its own — which requires the
+/// store file to already exist (call after `open_store`).
+pub(crate) fn acquire_store_ownership(path: &Path) -> io::Result<fs::File> {
+    let mut owner_path = path.canonicalize()?.into_os_string();
+    owner_path.push(".owner");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&owner_path)?;
+    // SAFETY: `file` owns a valid descriptor for the flock call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(file);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "store {} is already owned by another backend",
+                path.display()
+            ),
+        ));
+    }
+    Err(error)
 }
 
 /// Switching journal modes needs a brief exclusive lock that SQLite reports as busy instead of
@@ -545,6 +710,38 @@ mod tests {
                 .expect("sources should list")
                 .is_empty(),
             "a session written before sources existed must survive with no sources"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_three_store_adds_runs_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before run records existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..3] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before runs', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 3)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert!(
+            store.list_runs(1).expect("runs should list").is_empty(),
+            "a store written before runs existed must survive with no run records"
         );
     }
 

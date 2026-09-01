@@ -1,9 +1,9 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -181,6 +181,46 @@ fn list_sources(socket_path: &Path, session_id: &str) -> serde_json::Value {
     assert_eq!(response["version"], 1);
     assert_eq!(response["type"], "list_sources_response");
     response
+}
+
+/// Streams a whole process run and returns its terminal run_exit frame.
+fn run_process(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("start_process");
+    let mut stream = UnixStream::connect(socket_path).expect("run client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read deadline should be configured");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    for line in BufReader::new(stream).lines() {
+        let frame: serde_json::Value =
+            serde_json::from_str(&line.expect("frame should read")).expect("frame should be JSON");
+        if frame["type"] == "run_exit" || frame["type"] == "error" {
+            return frame;
+        }
+    }
+    panic!("run should terminate with run_exit or an error frame");
+}
+
+fn list_runs(socket_path: &Path) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_runs"}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_runs_response");
+    response
+}
+
+fn runs_named<'a>(page: &'a serde_json::Value, run_id: &str) -> Vec<&'a serde_json::Value> {
+    page["runs"]
+        .as_array()
+        .expect("runs should be an array")
+        .iter()
+        .filter(|run| run["run_id"] == run_id)
+        .collect()
 }
 
 fn mode_of(path: &Path) -> u32 {
@@ -680,6 +720,415 @@ fn list_sources_responses_are_bounded_with_truncation_reported() {
     assert_eq!(
         sources[0]["start_ms"], 0,
         "byte truncation must keep the chronological beginning"
+    );
+}
+
+#[test]
+fn process_runs_persist_terminal_records_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("runs.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let session_id = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Linked session");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+
+        let linked = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "linked-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": session_id}),
+        );
+        assert_eq!(linked["type"], "run_exit", "linked run should be admitted");
+        assert_eq!(linked["exit_code"], 0);
+        let failing = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "plain-run", "executable": "/usr/bin/false",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(failing["exit_code"], 1);
+        // Client-chosen run ids are reusable; each use must persist its own record.
+        let reused = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "plain-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(reused["exit_code"], 0);
+        let timed_out = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "late-run", "executable": "/bin/sleep",
+                "arguments": ["5"], "timeout_milliseconds": 100}),
+        );
+        assert_eq!(timed_out["error_code"], "timed_out");
+
+        let unknown = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "orphan-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": "ses_missing"}),
+        );
+        assert_eq!(
+            unknown,
+            serde_json::json!({"version": 1, "type": "error", "code": "unknown_session"}),
+            "a run for a nonexistent session must be rejected before admission"
+        );
+        let null_link = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "null-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": null}),
+        );
+        assert_eq!(
+            null_link["code"], "invalid_start_process",
+            "an explicit null session link must be rejected, got {null_link}"
+        );
+        backend.stop();
+        session_id
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_runs(&restarted.socket_path);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["runs"].as_array().expect("runs array").len(),
+        4,
+        "only admitted runs should persist, got {page}"
+    );
+
+    let linked = runs_named(&page, "linked-run");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0]["executable"], "/usr/bin/true");
+    assert_eq!(linked[0]["status"], "exited");
+    assert_eq!(linked[0]["exit_code"], 0);
+    assert_eq!(linked[0]["session_id"], session_id.as_str());
+    assert!(
+        linked[0].get("error_code").is_none(),
+        "a clean exit must omit error_code, got {}",
+        linked[0]
+    );
+    assert!(
+        linked[0]["started_at_ms"].as_i64().unwrap_or_default() > 0,
+        "started_at_ms should be a positive epoch timestamp"
+    );
+    assert!(
+        linked[0]["ended_at_ms"].as_i64().unwrap_or_default()
+            >= linked[0]["started_at_ms"].as_i64().unwrap_or_default(),
+        "ended_at_ms should not precede started_at_ms"
+    );
+
+    let reused = runs_named(&page, "plain-run");
+    assert_eq!(reused.len(), 2, "each reuse of a run id persists a record");
+    assert!(
+        reused[0]["id"] != reused[1]["id"],
+        "run records need distinct stable ids"
+    );
+    assert!(
+        reused
+            .iter()
+            .all(|run| run.get("session_id").is_none() && run["status"] == "exited"),
+        "unlinked runs must omit session_id, got {reused:?}"
+    );
+
+    let late = runs_named(&page, "late-run");
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0]["status"], "exited");
+    assert_eq!(late[0]["error_code"], "timed_out");
+    assert!(
+        late[0]["exit_code"].is_null() || late[0]["exit_code"].as_i64().is_some(),
+        "exit_code reflects whatever the terminal frame reported"
+    );
+
+    assert!(
+        runs_named(&page, "orphan-run").is_empty() && runs_named(&page, "null-run").is_empty(),
+        "rejected runs must not persist"
+    );
+}
+
+#[test]
+fn dangling_running_records_are_marked_interrupted_on_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("interrupted.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    {
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let mut stream =
+            UnixStream::connect(&backend.socket_path).expect("run client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read deadline should be configured");
+        let request = serde_json::json!({"version": 1, "type": "start_process",
+            "run_id": "doomed-run", "executable": "/bin/sleep", "arguments": ["30"],
+            "timeout_milliseconds": 60_000});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        // Wait for admission by observing the persisted record itself: the row
+        // is inserted pre-spawn, so it appears as "running" within milliseconds.
+        let deadline = Instant::now() + STARTUP_DEADLINE;
+        loop {
+            let page = list_runs(&backend.socket_path);
+            if runs_named(&page, "doomed-run")
+                .first()
+                .is_some_and(|run| run["status"] == "running")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the live run should become visible as running, got {page}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // BackendProcess::stop SIGKILLs the backend: no terminal update can run.
+    }
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_runs(&restarted.socket_path);
+    let doomed = runs_named(&page, "doomed-run");
+    assert_eq!(doomed.len(), 1, "the admitted run should have persisted");
+    assert_eq!(
+        doomed[0]["status"], "interrupted",
+        "a run that was live at crash time must be marked interrupted, got {}",
+        doomed[0]
+    );
+    assert!(
+        doomed[0]["ended_at_ms"].as_i64().unwrap_or_default() > 0,
+        "interruption should stamp ended_at_ms"
+    );
+    assert!(
+        doomed[0].get("error_code").is_none() || doomed[0]["error_code"] == "interrupted",
+        "got {}",
+        doomed[0]
+    );
+}
+
+#[test]
+fn a_duplicate_launch_cannot_interrupt_a_live_backends_runs() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("dup.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("run client should connect");
+    let request = serde_json::json!({"version": 1, "type": "start_process",
+        "run_id": "long-run", "executable": "/bin/sleep", "arguments": ["30"],
+        "timeout_milliseconds": 60_000});
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    loop {
+        let page = list_runs(&backend.socket_path);
+        if runs_named(&page, "long-run")
+            .first()
+            .is_some_and(|run| run["status"] == "running")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "run should become visible");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // A second backend on the same socket and store must fail to start without
+    // touching the live backend's durable records.
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .output()
+        .expect("duplicate backend should run to completion");
+    assert!(
+        !duplicate.status.success(),
+        "a duplicate launch must refuse to start"
+    );
+
+    let page = list_runs(&backend.socket_path);
+    let run = runs_named(&page, "long-run");
+    assert_eq!(
+        run[0]["status"], "running",
+        "a duplicate launch must not corrupt the live backend's records, got {}",
+        run[0]
+    );
+
+    // Reap the sleep worker while the backend is still its parent; the
+    // teardown SIGKILL alone would orphan it for the rest of its timeout.
+    let reaped = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string(), "sleep"])
+        .status()
+        .expect("pkill should run");
+    assert!(reaped.success(), "the sleep worker should be reaped");
+}
+
+#[test]
+fn a_second_backend_on_the_same_store_cannot_start() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("owner.sock");
+    let other_socket = fixture.path("other.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("run client should connect");
+    let request = serde_json::json!({"version": 1, "type": "start_process",
+        "run_id": "owned-run", "executable": "/bin/sleep", "arguments": ["30"],
+        "timeout_milliseconds": 60_000});
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    loop {
+        let page = list_runs(&backend.socket_path);
+        if runs_named(&page, "owned-run")
+            .first()
+            .is_some_and(|run| run["status"] == "running")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "run should become visible");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Binding a different socket must not grant the store: ownership is per
+    // store, not per socket path — and per underlying file, not per spelling,
+    // so a symlink alias of the store must contend on the same lock.
+    assert_takeover_refused(&store_path, &other_socket);
+    let alias_path = fixture.path("alias.sqlite");
+    std::os::unix::fs::symlink(&store_path, &alias_path).expect("alias should link");
+    assert_takeover_refused(&alias_path, &other_socket);
+
+    let page = list_runs(&backend.socket_path);
+    assert_eq!(
+        runs_named(&page, "owned-run")[0]["status"],
+        "running",
+        "a refused takeover must not corrupt the owner's records"
+    );
+
+    // Reap the sleep worker while the backend is still its parent; the
+    // teardown SIGKILL alone would orphan it for the rest of its timeout.
+    let reaped = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string(), "sleep"])
+        .status()
+        .expect("pkill should run");
+    assert!(reaped.success(), "the sleep worker should be reaped");
+}
+
+fn assert_takeover_refused(store_path: &Path, socket_path: &Path) {
+    let mut second = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("second backend should spawn");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    let status = loop {
+        match second.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = second.kill();
+                let _ = second.wait();
+                panic!("a second backend on an owned store must exit, not serve");
+            }
+            Err(error) => panic!("backend status should be readable: {error}"),
+        }
+    };
+    assert!(!status.success(), "store takeover must be refused");
+    let mut stderr = String::new();
+    second
+        .stderr
+        .take()
+        .expect("stderr should be captured")
+        .read_to_string(&mut stderr)
+        .expect("stderr should be readable");
+    assert!(
+        stderr.contains("already owned by another backend"),
+        "refusal must name store ownership, got: {stderr}"
+    );
+    let _ = fs::remove_file(socket_path);
+}
+
+#[test]
+fn a_failing_interruption_sweep_prevents_startup() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badsweep.sock");
+    let store_path = fixture.path("store.sqlite");
+    {
+        // A store whose runs relation cannot be updated: the sweep must fail
+        // and the backend must refuse to serve rather than show stale rows.
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        drop(backend);
+    }
+    let output = Command::new("sqlite3")
+        .arg(&store_path)
+        .arg("ALTER TABLE runs RENAME TO runs_real; CREATE VIEW runs AS SELECT * FROM runs_real;")
+        .output()
+        .expect("sqlite3 should rewrite the store");
+    assert!(output.status.success(), "store rewrite should succeed");
+
+    let mut crippled = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .spawn()
+        .expect("backend should spawn");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    let status = loop {
+        match crippled.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = crippled.kill();
+                let _ = crippled.wait();
+                panic!("a backend that cannot complete startup recovery must exit, not serve");
+            }
+            Err(error) => panic!("backend status should be readable: {error}"),
+        }
+    };
+    assert!(
+        !status.success(),
+        "a failed startup recovery must exit non-zero"
+    );
+}
+
+#[test]
+fn list_runs_responses_are_bounded_with_truncation_reported() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("boundedruns.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    for index in 0..54 {
+        let padding = "x".repeat(90);
+        let exit = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": format!("bounded-{index:02}-{padding}"),
+                "executable": "/usr/bin/true", "arguments": [],
+                "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(exit["type"], "run_exit");
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_runs"}),
+    );
+    assert!(frame.len() <= 8192, "frame should stay bounded");
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["type"], "list_runs_response");
+    assert_eq!(response["truncated"], true);
+    let runs = response["runs"].as_array().expect("runs array");
+    assert!(
+        !runs.is_empty() && runs.len() < 54,
+        "the byte budget should deliver a bounded non-empty page, got {}",
+        runs.len()
     );
 }
 

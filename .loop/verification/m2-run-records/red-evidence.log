@@ -1,0 +1,50 @@
+# M2 run-records slice — red evidence (cycle 22, 2026-09-01)
+
+2 new protocol tests vs merged main ce4ee97 (no run persistence, no list_runs):
+
+
+failures:
+    dangling_running_records_are_marked_interrupted_on_restart
+    process_runs_persist_terminal_records_and_survive_a_restart
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 5.23s
+
+error: test failed, to rerun pass `--test persistence`
+
+--- Round-1 review fixes (Sol: 3 MAJOR, 1 MINOR) — red runs BEFORE fixes ---
+
+failures:
+    a_duplicate_launch_cannot_interrupt_a_live_backends_runs
+    a_failing_interruption_sweep_prevents_startup
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 15 filtered out; finished in 5.35s
+
+error: test failed, to rerun pass `--test persistence`
+running 1 test
+test list_runs_responses_are_bounded_with_truncation_reported ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 1.22s
+
+(list_runs bounds test passed immediately: coverage, not a behavior change)
+
+=== Round 3 red (a_second_backend_on_the_same_store_cannot_start, pre owner-lock) ===
+failures:
+    a_second_backend_on_the_same_store_cannot_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 5.24s
+
+error: test failed, to rerun pass `--test persistence`
+
+=== Round 4 red (symlink alias bypasses lexical owner-lock keying, pre canonicalize) ===
+
+thread 'a_second_backend_on_the_same_store_cannot_start' (24141210) panicked at backend/tests/persistence.rs:1025:17:
+a second backend on an owned store must exit, not serve
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_second_backend_on_the_same_store_cannot_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 5.35s
+
+error: test failed, to rerun pass `--test persistence`
