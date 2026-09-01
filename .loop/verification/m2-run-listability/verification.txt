@@ -40,3 +40,16 @@ terminal single-item list_runs frame, not the record as admitted.
 Fable-direct implementation (~70 lines including the red test): this is
 review-remediation-class work carried from PR #41, below the delegation
 threshold.
+
+## Review round 1 (Sol): FAIL, 1 MAJOR + 1 MINOR — both fixed
+- MAJOR: probe ended_at_ms copied started_at_ms, but termination resamples
+  the wall clock, which a forward clock step can widen past the start's
+  serialized width. Probe now uses i64::MAX (the serialized ceiling). No
+  black-box red test is possible without clock control; correctness is
+  static (i64::MAX is the maximum width the field can serialize).
+- MINOR: the sweep only exercised clean exits. It now sweeps BOTH terminal
+  shapes per size — /bin/echo (exit_code, no error_code) and a nonexistent
+  executable (null exit_code, persisted error_code spawn_failed) — and
+  asserts the persisted error code survives listing, so a probe that stops
+  budgeting persisted error codes fails the test.
+- verify-m0-r2.log exit 0 after remediation; 131 Rust tests green.

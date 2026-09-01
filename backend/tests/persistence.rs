@@ -1545,36 +1545,57 @@ fn every_admitted_run_stays_listable_after_termination() {
     let store_path = fixture.path("store.sqlite");
     let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
 
+    // Both terminal shapes are swept: a clean exit (exit_code, no error_code)
+    // and a spawn failure (null exit_code, persisted error_code) — a probe
+    // that stopped budgeting persisted error codes would fail the second.
     let (mut accepted, mut rejected) = (0, 0);
     for nulls in (1240..1330).step_by(3) {
-        let run_id = "\u{0}".repeat(nulls);
-        let response = run_process(
-            &backend.socket_path,
-            serde_json::json!({"run_id": run_id, "executable": "/bin/echo",
-                "arguments": ["boundary"], "timeout_milliseconds": 60_000}),
-        );
-        if response["type"] == "error" {
-            assert_eq!(
-                response["code"], "invalid_start_process",
-                "a run rejected at the boundary must be a clean validation error"
+        for (prefix, executable, check) in [
+            ("e", "/bin/echo", "clean"),
+            (
+                "s",
+                "/nonexistent/capture-delegate-spawn-probe",
+                "spawn_failed",
+            ),
+        ] {
+            let run_id = format!("{prefix}{}", "\u{0}".repeat(nulls));
+            let response = run_process(
+                &backend.socket_path,
+                serde_json::json!({"run_id": run_id, "executable": executable,
+                    "arguments": ["boundary"], "timeout_milliseconds": 60_000}),
             );
-            rejected += 1;
-            continue;
+            if response["type"] == "error" && response["code"] == "invalid_start_process" {
+                rejected += 1;
+                continue;
+            }
+            if check == "clean" {
+                assert_eq!(
+                    response["exit_code"], 0,
+                    "the probe run should exit cleanly"
+                );
+            } else {
+                assert_eq!(
+                    response["error_code"], "spawn_failed",
+                    "the spawn probe should fail to spawn, got {response}"
+                );
+            }
+            accepted += 1;
+            // The just-terminated run is the newest record, so it must head the
+            // newest-first page; the byte budget pops from the end, never the head.
+            let page = list_runs(&backend.socket_path);
+            let head = &page["runs"].as_array().expect("runs array")[0];
+            assert_eq!(
+                head["run_id"], run_id,
+                "an admitted run must stay listable after termination, nulls={nulls} ({check})"
+            );
+            assert_eq!(head["status"], "exited");
+            if check == "spawn_failed" {
+                assert_eq!(
+                    head["error_code"], "spawn_failed",
+                    "the persisted error code must survive listing, nulls={nulls}"
+                );
+            }
         }
-        assert_eq!(
-            response["exit_code"], 0,
-            "the probe run should exit cleanly"
-        );
-        accepted += 1;
-        // The just-terminated run is the newest record, so it must head the
-        // newest-first page; the byte budget pops from the end, never the head.
-        let page = list_runs(&backend.socket_path);
-        let head = &page["runs"].as_array().expect("runs array")[0];
-        assert_eq!(
-            head["run_id"], run_id,
-            "an admitted run must stay listable after termination, nulls={nulls}"
-        );
-        assert_eq!(head["status"], "exited");
     }
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");

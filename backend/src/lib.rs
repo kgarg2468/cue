@@ -1551,12 +1551,14 @@ fn handle_connection(
                 // terminal single-item list frame — an accepted run stays listable for its
                 // whole lifecycle. "interrupted" is the longest status; the error code gets
                 // headroom from the longest code in the protocol even though it never
-                // persists today; exit codes are at worst a full negative i32.
+                // persists today; exit codes are at worst a full negative i32; the end
+                // timestamp is resampled from the wall clock at termination, which a forward
+                // clock step can widen past the start's width, so only i64::MAX bounds it.
                 let mut probe = record.clone();
                 probe.status = "interrupted".to_owned();
                 probe.exit_code = Some(i64::from(i32::MIN));
                 probe.error_code = Some("capacity_exhausted".to_owned());
-                probe.ended_at_ms = Some(record.started_at_ms);
+                probe.ended_at_ms = Some(i64::MAX);
                 let list_probe = ListRunsResponse {
                     version: PROTOCOL_VERSION,
                     response_type: "list_runs_response",

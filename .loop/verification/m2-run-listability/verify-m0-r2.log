@@ -1,0 +1,304 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+   Compiling capture_delegate_backend v0.1.0 (/Users/krishgarg/conductor/workspaces/cue/moroni/backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running unittests src/lib.rs (target/debug/deps/capture_delegate_backend-60a180871d494e46)
+
+running 35 tests
+test tests::active_run_registry_rejects_duplicates_and_releases_ids_on_teardown ... ok
+test tests::benign_output_is_not_changed_by_redaction ... ok
+test store::tests::opening_a_newer_store_fails_without_touching_the_data ... ok
+test store::tests::a_pre_existing_parent_directory_keeps_its_permissions ... ok
+test tests::cleanup_blocker_keeps_shutdown_waiting_after_run_id_release ... ok
+test tests::cleanup_does_not_unlink_replacement_socket ... ok
+test store::tests::opening_a_version_one_store_adds_kinds_without_disturbing_its_rows ... ok
+test store::tests::opening_a_version_two_store_adds_sources_without_disturbing_its_rows ... ok
+test tests::closing_stdin_rejects_later_input ... ok
+test tests::completed_child_wins_over_a_pending_cancellation ... ok
+test tests::completed_child_wins_over_an_elapsed_timeout ... ok
+test store::tests::reopening_a_store_does_not_re_run_migrations ... ok
+test store::tests::opening_a_new_store_applies_every_migration ... ok
+test tests::exhausted_process_slots_emit_a_terminal_capacity_failure_without_waiting ... ok
+test store::tests::opening_a_version_three_store_adds_runs_without_disturbing_its_rows ... ok
+test tests::injected_internal_error_writes_nothing_after_client_death ... ok
+test tests::nonexistent_executable_emits_a_structured_terminal_frame ... ok
+test store::tests::opening_a_version_four_store_adds_markers_without_disturbing_its_rows ... ok
+test tests::output_scalar_split_at_read_boundary_is_not_corrupted ... ok
+test tests::pausing_before_the_process_group_is_known_records_the_pause_without_signalling ... ok
+test tests::pending_stdin_capacity_rejection_is_atomic_and_closed_takes_precedence ... ok
+test tests::cat_process_outputs_before_one_exit_frame ... ok
+test tests::input_buffered_before_stdin_is_published_is_delivered_in_order ... ok
+test tests::shutdown_cancels_existing_runs_and_rejects_new_registrations ... ok
+test tests::secret_pattern_classes_are_redacted_and_counted ... ok
+Initialized empty Git repository in /Users/krishgarg/conductor/workspaces/cue/moroni/target/branch-owner-1788241817443284000/repository/.git/
+test tests::bounded_command_runner_kills_and_reaps_a_hung_child ... ok
+Initialized empty Git repository in /Users/krishgarg/conductor/workspaces/cue/moroni/target/orphan-forged-metadata-50071-1788241817445861000/foreign-repository/.git/
+Initialized empty Git repository in /Users/krishgarg/conductor/workspaces/cue/moroni/target/worktree-owner-50071-1788241817447897000/repository/.git/
+Initialized empty Git repository in /Users/krishgarg/conductor/workspaces/cue/moroni/target/orphan-cleanup-50071-1788241817446693000/repository/.git/
+test tests::injected_internal_error_emits_one_terminal_frame_and_releases_the_run_id ... ok
+[main (root-commit) 36d3f98] initial
+[main (root-commit) 36d3f98] initial
+[main (root-commit) 36d3f98] initial
+[main (root-commit) 36d3f98] initial
+test tests::typed_terminal_frame_suppresses_the_internal_error_fallback ... ok
+Preparing worktree (new branch 'capture-delegate/run-foreign-target')
+Switched to a new branch 'capture-delegate/preexisting'
+Preparing worktree (new branch 'capture-delegate/run-dead-owner')
+HEAD is now at 36d3f98 initial
+HEAD is now at 36d3f98 initial
+Preparing worktree (new branch 'capture-delegate/run-live-owner')
+HEAD is now at 36d3f98 initial
+36d3f989fa8e2706699575dc790b5909e64b5601
+test tests::cleanup_preserves_a_branch_the_worktree_did_not_create ... ok
+Deleted branch capture-delegate/run-foreign-target (was 36d3f98).
+Preparing worktree (new branch 'capture-delegate/run-no-sidecar')
+test tests::orphan_cleanup_rejects_forged_repository_metadata ... ok
+HEAD is now at 36d3f98 initial
+Preparing worktree (new branch 'keep-this-branch')
+test tests::run_worktree_owner_sidecar_tracks_its_lifecycle ... ok
+HEAD is now at 36d3f98 initial
+test store::tests::a_version_bump_during_a_blocked_open_is_rejected_without_conversion ... ok
+test tests::orphan_cleanup_removes_only_dead_managed_worktrees_and_owned_branches ... ok
+test tests::client_writer_stops_after_the_first_failed_frame_write ... ok
+test tests::streaming_write_outlives_the_request_write_timeout ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+
+     Running unittests src/main.rs (target/debug/deps/capture_delegate_backend-332ae256d89ecf5c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/health_socket.rs (target/debug/deps/health_socket-3f934a03b88f8a99)
+
+running 13 tests
+test incomplete_client_does_not_terminate_service ... ok
+test stalled_client_does_not_monopolize_accept_loop ... ok
+test health_request_receives_ok_response_before_deadline ... ok
+test disconnected_client_does_not_terminate_service ... ok
+test response_write_failure_does_not_terminate_service ... ok
+test incompatible_protocol_version_receives_actionable_error_frame ... ok
+test bound_socket_is_private_regardless_of_umask ... ok
+test malformed_client_does_not_terminate_service ... ok
+test oversized_unterminated_client_is_bounded_and_service_survives ... ok
+test valid_but_unterminated_request_is_rejected_and_service_survives ... ok
+test unknown_request_type_receives_actionable_error_frame ... ok
+test stalled_clients_are_backpressured_by_bounded_worker_pool ... ok
+test byte_dribbling_client_is_closed_by_total_frame_deadline_and_service_survives ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/persistence.rs (target/debug/deps/persistence-27d2f1411c3aa667)
+
+running 25 tests
+test created_sessions_are_listed_newest_first ... ok
+test escape_heavy_titles_cannot_produce_an_oversized_create_response ... ok
+test a_duplicate_launch_cannot_interrupt_a_live_backends_runs ... ok
+backend error: cannot modify runs because it is a view
+test dangling_running_records_are_marked_interrupted_on_restart ... ok
+test invalid_session_titles_are_rejected_with_an_error_frame ... ok
+test invalid_markers_are_rejected_before_persisting ... ok
+test a_failing_interruption_sweep_prevents_startup ... ok
+test invalid_source_references_are_rejected_before_persisting ... ok
+test a_second_backend_on_the_same_store_cannot_start ... ok
+test missing_store_argument_uses_the_default_application_support_path ... ok
+test list_markers_responses_are_bounded_with_truncation_reported ... ok
+test session_kinds_are_persisted_and_survive_a_restart ... ok
+test list_sources_responses_are_bounded_with_truncation_reported ... ok
+test list_sessions_responses_are_bounded_with_truncation_reported ... ok
+test sessions_survive_a_backend_restart ... ok
+test source_references_persist_chronologically_and_survive_a_restart ... ok
+test store_and_its_parent_directory_are_private ... ok
+test unknown_session_kinds_are_rejected_with_an_error_frame ... ok
+test user_markers_persist_chronologically_and_survive_a_restart ... ok
+test process_runs_persist_terminal_records_and_survive_a_restart ... ok
+test every_accepted_source_is_singly_listable ... ok
+test every_accepted_marker_is_singly_listable ... ok
+test list_runs_responses_are_bounded_with_truncation_reported ... ok
+test every_accepted_session_is_singly_listable ... ok
+test every_admitted_run_stays_listable_after_termination ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+
+     Running tests/process_lifecycle.rs (target/debug/deps/process_lifecycle-f89387241653db17)
+
+running 58 tests
+test cat_streams_output_before_one_terminal_exit_frame ... ok
+test cat_preserves_a_utf8_scalar_split_at_the_output_read_boundary ... ok
+test close_stdin_establishes_a_stable_input_boundary ... ok
+test cancel_on_a_separate_connection_preserves_prior_output_and_emits_cancelled_terminal_last ... ok
+test cancel_kills_descendant_processes ... ok
+test input_controls_on_unknown_runs_return_not_found ... ok
+test inherited_output_pipes_do_not_delay_the_terminal_frame ... ok
+kill: 50942: No such process
+kill: 50942: No such process
+test disconnecting_from_yes_stops_the_child_and_leaves_the_backend_responsive ... ok
+test cancellation_and_timeout_races_emit_one_terminal_without_hanging ... ok
+test duplicate_active_run_id_is_rejected_and_reusable_after_full_teardown ... ok
+test health_remains_prompt_while_eight_process_slots_are_occupied ... ok
+test input_wait_rejects_invalid_values ... ok
+test cancel_succeeds_while_a_paused_runs_stdin_pipe_is_full ... ok
+test invalid_timeouts_are_rejected_before_process_admission ... ok
+test malformed_input_controls_return_typed_errors ... ok
+test natural_leader_exit_kills_descendant_processes ... ok
+test non_pty_stderr_stays_separate ... ok
+test non_reading_client_does_not_wedge_run_termination ... ok
+test nonexistent_executable_returns_one_spawn_failure_terminal_frame ... ok
+test oversized_run_metadata_is_truncated_before_run_exit ... ok
+test pause_and_resume_control_the_run_process_group ... ok
+test pause_unknown_run_and_malformed_pause_return_typed_responses ... ok
+test input_wait_fires_for_a_pty_run ... ok
+test capacity_exhausted_input_keeps_the_control_connection_usable ... ok
+test input_wait_fires_for_a_quiet_pipe_run ... ok
+test pty_cancel_kills_the_process_group ... ok
+test pty_close_stdin_flushes_a_partial_line_to_eof ... ok
+test pty_output_is_redacted_and_counted ... ok
+test pty_merges_stderr_into_stdout ... ok
+test pty_run_sees_a_controlling_tty ... ok
+test pty_input_round_trip_with_echo_disabled ... ok
+test secrets_are_redacted_from_streamed_output ... ok
+test run_metadata_frame_precedes_run_exit_with_process_details ... ok
+test send_input_and_close_stdin_drive_a_cat_run_to_natural_exit ... ok
+test sigint_kills_active_run_groups ... ok
+test sigterm_kills_active_run_groups_and_removes_socket ... ok
+test spawn_failure_emits_no_metadata_frame ... ok
+test input_wait_backpressure_does_not_wedge_cancel ... ok
+test slow_reader_does_not_lose_frames ... ok
+test input_wait_does_not_fire_for_busy_silent_run ... ok
+test pty_run_times_out_like_pipe_runs ... ok
+test input_wait_absent_field_emits_no_waiting_frames ... ok
+test u64_max_timeout_allows_a_completed_process ... ok
+test concurrent_worktree_runs_get_distinct_branches ... ok
+test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
+test timed_out_runs_release_all_process_capacity ... ok
+test input_wait_suppressed_while_paused ... ok
+test dirty_worktree_is_still_removed ... ok
+Preparing worktree (new branch 'capture-delegate/run-startup-orphan-3')
+HEAD is now at 3dc7367 initial
+Preparing worktree (new branch 'capture-delegate/run-startup-live-3')
+HEAD is now at 3dc7367 initial
+Deleted branch capture-delegate/run-startup-live-3 (was 3dc7367).
+test startup_removes_dead_owner_worktrees_without_touching_live_owners ... ok
+test worktree_cancel_still_cleans_up ... ok
+test worktree_failure_emits_structured_terminal_frame ... ok
+test worktree_request_validation ... ok
+test worktree_run_executes_in_an_isolated_worktree_and_cleans_up ... ok
+test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
+test worktree_spawn_failure_still_cleans_up ... ok
+test worktree_timeout_still_cleans_up ... ok
+test timeout_kills_descendant_processes ... ok
+test paused_run_still_times_out_and_kills_its_process_group ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.67s
+
+   Doc-tests capture_delegate_backend
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling capture_delegate_backend v0.1.0 (/Users/krishgarg/conductor/workspaces/cue/moroni/backend)
+    Finished `release` profile [optimized] target(s) in 1.48s
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.12s)
+[0/1] Planning build
+Building for debugging...
+[0/6] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.10s)
+Test Suite 'All tests' started at 2026-08-31 22:50:30.364.
+Test Suite 'All tests' passed at 2026-08-31 22:50:30.365.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+◇ Test run started.
+↳ Testing Library Version: 1743
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test "list sources request JSON is typed and its response decodes ordered sources" started.
+◇ Test "run input waiting decodes before the terminal frame" started.
+◇ Test "a session kind travels in the create request and back in its response" started.
+◇ Test "byte-dribbled responses honor one total monotonic deadline" started.
+◇ Test "list markers request JSON is typed and its response decodes ordered markers" started.
+◇ Test "create session request JSON is typed and its response decodes a session" started.
+◇ Test "health request JSON is newline delimited" started.
+◇ Test "list runs request JSON is typed and its response decodes live and finished runs" started.
+◇ Test "valid response remains readable over a local socket" started.
+◇ Test "a marker without a note omits the note key in both directions" started.
+◇ Test "a non-string kind makes the session response invalid" started.
+◇ Test "run exit decodes a typed internal error" started.
+◇ Test "Rust backend and Swift health executable complete the health handshake" started.
+◇ Test "run exit decodes a typed spawn failure" started.
+◇ Test "add source request JSON is typed and its response decodes a source" started.
+◇ Test "a quiet process may send its first output frame after the frame deadline" started.
+◇ Test "Swift cancels a running process over a separate typed connection" started.
+◇ Test "Swift process API receives cat output before one terminal event" started.
+◇ Test "send input capacity exhaustion is decoded as a typed result" started.
+◇ Test "an uncategorized session omits the kind key in both directions" started.
+◇ Test "add marker request JSON is typed and its response decodes a marker" started.
+◇ Test "oversized response fails within the frame bound" started.
+◇ Test "an interrupted run decodes with its error code and without an exit code" started.
+◇ Test "nonexistent executable becomes a typed spawn failure event" started.
+◇ Test "run exit decodes a typed capacity exhaustion failure" started.
+◇ Test "Sessions created over the socket survive a backend restart" started.
+◇ Test "Swift sends input, closes stdin, and observes cat exit naturally" started.
+◇ Test "start process request JSON is typed and newline delimited" started.
+◇ Test "list sessions request JSON is typed and its response decodes ordered sessions" started.
+◇ Test "Swift pauses, resumes, and cancels a running process over typed connections" started.
+◇ Test "sleeping process emits a typed timeout after preserving prior output" started.
+◇ Test "Swift process events redact secrets and report metadata before exit" started.
+◇ Test "run exit decodes a typed worktree failure" started.
+◇ Test "cancel process request JSON and accepted result are typed" started.
+◇ Test "closed peer returns an error without SIGPIPE termination" started.
+◇ Test "a non-string note makes the marker response invalid" started.
+◇ Test "Swift starts a PTY process and observes tty-marked output" started.
+◇ Test "an unattributed source omits the speaker key in both directions" started.
+◇ Test "a non-string speaker makes the source response invalid" started.
+◇ Test "run exit decodes a typed timeout failure" started.
+◇ Test "process output callback fires before the terminal frame is sent" started.
+✔ Test "health request JSON is newline delimited" passed after 0.337 seconds.
+✔ Test "valid response remains readable over a local socket" passed after 0.337 seconds.
+✔ Test "a session kind travels in the create request and back in its response" passed after 0.337 seconds.
+✔ Test "run input waiting decodes before the terminal frame" passed after 0.337 seconds.
+✔ Test "a marker without a note omits the note key in both directions" passed after 0.337 seconds.
+✔ Test "list markers request JSON is typed and its response decodes ordered markers" passed after 0.337 seconds.
+✔ Test "run exit decodes a typed spawn failure" passed after 0.337 seconds.
+✔ Test "list runs request JSON is typed and its response decodes live and finished runs" passed after 0.337 seconds.
+✔ Test "create session request JSON is typed and its response decodes a session" passed after 0.337 seconds.
+✔ Test "run exit decodes a typed internal error" passed after 0.337 seconds.
+✔ Test "a non-string kind makes the session response invalid" passed after 0.337 seconds.
+✔ Test "list sources request JSON is typed and its response decodes ordered sources" passed after 0.337 seconds.
+✔ Test "add source request JSON is typed and its response decodes a source" passed after 0.337 seconds.
+✔ Test "send input capacity exhaustion is decoded as a typed result" passed after 0.337 seconds.
+✔ Test "an uncategorized session omits the kind key in both directions" passed after 0.337 seconds.
+✔ Test "an interrupted run decodes with its error code and without an exit code" passed after 0.337 seconds.
+✔ Test "add marker request JSON is typed and its response decodes a marker" passed after 0.337 seconds.
+✔ Test "run exit decodes a typed capacity exhaustion failure" passed after 0.337 seconds.
+✔ Test "start process request JSON is typed and newline delimited" passed after 0.337 seconds.
+✔ Test "list sessions request JSON is typed and its response decodes ordered sessions" passed after 0.337 seconds.
+✔ Test "oversized response fails within the frame bound" passed after 0.337 seconds.
+✔ Test "Swift process API receives cat output before one terminal event" passed after 0.337 seconds.
+✔ Test "nonexistent executable becomes a typed spawn failure event" passed after 0.337 seconds.
+✔ Test "run exit decodes a typed worktree failure" passed after 0.337 seconds.
+✔ Test "cancel process request JSON and accepted result are typed" passed after 0.337 seconds.
+✔ Test "closed peer returns an error without SIGPIPE termination" passed after 0.337 seconds.
+✔ Test "a non-string note makes the marker response invalid" passed after 0.337 seconds.
+✔ Test "an unattributed source omits the speaker key in both directions" passed after 0.337 seconds.
+✔ Test "a non-string speaker makes the source response invalid" passed after 0.337 seconds.
+✔ Test "Sessions created over the socket survive a backend restart" passed after 0.337 seconds.
+✔ Test "run exit decodes a typed timeout failure" passed after 0.337 seconds.
+✔ Test "Swift pauses, resumes, and cancels a running process over typed connections" passed after 0.337 seconds.
+✔ Test "Swift cancels a running process over a separate typed connection" passed after 0.337 seconds.
+✔ Test "Swift process events redact secrets and report metadata before exit" passed after 0.345 seconds.
+✔ Test "Swift sends input, closes stdin, and observes cat exit naturally" passed after 0.351 seconds.
+✔ Test "Swift starts a PTY process and observes tty-marked output" passed after 0.363 seconds.
+✔ Test "Rust backend and Swift health executable complete the health handshake" passed after 0.402 seconds.
+✔ Test "sleeping process emits a typed timeout after preserving prior output" passed after 0.521 seconds.
+✔ Test "a quiet process may send its first output frame after the frame deadline" passed after 0.711 seconds.
+✔ Test "byte-dribbled responses honor one total monotonic deadline" passed after 0.767 seconds.
+✔ Test "process output callback fires before the terminal frame is sent" passed after 0.946 seconds.
+✔ Test run with 41 tests in 0 suites passed after 0.947 seconds.
+    Finished `release` profile [optimized] target(s) in 0.01s
+[0/1] Planning build
+Building for production...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build complete! (0.10s)
+backend ok
