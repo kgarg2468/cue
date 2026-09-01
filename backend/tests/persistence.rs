@@ -416,6 +416,17 @@ fn unknown_session_kinds_are_rejected_with_an_error_frame() {
         );
     }
 
+    // An explicit null is not how an uncategorized session is stated; only
+    // omitting the field is.
+    let null_kind = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "create_session", "title": "t", "kind": null}),
+    );
+    assert_eq!(
+        null_kind["code"], "invalid_create_session",
+        "an explicit null kind must be rejected, got {null_kind}"
+    );
+
     assert!(
         list_sessions(&backend.socket_path).is_empty(),
         "rejected kinds must not persist sessions"

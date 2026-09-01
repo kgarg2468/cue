@@ -23,3 +23,13 @@ failures:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.23s
 
 error: test failed, to rerun pass `--test persistence`
+
+--- Round-1 review fix (Sol MAJOR: explicit null kind bypassed validation) — red run BEFORE fix ---
+
+
+failures:
+    unknown_session_kinds_are_rejected_with_an_error_frame
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.29s
+
+error: test failed, to rerun pass `--test persistence`

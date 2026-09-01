@@ -80,8 +80,18 @@ struct Request {
     worktree_repository: Option<serde_json::Value>,
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
+    // Double option so an explicit `"kind": null` stays distinguishable from an
+    // omitted field: only omission means uncategorized.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    kind: Option<Option<String>>,
+}
+
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -1028,7 +1038,9 @@ fn handle_connection(
                 };
                 let kind = match request.kind {
                     None => None,
-                    Some(kind) if SESSION_KINDS.contains(&kind.as_str()) => Some(kind),
+                    Some(Some(kind)) if SESSION_KINDS.contains(&kind.as_str()) => Some(kind),
+                    // Unknown kinds and explicit null are both rejected; only an
+                    // omitted field states an uncategorized session.
                     Some(_) => return write_protocol_error(&mut stream, "invalid_create_session"),
                 };
                 let session = Session::draft(&title, kind.as_deref());
