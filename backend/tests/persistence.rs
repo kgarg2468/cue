@@ -1548,8 +1548,11 @@ fn every_admitted_run_stays_listable_after_termination() {
     // Both terminal shapes are swept: a clean exit (exit_code, no error_code)
     // and a spawn failure (null exit_code, persisted error_code) — a probe
     // that stopped budgeting persisted error codes would fail the second.
+    // run_id has no raw length bound, so plain single-byte padding reaches the
+    // frame bound with ONE-byte granularity: no listability window, however
+    // narrow, can be jumped by the sweep.
     let (mut accepted, mut rejected) = (0, 0);
-    for nulls in (1240..1330).step_by(3) {
+    for pad in 7900..7990 {
         for (prefix, executable, check) in [
             ("e", "/bin/echo", "clean"),
             (
@@ -1558,7 +1561,7 @@ fn every_admitted_run_stays_listable_after_termination() {
                 "spawn_failed",
             ),
         ] {
-            let run_id = format!("{prefix}{}", "\u{0}".repeat(nulls));
+            let run_id = format!("{prefix}{}", "x".repeat(pad));
             let response = run_process(
                 &backend.socket_path,
                 serde_json::json!({"run_id": run_id, "executable": executable,
@@ -1586,13 +1589,13 @@ fn every_admitted_run_stays_listable_after_termination() {
             let head = &page["runs"].as_array().expect("runs array")[0];
             assert_eq!(
                 head["run_id"], run_id,
-                "an admitted run must stay listable after termination, nulls={nulls} ({check})"
+                "an admitted run must stay listable after termination, pad={pad} ({check})"
             );
             assert_eq!(head["status"], "exited");
             if check == "spawn_failed" {
                 assert_eq!(
                     head["error_code"], "spawn_failed",
-                    "the persisted error code must survive listing, nulls={nulls}"
+                    "the persisted error code must survive listing, pad={pad}"
                 );
             }
         }

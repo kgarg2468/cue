@@ -53,3 +53,12 @@ threshold.
   asserts the persisted error code survives listing, so a probe that stops
   budgeting persisted error codes fails the test.
 - verify-m0-r2.log exit 0 after remediation; 131 Rust tests green.
+
+## Review round 2 (Sol): FAIL, 1 MINOR — fixed with a mutant proof
+- The 3-NUL sweep step moved the frame 18 bytes per iteration and could jump
+  the ~10-byte window that discriminates the error-code budget. run_id has no
+  raw length bound, so the sweep now uses plain single-byte padding
+  (pad 7900..7990, step 1) for exact one-byte frame granularity — no
+  listability window can be jumped. Mutant proof: with probe.error_code
+  removed the sweep FAILS ("an admitted run must stay listable after
+  termination"); restored, 131 Rust tests green. verify-m0-r3.log exit 0.
