@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 28,
-  "active_milestone": "M2 Domain/persistence (slices 1-10 merged: + action drafts)",
+  "cycle": 29,
+  "active_milestone": "M2 Domain/persistence (slices 1-11 merged: + projects/session links)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 28: delivered M2 slice 10 through PR #51, squash-merged as 60dd30a. Action drafts (spec \u00a75/\u00a77.1): migration 9 actions table; create_action enforces the closed 12-kind taxonomy and mints status draft server-side \u2014 client-supplied status cannot leak (pinned by test + demo). list_actions newest-first under the frame budget. Swift ActionRecord/ActionPage. Worker stopped correctly at a clippy blocker in my red test file instead of touching it. Sol round 1 PASS zero findings (third consecutive). Gates: 153 Rust + 53 Swift, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v8\u2192v9 demo. Next: project model/links or task packets.",
-  "updated_at": "2026-09-01T08:13:22+00:00",
+  "last_cycle_summary": "Cycle 29: delivered M2 slice 11 through PR #53, squash-merged as 5ca9e25. Projects + session links (spec \u00a712/\u00a75): migration 10 projects + session_projects; create_project probes the larger session-scoped envelope; race-free duplicate_project_link; link order preserved via rowid tie-break (worker's correct deviation \u2014 project_id ties would reintroduce creation order). Sol round 1 PASS zero findings (fourth consecutive); caveat recorded re rowid persistence if a future unlink/VACUUM path lands. Gates: 158 Rust + 56 Swift, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v9\u2192v10 demo. Next: task-packet model (spec \u00a78), sized after a spec read.",
+  "updated_at": "2026-09-01T08:38:21+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
