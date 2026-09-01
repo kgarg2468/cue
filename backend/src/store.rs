@@ -46,6 +46,16 @@ const MIGRATIONS: &[&str] = &[
         ended_at_ms INTEGER
     );
     CREATE INDEX runs_by_start ON runs (started_at_ms, id)",
+    // A marker is a user-placed moment inside a session's timeline; the index serves the only
+    // read path, which walks one session chronologically.
+    "CREATE TABLE markers (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        at_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        note TEXT
+    );
+    CREATE INDEX markers_by_session_and_at ON markers (session_id, at_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -76,6 +86,18 @@ pub(crate) struct Source {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) speaker: Option<String>,
     pub(crate) text: String,
+}
+
+/// A user-placed moment inside one session's timeline, with the kind of attention it deserves.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Marker {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) at_ms: i64,
+    pub(crate) kind: String,
+    /// Absent when the marker carries no note; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
 }
 
 /// One execution of a process, durable across restarts so a run outlives the connection that
@@ -136,6 +158,20 @@ impl Source {
             end_ms,
             speaker: speaker.map(str::to_owned),
             text: text.to_owned(),
+        }
+    }
+}
+
+impl Marker {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens.
+    pub(crate) fn draft(session_id: &str, at_ms: i64, kind: &str, note: Option<&str>) -> Marker {
+        Marker {
+            id: record_id("marker"),
+            session_id: session_id.to_owned(),
+            at_ms,
+            kind: kind.to_owned(),
+            note: note.map(str::to_owned),
         }
     }
 }
@@ -258,6 +294,47 @@ impl Store {
             .collect::<rusqlite::Result<Vec<Source>>>()
             .map_err(io::Error::other)?;
         Ok(sources)
+    }
+
+    pub(crate) fn insert_marker(&self, marker: &Marker) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO markers (id, session_id, at_ms, kind, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    marker.id,
+                    marker.session_id,
+                    marker.at_ms,
+                    marker.kind,
+                    marker.note
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub(crate) fn list_markers(&self, session_id: &str, limit: usize) -> io::Result<Vec<Marker>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, at_ms, kind, note FROM markers
+                 WHERE session_id = ?1 ORDER BY at_ms ASC, id ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let markers = statement
+            .query_map(params![session_id, limit as i64], |row| {
+                Ok(Marker {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    at_ms: row.get(2)?,
+                    kind: row.get(3)?,
+                    note: row.get(4)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<Marker>>>()
+            .map_err(io::Error::other)?;
+        Ok(markers)
     }
 
     pub(crate) fn insert_run(&self, run: &RunRecord) -> io::Result<()> {
@@ -742,6 +819,50 @@ mod tests {
         assert!(
             store.list_runs(1).expect("runs should list").is_empty(),
             "a store written before runs existed must survive with no run records"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_four_store_adds_markers_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before user markers existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..4] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before markers', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 4)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert!(
+            store
+                .list_markers("session-legacy", 1)
+                .expect("markers should list")
+                .is_empty(),
+            "a session written before markers existed must survive with no markers"
+        );
+        let marker = super::Marker::draft("session-legacy", 872_000, "decision", Some("Ship it"));
+        store.insert_marker(&marker).expect("marker should insert");
+        assert_eq!(
+            store
+                .list_markers("session-legacy", 2)
+                .expect("markers should list"),
+            vec![marker],
+            "a marker written after the upgrade must round-trip"
         );
     }
 

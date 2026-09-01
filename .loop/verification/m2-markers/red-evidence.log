@@ -1,0 +1,9 @@
+=== Red contract tests vs merged main 3efd78d (pre-implementation) ===
+failures:
+    invalid_markers_are_rejected_before_persisting
+    list_markers_responses_are_bounded_with_truncation_reported
+    user_markers_persist_chronologically_and_survive_a_restart
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `--test persistence`

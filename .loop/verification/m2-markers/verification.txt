@@ -1,0 +1,41 @@
+# M2 markers slice — verification summary (cycle 23, 2026-09-01)
+
+Slice: persisted user markers (S05-002 partial; spec §5 session contents,
+§6.3 marker kinds). Migration 5 (markers table + chronological index),
+add_marker/list_markers protocol, Swift Marker/MarkerListPage.
+
+## TDD evidence
+- red-evidence.log — all three protocol tests fail against merged main 3efd78d.
+- cargo-test.log — full green: 127 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log — verify-m0.sh exit 0 (41 Swift tests).
+- runtime-demo.log — real release binary: hand-built v4 store migrates to
+  user_version 5 on open with the legacy session row intact; markers attach
+  to the pre-migration session (FK proof); note omitted when absent; unknown
+  kind and unknown session rejected; restart survival with chronological
+  listing; store + sidecars all 0600.
+
+## Design decisions
+- kind is REQUIRED and case-sensitive from the §6.3 set (important, decision,
+  action, question, delegate, research); omitted, null, blank, or unknown
+  kinds are invalid_add_marker. This differs from session kind (optional)
+  because a marker IS its intent.
+- note mirrors the speaker convention: optional, omitted when absent,
+  explicit null rejected, trimmed non-blank, ≤4096 bytes; escape-heavy notes
+  are caught by the draft → frame-bound check → insert ordering.
+- at_ms is a non-negative whole millisecond (same milliseconds_field parsing
+  as source timings); validation order fields → unknown_session → draft →
+  bound check → insert, matching sources exactly.
+- list_markers pages chronologically (at_ms ASC, id ASC, limit 50, limit+1
+  probe, 8 KiB byte budget popping from the END so the beginning survives).
+
+## Security invariants checked
+- Protocol change additive; sessions/sources/runs suites untouched and green.
+- Rejected markers never persist; user store untouched by verification.
+
+## Known bounds carried forward (worker-flagged, recorded)
+- No ON DELETE CASCADE on markers.session_id (matches sources; session
+  deletion does not exist yet).
+- IPCClientError.invalidSessionResponse misnomer now spans marker decodes too
+  (batch with the client-hardening slice).
+- Marker update/delete and voice/UI wiring are out of scope for this slice
+  (§6.3 capture UX lands with the frontend milestones).

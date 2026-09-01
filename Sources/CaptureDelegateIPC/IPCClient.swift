@@ -78,6 +78,40 @@ public struct SourceListPage: Equatable {
     }
 }
 
+/// A user-placed moment inside one session's timeline, with the kind of attention it deserves.
+public struct Marker: Equatable {
+    public let id: String
+    public let sessionID: String
+    public let atMilliseconds: Int
+    public let kind: String
+    /// Nil for a marker without a note; the backend omits the field entirely.
+    public let note: String?
+
+    public init(
+        id: String,
+        sessionID: String,
+        atMilliseconds: Int,
+        kind: String,
+        note: String? = nil
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.atMilliseconds = atMilliseconds
+        self.kind = kind
+        self.note = note
+    }
+}
+
+public struct MarkerListPage: Equatable {
+    public let markers: [Marker]
+    public let truncated: Bool
+
+    public init(markers: [Marker], truncated: Bool) {
+        self.markers = markers
+        self.truncated = truncated
+    }
+}
+
 /// One durable execution of a process, as the backend recorded it.
 public struct RunRecord: Equatable {
     public let id: String
@@ -237,6 +271,34 @@ public enum IPCClient {
         return try decodeListSourcesResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    public static func addMarker(
+        socketPath: String,
+        sessionID: String,
+        atMilliseconds: Int,
+        kind: String,
+        note: String? = nil
+    ) throws -> Marker {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeAddMarkerRequest(
+            sessionID: sessionID,
+            atMilliseconds: atMilliseconds,
+            kind: kind,
+            note: note,
+            to: descriptor
+        )
+        return try decodeAddMarkerResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listMarkers(socketPath: String, sessionID: String) throws -> MarkerListPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListMarkersRequest(sessionID: sessionID, to: descriptor)
+        return try decodeListMarkersResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func listRuns(socketPath: String) throws -> RunListPage {
         let descriptor = try connect(to: socketPath)
         defer { _ = Darwin.close(descriptor) }
@@ -394,6 +456,22 @@ public enum IPCClient {
         "{\"version\":1,\"type\":\"list_sources\",\"session_id\":\(jsonString(sessionID))}\n"
     }
 
+    public static func addMarkerRequest(
+        sessionID: String,
+        atMilliseconds: Int,
+        kind: String,
+        note: String? = nil
+    ) -> String {
+        // A marker without a note omits the key; an explicit null is rejected by the backend.
+        let noteField = note.map { ",\"note\":\(jsonString($0))" } ?? ""
+        return "{\"version\":1,\"type\":\"add_marker\",\"session_id\":\(jsonString(sessionID)),"
+            + "\"at_ms\":\(atMilliseconds),\"kind\":\(jsonString(kind))\(noteField)}\n"
+    }
+
+    public static func listMarkersRequest(sessionID: String) -> String {
+        "{\"version\":1,\"type\":\"list_markers\",\"session_id\":\(jsonString(sessionID))}\n"
+    }
+
     public static let listRunsRequest = "{\"version\":1,\"type\":\"list_runs\"}\n"
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -533,6 +611,30 @@ public enum IPCClient {
     static func writeListSourcesRequest(sessionID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSourcesRequest(sessionID: sessionID).utf8), to: descriptor)
+    }
+
+    static func writeAddMarkerRequest(
+        sessionID: String,
+        atMilliseconds: Int,
+        kind: String,
+        note: String?,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(
+                addMarkerRequest(
+                    sessionID: sessionID,
+                    atMilliseconds: atMilliseconds,
+                    kind: kind,
+                    note: note
+                ).utf8
+            ), to: descriptor)
+    }
+
+    static func writeListMarkersRequest(sessionID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listMarkersRequest(sessionID: sessionID).utf8), to: descriptor)
     }
 
     static func writeListRunsRequest(to descriptor: Int32) throws {
@@ -853,6 +955,67 @@ public enum IPCClient {
             endMilliseconds: endMilliseconds,
             speaker: speaker,
             text: text
+        )
+    }
+
+    static func decodeAddMarkerResponse(_ response: String) throws -> Marker {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "add_marker_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeMarker(json["marker"])
+    }
+
+    static func decodeListMarkersResponse(_ response: String) throws -> MarkerListPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_markers_response",
+            let markers = json["markers"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return MarkerListPage(
+            markers: try markers.map { try decodeMarker($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeMarker(_ value: Any?) throws -> Marker {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let sessionID = json["session_id"] as? String, !sessionID.isEmpty,
+            let atMilliseconds = json["at_ms"] as? Int,
+            let kind = json["kind"] as? String, !kind.isEmpty
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // A marker without a note omits the field; a present note must still be a string.
+        let note: String?
+        if json["note"] == nil {
+            note = nil
+        } else if let value = json["note"] as? String {
+            note = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return Marker(
+            id: id,
+            sessionID: sessionID,
+            atMilliseconds: atMilliseconds,
+            kind: kind,
+            note: note
         )
     }
 

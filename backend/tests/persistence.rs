@@ -1163,3 +1163,264 @@ fn escape_heavy_titles_cannot_produce_an_oversized_create_response() {
         "a rejected session must not be persisted"
     );
 }
+
+fn add_marker(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("add_marker");
+    let response = exchange(socket_path, request);
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "add_marker_response",
+        "marker should be accepted, got {response}"
+    );
+    response["marker"].clone()
+}
+
+fn list_markers(socket_path: &Path, session_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_markers", "session_id": session_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_markers_response");
+    response
+}
+
+const MARKER_KINDS: [&str; 6] = [
+    "important",
+    "decision",
+    "action",
+    "question",
+    "delegate",
+    "research",
+];
+
+#[test]
+fn user_markers_persist_chronologically_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("markers.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (session_id, other_id, expected) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Sprint planning");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+        let other = create_session(&backend.socket_path, "Unrelated session");
+        let other_id = other["id"].as_str().expect("session id").to_owned();
+
+        // Inserted out of order to pin chronological listing.
+        let late = add_marker(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": session_id,
+                "at_ms": 872_000,
+                "kind": "decision",
+                "note": "We ship the migration behind a flag",
+            }),
+        );
+        assert_eq!(late["session_id"], session_id.as_str());
+        assert_eq!(late["at_ms"], 872_000);
+        assert_eq!(late["kind"], "decision");
+        assert_eq!(late["note"], "We ship the migration behind a flag");
+        assert!(
+            late["id"].as_str().is_some_and(|id| !id.trim().is_empty()),
+            "marker ids should be non-empty"
+        );
+        let early = add_marker(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": session_id,
+                "at_ms": 1_000,
+                "kind": "important",
+            }),
+        );
+        assert!(
+            early.get("note").is_none(),
+            "a marker without a note must omit the field, got {early}"
+        );
+        // Every spec 6.3 marker kind is a valid wire value.
+        for (index, kind) in MARKER_KINDS.iter().enumerate() {
+            let marker = add_marker(
+                &backend.socket_path,
+                serde_json::json!({
+                    "session_id": other_id,
+                    "at_ms": index,
+                    "kind": kind,
+                }),
+            );
+            assert_eq!(&marker["kind"], kind);
+        }
+        backend.stop();
+        (session_id, other_id, vec![early, late])
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_markers(&restarted.socket_path, &session_id);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["markers"].as_array().expect("markers array"),
+        &expected,
+        "markers should list chronologically for their own session only"
+    );
+    let other_page = list_markers(&restarted.socket_path, &other_id);
+    assert_eq!(
+        other_page["markers"]
+            .as_array()
+            .expect("markers array")
+            .len(),
+        MARKER_KINDS.len()
+    );
+}
+
+#[test]
+fn invalid_markers_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badmarker.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Validation session");
+    let session_id = session["id"].as_str().expect("session id");
+
+    let unknown = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "add_marker", "session_id": "ses_missing",
+            "at_ms": 0, "kind": "important"}),
+    );
+    assert_eq!(
+        unknown,
+        serde_json::json!({"version": 1, "type": "error", "code": "unknown_session"}),
+        "a marker for a nonexistent session must be rejected"
+    );
+
+    let invalid_bodies = [
+        // unknown kind
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": "highlight"}),
+        // kinds are case-sensitive wire values
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": "Important"}),
+        // blank kind
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": ""}),
+        // explicit null kind
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": null}),
+        // missing kind
+        serde_json::json!({"session_id": session_id, "at_ms": 0}),
+        // negative timestamp
+        serde_json::json!({"session_id": session_id, "at_ms": -1, "kind": "important"}),
+        // fractional milliseconds
+        serde_json::json!({"session_id": session_id, "at_ms": 1.5, "kind": "important"}),
+        // missing timestamp
+        serde_json::json!({"session_id": session_id, "kind": "important"}),
+        // blank note: omit the field instead
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": "important",
+            "note": " \t "}),
+        // explicit null note: omit the field instead
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": "important",
+            "note": null}),
+        // oversized note
+        serde_json::json!({"session_id": session_id, "at_ms": 0, "kind": "important",
+            "note": "n".repeat(4097)}),
+    ];
+    for mut body in invalid_bodies {
+        body["version"] = serde_json::json!(1);
+        body["type"] = serde_json::json!("add_marker");
+        let response = exchange(&backend.socket_path, body.clone());
+        assert_eq!(
+            response,
+            serde_json::json!({"version": 1, "type": "error", "code": "invalid_add_marker"}),
+            "body {body} should be rejected"
+        );
+    }
+
+    // Escape-heavy notes pass the raw byte check but serialize past the frame bound.
+    let escape_heavy = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "add_marker", "session_id": session_id,
+            "at_ms": 0, "kind": "important", "note": "\u{0}".repeat(1345)}),
+    );
+    assert_eq!(escape_heavy["code"], "invalid_add_marker");
+
+    let page = list_markers(&backend.socket_path, session_id);
+    assert_eq!(
+        page["markers"].as_array().expect("markers array").len(),
+        0,
+        "rejected markers must not persist"
+    );
+
+    let unknown_list = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_markers", "session_id": "ses_missing"}),
+    );
+    assert_eq!(unknown_list["code"], "unknown_session");
+    let missing_list = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_markers"}),
+    );
+    assert_eq!(missing_list["code"], "unknown_session");
+}
+
+#[test]
+fn list_markers_responses_are_bounded_with_truncation_reported() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("boundedmrk.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Long meeting");
+    let session_id = session["id"].as_str().expect("session id");
+
+    for index in 0..52 {
+        add_marker(
+            &backend.socket_path,
+            serde_json::json!({"session_id": session_id, "at_ms": index * 1000,
+                "kind": "important", "note": format!("moment {index:02}")}),
+        );
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_markers", "session_id": session_id}),
+    );
+    assert!(frame.len() <= 8192, "frame should stay bounded");
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["type"], "list_markers_response");
+    assert_eq!(
+        response["markers"].as_array().expect("markers array").len(),
+        50,
+        "count cap should bound the page"
+    );
+    assert_eq!(response["truncated"], true);
+    assert_eq!(
+        response["markers"][0]["note"], "moment 00",
+        "the page should start at the chronological beginning"
+    );
+
+    // A separate session whose page is byte-bounded rather than count-bounded:
+    // the budget must pop from the end so the chronological start survives.
+    let big = create_session(&backend.socket_path, "Note-heavy meeting");
+    let big_id = big["id"].as_str().expect("session id");
+    for index in 0..4 {
+        add_marker(
+            &backend.socket_path,
+            serde_json::json!({"session_id": big_id, "at_ms": index,
+                "kind": "research", "note": "x".repeat(4000)}),
+        );
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_markers", "session_id": big_id}),
+    );
+    assert!(
+        frame.len() <= 8192,
+        "oversized notes must not produce an oversized frame"
+    );
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["truncated"], true);
+    let markers = response["markers"].as_array().expect("markers array");
+    assert!(
+        !markers.is_empty(),
+        "the byte budget should still deliver the earliest markers that fit"
+    );
+    assert_eq!(
+        markers[0]["at_ms"], 0,
+        "byte truncation must keep the chronological beginning"
+    );
+}
