@@ -237,6 +237,47 @@ public struct RunEventPage: Equatable {
     }
 }
 
+/// One unit of delegable work, as the backend drafted it.
+public struct ActionRecord: Equatable {
+    public let id: String
+    /// Nil for an action that is not linked to a session; the backend omits the field entirely.
+    public let sessionID: String?
+    public let kind: String
+    public let title: String
+    /// Backend-authored; every action begins as a draft.
+    public let status: String
+    public let createdAtMilliseconds: Int
+    public let updatedAtMilliseconds: Int
+
+    public init(
+        id: String,
+        sessionID: String? = nil,
+        kind: String,
+        title: String,
+        status: String,
+        createdAtMilliseconds: Int,
+        updatedAtMilliseconds: Int
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.kind = kind
+        self.title = title
+        self.status = status
+        self.createdAtMilliseconds = createdAtMilliseconds
+        self.updatedAtMilliseconds = updatedAtMilliseconds
+    }
+}
+
+public struct ActionPage: Equatable {
+    public let actions: [ActionRecord]
+    public let truncated: Bool
+
+    public init(actions: [ActionRecord], truncated: Bool) {
+        self.actions = actions
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -432,6 +473,33 @@ public enum IPCClient {
 
         try writeListRunEventsRequest(recordID: recordID, to: descriptor)
         return try decodeListRunEventsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    /// Drafts one action; a nil sessionID leaves it unlinked to any session.
+    public static func createAction(
+        socketPath: String,
+        kind: String,
+        title: String,
+        sessionID: String? = nil
+    ) throws -> ActionRecord {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCreateActionRequest(
+            kind: kind,
+            title: title,
+            sessionID: sessionID,
+            to: descriptor
+        )
+        return try decodeCreateActionResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listActions(socketPath: String) throws -> ActionPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListActionsRequest(to: descriptor)
+        return try decodeListActionsResponse(readBoundedResponseLine(from: descriptor))
     }
 
     public static func cancelProcess(socketPath: String, runID: String) throws
@@ -631,6 +699,19 @@ public enum IPCClient {
     public static func listRunEventsRequest(recordID: String) -> String {
         "{\"version\":1,\"type\":\"list_run_events\",\"record_id\":\(jsonString(recordID))}\n"
     }
+
+    public static func createActionRequest(kind: String, title: String, sessionID: String? = nil)
+        -> String
+    {
+        // An unlinked action omits the key; an explicit null is rejected by the backend.
+        // Status is not a field of this message: the backend authors it, and every action
+        // begins as a draft.
+        let sessionField = sessionID.map { ",\"session_id\":\(jsonString($0))" } ?? ""
+        return "{\"version\":1,\"type\":\"create_action\",\"kind\":\(jsonString(kind)),"
+            + "\"title\":\(jsonString(title))\(sessionField)}\n"
+    }
+
+    public static let listActionsRequest = "{\"version\":1,\"type\":\"list_actions\"}\n"
 
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
@@ -837,6 +918,23 @@ public enum IPCClient {
     static func writeListRunEventsRequest(recordID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listRunEventsRequest(recordID: recordID).utf8), to: descriptor)
+    }
+
+    static func writeCreateActionRequest(
+        kind: String,
+        title: String,
+        sessionID: String?,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(createActionRequest(kind: kind, title: title, sessionID: sessionID).utf8),
+            to: descriptor)
+    }
+
+    static func writeListActionsRequest(to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listActionsRequest.utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -1424,6 +1522,71 @@ public enum IPCClient {
             sequence: sequence,
             atMilliseconds: atMilliseconds,
             kind: kind
+        )
+    }
+
+    static func decodeCreateActionResponse(_ response: String) throws -> ActionRecord {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "create_action_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeActionRecord(json["action"])
+    }
+
+    static func decodeListActionsResponse(_ response: String) throws -> ActionPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_actions_response",
+            let actions = json["actions"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return ActionPage(
+            actions: try actions.map { try decodeActionRecord($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeActionRecord(_ value: Any?) throws -> ActionRecord {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let kind = json["kind"] as? String, !kind.isEmpty,
+            let title = json["title"] as? String, !title.isEmpty,
+            let status = json["status"] as? String, !status.isEmpty,
+            let createdAtMilliseconds = json["created_at_ms"] as? Int,
+            let updatedAtMilliseconds = json["updated_at_ms"] as? Int
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // An unlinked action omits the field; a present link must still be a string.
+        let sessionID: String?
+        if json["session_id"] == nil {
+            sessionID = nil
+        } else if let value = json["session_id"] as? String {
+            sessionID = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return ActionRecord(
+            id: id,
+            sessionID: sessionID,
+            kind: kind,
+            title: title,
+            status: status,
+            createdAtMilliseconds: createdAtMilliseconds,
+            updatedAtMilliseconds: updatedAtMilliseconds
         )
     }
 

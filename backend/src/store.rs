@@ -81,6 +81,19 @@ const MIGRATIONS: &[&str] = &[
         kind TEXT NOT NULL
     );
     CREATE INDEX run_events_by_record_and_seq ON run_events (record_id, seq)",
+    // An action is one unit of delegable work, drafted before anything runs it. A session link
+    // is optional, so an action minted by hand stands alone; the index serves the only read
+    // path, which walks every action newest-first.
+    "CREATE TABLE actions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT REFERENCES sessions(id),
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX actions_by_creation ON actions (created_at_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -170,6 +183,21 @@ pub(crate) struct RunEvent {
     pub(crate) seq: i64,
     pub(crate) at_ms: i64,
     pub(crate) kind: String,
+}
+
+/// One unit of delegable work, drafted before anything runs it and durable across restarts so a
+/// draft outlives the app that wrote it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ActionRecord {
+    pub(crate) id: String,
+    /// Absent for an action that is not linked to a session; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_id: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) status: String,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
 }
 
 /// The event a run's admission records: a run is launched exactly once, at sequence zero.
@@ -287,6 +315,25 @@ impl RunEvent {
             seq,
             at_ms,
             kind: kind.to_owned(),
+        }
+    }
+}
+
+impl ActionRecord {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens. The status is
+    /// backend-authored: every action begins as a draft, and no request can mint one
+    /// in any other status.
+    pub(crate) fn draft(session_id: Option<&str>, kind: &str, title: &str) -> ActionRecord {
+        let created_at_ms = now_milliseconds();
+        ActionRecord {
+            id: record_id("action"),
+            session_id: session_id.map(str::to_owned),
+            kind: kind.to_owned(),
+            title: title.to_owned(),
+            status: "draft".to_owned(),
+            created_at_ms,
+            updated_at_ms: created_at_ms,
         }
     }
 }
@@ -703,6 +750,53 @@ impl Store {
             .collect::<rusqlite::Result<Vec<RunRecord>>>()
             .map_err(io::Error::other)?;
         Ok(runs)
+    }
+
+    pub(crate) fn insert_action(&self, action: &ActionRecord) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO actions (id, session_id, kind, title, status, created_at_ms,
+                     updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    action.id,
+                    action.session_id,
+                    action.kind,
+                    action.title,
+                    action.status,
+                    action.created_at_ms,
+                    action.updated_at_ms
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// Every action, newest-first, so the most recent drafts lead the page.
+    pub(crate) fn list_actions(&self, limit: usize) -> io::Result<Vec<ActionRecord>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, kind, title, status, created_at_ms, updated_at_ms
+                 FROM actions ORDER BY created_at_ms DESC, id DESC LIMIT ?1",
+            )
+            .map_err(io::Error::other)?;
+        let actions = statement
+            .query_map([limit as i64], |row| {
+                Ok(ActionRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    title: row.get(3)?,
+                    status: row.get(4)?,
+                    created_at_ms: row.get(5)?,
+                    updated_at_ms: row.get(6)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<ActionRecord>>>()
+            .map_err(io::Error::other)?;
+        Ok(actions)
     }
 
     fn connection(&self) -> MutexGuard<'_, Connection> {
@@ -1530,6 +1624,104 @@ mod tests {
                 .expect("events should list"),
             vec![event],
             "an event written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn actions_list_newest_first_and_keep_their_session_link() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let session = store
+            .create_session("Sprint planning")
+            .expect("session should be created");
+
+        // Inserted oldest-first, with hand-set stamps, to pin newest-first listing.
+        let older = super::ActionRecord {
+            created_at_ms: 10,
+            updated_at_ms: 10,
+            ..super::ActionRecord::draft(
+                Some(&session.id),
+                "review_pull_request",
+                "Check PR 482 for token refresh breakage",
+            )
+        };
+        store.insert_action(&older).expect("action should insert");
+        let newer = super::ActionRecord {
+            created_at_ms: 20,
+            updated_at_ms: 20,
+            ..super::ActionRecord::draft(None, "custom", "Follow up with the team")
+        };
+        store.insert_action(&newer).expect("action should insert");
+
+        assert_eq!(
+            store.list_actions(10).expect("actions should list"),
+            vec![newer.clone(), older],
+            "actions list newest-first, and a linked action keeps its session"
+        );
+        assert_eq!(
+            store.list_actions(1).expect("actions should list"),
+            vec![newer],
+            "the limit bounds the page"
+        );
+        assert!(
+            store
+                .list_actions(10)
+                .expect("actions should list")
+                .iter()
+                .all(|action| action.status == "draft"),
+            "every action begins as a draft"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_eight_store_adds_actions_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before action drafts existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..8] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before actions', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 8)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_sessions(2)
+                .expect("sessions should list")
+                .first()
+                .map(|session| session.title.clone()),
+            Some("Before actions".to_owned()),
+            "a session written before actions existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_actions(1)
+                .expect("actions should list")
+                .is_empty(),
+            "a store written before actions existed must survive with no drafts"
+        );
+        let action =
+            super::ActionRecord::draft(Some("session-legacy"), "plan_change", "After the upgrade");
+        store.insert_action(&action).expect("action should insert");
+        assert_eq!(
+            store.list_actions(2).expect("actions should list"),
+            vec![action],
+            "an action written after the upgrade must round-trip"
         );
     }
 

@@ -1,6 +1,8 @@
 mod store;
 
-use crate::store::{Marker, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment};
+use crate::store::{
+    ActionRecord, Marker, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,6 +66,24 @@ const MAX_TRANSCRIPT_SPEAKER_BYTES: usize = 256;
 const LIST_TRANSCRIPT_LIMIT: usize = 50;
 const LIST_RUNS_LIMIT: usize = 50;
 const LIST_RUN_EVENTS_LIMIT: usize = 50;
+/// An action always states the work it stands for, and the taxonomy is closed: the app has to
+/// know how to present, route, and eventually run every kind it admits.
+const ACTION_KINDS: [&str; 12] = [
+    "research",
+    "review_pull_request",
+    "inspect_repository",
+    "plan_change",
+    "draft_document",
+    "build_change",
+    "run_tests",
+    "investigate_bug",
+    "create_issue",
+    "post_review",
+    "update_external_tool",
+    "custom",
+];
+const MAX_ACTION_TITLE_BYTES: usize = 4096;
+const LIST_ACTIONS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -246,6 +266,23 @@ struct ListRunEventsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     events: &'a [RunEvent],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct CreateActionResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    action: &'a ActionRecord,
+}
+
+#[derive(Serialize)]
+struct ListActionsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    actions: &'a [ActionRecord],
     truncated: bool,
 }
 
@@ -1721,6 +1758,100 @@ fn handle_connection(
                         // Dropping from the end keeps the start of the run's history.
                         Err(_) if !events.is_empty() => {
                             events.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "create_action" => {
+                // An action always states the work it stands for, and the taxonomy is closed
+                // and exact: an omitted, an explicitly null, an unknown, a differently cased,
+                // and a padded kind are all rejected, because each would name work the app
+                // does not know how to carry out.
+                let kind = match request.kind {
+                    Some(Some(kind)) if ACTION_KINDS.contains(&kind.as_str()) => kind,
+                    _ => return write_protocol_error(&mut stream, "invalid_create_action"),
+                };
+                let Some(title) = request
+                    .title
+                    .map(|title| title.trim().to_owned())
+                    .filter(|title| !title.is_empty() && title.len() <= MAX_ACTION_TITLE_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_create_action");
+                };
+                // An action may stand alone — one minted by hand belongs to no session — but a
+                // stated link must name a session that exists. As with a run's link, only an
+                // omitted field states "no link".
+                let linked_session_id = match request.session_id {
+                    None => None,
+                    Some(None) => {
+                        return write_protocol_error(&mut stream, "invalid_create_action");
+                    }
+                    Some(Some(session_id)) => match store.session_exists(&session_id) {
+                        Ok(true) => Some(session_id),
+                        Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                        Err(error) => {
+                            eprintln!("store read error: {error}");
+                            return write_protocol_error(&mut stream, "store_unavailable");
+                        }
+                    },
+                };
+                // Status is not a field of this request: every action begins as a draft, and a
+                // client-supplied status is ignored along with every other unrecognized key.
+                let action = ActionRecord::draft(linked_session_id.as_deref(), &kind, &title);
+                let response = CreateActionResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "create_action_response",
+                    action: &action,
+                };
+                // Escape-heavy titles can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted action can never persist yet be unlistable.
+                let list_probe = ListActionsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_actions_response",
+                    actions: std::slice::from_ref(&action),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_create_action");
+                }
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_create_action");
+                };
+                if let Err(error) = store.insert_action(&action) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_actions" => {
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut actions = match store.list_actions(LIST_ACTIONS_LIMIT + 1) {
+                    Ok(actions) => actions,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = actions.len() > LIST_ACTIONS_LIMIT;
+                actions.truncate(LIST_ACTIONS_LIMIT);
+                let frame = loop {
+                    let response = ListActionsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_actions_response",
+                        actions: &actions,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // The page is newest-first, so dropping from the end keeps the
+                        // newest drafts.
+                        Err(_) if !actions.is_empty() => {
+                            actions.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),
