@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 23,
-  "active_milestone": "M2 Domain/persistence (slices 1-5 merged: session store + kinds + source refs + run records + markers)",
+  "cycle": 24,
+  "active_milestone": "M2 Domain/persistence (slices 1-6 merged: session store + kinds + source refs + run records + markers + run listability)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 23: delivered M2 slice 5 through PR #41, squash-merged as 4243901. Persisted user markers (spec 5/6.3): migration 5 markers table, add_marker with required case-sensitive kind from the 6.3 set, non-negative whole-ms at_ms, optional speaker-convention note; chronological bounded list_markers; Swift Marker/MarkerListPage. Sol round-1 MAJOR fixed red-first and broadened: admission now probes the single-item LIST envelope for markers, sources, AND sessions (accepted implies listable alone) - the latent gap also existed in merged paths. Round 2 PASS; runs listability probe deferred to the next runs slice (records grow terminal fields after admission). Gates: 130 Rust + 41 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0 x2, real-binary v4->v5 migration demo, user store untouched. Next: runs listability probe + run events/artifacts, or session note/attachments.",
-  "updated_at": "2026-09-01T05:32:09+00:00",
+  "last_cycle_summary": "Cycle 24: delivered M2 slice 6 through PR #43, squash-merged as 6c18442. Closed the deferred runs-listability gap: start_process probes the single-item list_runs frame with worst-case terminal fields (interrupted status, i32::MIN exit code, longest protocol error code, i64::MAX end timestamp) before insert, completing accepted-implies-listable-alone across sessions, sources, markers, and runs. Three Sol rounds: timestamp ceiling fixed, both terminal shapes swept, one-byte sweep granularity with a mutant proof; round 3 PASS zero findings. Gates: 131 Rust + 41 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0 x3, real-binary demo, user store untouched. Next: run events/artifacts or session note/attachments.",
+  "updated_at": "2026-09-01T06:07:22+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
