@@ -2949,3 +2949,229 @@ fn packet_numbers_outside_the_f64_range_close_the_connection_unanswered() {
     let page = list_task_packets(&backend.socket_path, action_id);
     assert_eq!(page["packets"].as_array().expect("packets array").len(), 0);
 }
+
+/// The closed §14 audit-event taxonomy: one kind per fact the audit log records
+/// about a run. Kinds are case-sensitive and closed, like action kinds.
+const AUDIT_KINDS: [&str; 10] = [
+    "authorizer",
+    "source",
+    "packet_version",
+    "permission_granted",
+    "file_accessed",
+    "service_accessed",
+    "permission_requested",
+    "user_response",
+    "artifact",
+    "final_status",
+];
+
+fn mint_run_record(socket_path: &Path, run_id: &str) -> String {
+    let exit = run_process(
+        socket_path,
+        serde_json::json!({"run_id": run_id, "executable": "/usr/bin/true",
+            "arguments": [], "timeout_milliseconds": 5_000}),
+    );
+    assert_eq!(exit["type"], "run_exit", "run should complete, got {exit}");
+    let page = list_runs(socket_path);
+    runs_named(&page, run_id)[0]["id"]
+        .as_str()
+        .expect("record id")
+        .to_owned()
+}
+
+fn record_audit_event(
+    socket_path: &Path,
+    record_id: &str,
+    kind: &str,
+    detail: &str,
+) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "record_audit_event",
+            "record_id": record_id, "kind": kind, "detail": detail}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "record_audit_event_response",
+        "event should be accepted, got {response}"
+    );
+    response["event"].clone()
+}
+
+fn list_audit_events(socket_path: &Path, record_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_audit_events", "record_id": record_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_audit_events_response");
+    response
+}
+
+#[test]
+fn audit_events_persist_in_sequence_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("audit.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (record_id, other_id) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let record_id = mint_run_record(&backend.socket_path, "audited-run");
+        let other_id = mint_run_record(&backend.socket_path, "other-run");
+
+        // Every §14 kind is recordable; the sequence is the backend's, dense from zero.
+        for (position, kind) in AUDIT_KINDS.iter().enumerate() {
+            let event = record_audit_event(
+                &backend.socket_path,
+                &record_id,
+                kind,
+                &format!("detail for {kind}"),
+            );
+            assert_eq!(event["record_id"], record_id.as_str());
+            assert_eq!(event["kind"], *kind);
+            assert_eq!(
+                event["seq"], position as i64,
+                "the backend stamps a dense per-record sequence, got {event}"
+            );
+            assert!(
+                event["at_ms"].as_i64().unwrap_or_default() > 0,
+                "the moment is stamped, got {event}"
+            );
+        }
+        // A client-supplied sequence or stamp never leaks into the trail.
+        let forged = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "record_audit_event",
+                "record_id": other_id, "kind": "authorizer", "detail": "the user",
+                "seq": 99, "at_ms": 7}),
+        );
+        assert_eq!(forged["type"], "record_audit_event_response");
+        assert_eq!(
+            forged["event"]["seq"], 0,
+            "each record's trail numbers itself from zero, got {forged}"
+        );
+        assert!(forged["event"]["at_ms"].as_i64().unwrap_or_default() > 7);
+        backend.stop();
+        (record_id, other_id)
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_audit_events(&restarted.socket_path, &record_id);
+    assert_eq!(page["truncated"], false);
+    let events = events_of(&page);
+    assert_eq!(
+        events.len(),
+        AUDIT_KINDS.len(),
+        "the whole trail survives restart"
+    );
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(
+            event["seq"], position as i64,
+            "order is the sequence, got {event}"
+        );
+        assert_eq!(event["kind"], AUDIT_KINDS[position]);
+        assert_eq!(
+            event["detail"],
+            format!("detail for {}", AUDIT_KINDS[position])
+        );
+    }
+    let other_page = list_audit_events(&restarted.socket_path, &other_id);
+    let other_events = events_of(&other_page);
+    assert_eq!(
+        other_events.len(),
+        1,
+        "trails stay scoped to their own record"
+    );
+    assert_eq!(other_events[0]["detail"], "the user");
+}
+
+#[test]
+fn invalid_audit_events_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("auditbad.sock");
+    let backend = BackendProcess::start(&socket_path, None, None);
+    let record_id = mint_run_record(&backend.socket_path, "guarded-run");
+    record_audit_event(&backend.socket_path, &record_id, "authorizer", "the user");
+
+    // Field problems are the caller's problems, named uniformly.
+    let invalid = [
+        serde_json::json!({"kind": "authorizer", "detail": "x"}),
+        serde_json::json!({"record_id": null, "kind": "authorizer", "detail": "x"}),
+        serde_json::json!({"record_id": record_id, "detail": "x"}),
+        serde_json::json!({"record_id": record_id, "kind": null, "detail": "x"}),
+        // The taxonomy is closed and case-sensitive.
+        serde_json::json!({"record_id": record_id, "kind": "Authorizer", "detail": "x"}),
+        serde_json::json!({"record_id": record_id, "kind": "custom", "detail": "x"}),
+        serde_json::json!({"record_id": record_id, "kind": "authorizer"}),
+        serde_json::json!({"record_id": record_id, "kind": "authorizer", "detail": null}),
+        serde_json::json!({"record_id": record_id, "kind": "authorizer", "detail": ""}),
+        serde_json::json!({"record_id": record_id, "kind": "authorizer", "detail": "  \n "}),
+        serde_json::json!({"record_id": record_id, "kind": "authorizer",
+            "detail": "x".repeat(4097)}),
+    ];
+    for mut case in invalid {
+        case["version"] = serde_json::json!(1);
+        case["type"] = serde_json::json!("record_audit_event");
+        let response = exchange(&backend.socket_path, case.clone());
+        assert_eq!(response["type"], "error", "case {case} should be rejected");
+        assert_eq!(
+            response["code"], "invalid_record_audit_event",
+            "case {case}"
+        );
+    }
+    // A record that does not exist is its own answer, for writes and reads alike.
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "record_audit_event",
+            "record_id": "run-missing", "kind": "authorizer", "detail": "x"}),
+    );
+    assert_eq!(response["code"], "unknown_run");
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_audit_events",
+            "record_id": "run-missing"}),
+    );
+    assert_eq!(response["code"], "unknown_run");
+
+    // Nothing above left a trace beside the one legitimate event.
+    let page = list_audit_events(&backend.socket_path, &record_id);
+    let events = events_of(&page);
+    assert_eq!(events.len(), 1, "rejected events must not persist");
+}
+
+#[test]
+fn every_accepted_audit_event_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("auditbound.sock");
+    let backend = BackendProcess::start(&socket_path, None, None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    // Each NUL costs 1 raw detail byte but 6 serialized bytes, so the detail cap
+    // admits every payload in this window and the single-item list-envelope
+    // probe is the binding rejection. A fresh run record per probe keeps the
+    // just-recorded event alone on its page.
+    for nulls in 1300..1338 {
+        let record_id = mint_run_record(&backend.socket_path, &format!("bound-{nulls}"));
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "record_audit_event",
+                "record_id": record_id, "kind": "artifact",
+                "detail": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_record_audit_event");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_audit_events(&backend.socket_path, &record_id);
+        let events = events_of(&page);
+        assert_eq!(
+            events.len(),
+            1,
+            "an admitted audit event must be listable alone, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
