@@ -5,8 +5,8 @@ post-migration user_version: 11
  "version": 1,
  "type": "create_task_packet_response",
  "packet": {
-  "id": "task-packet-2c7a-18d1292ea546fd48-1",
-  "action_id": "action-2c7a-18d1292ea540cb58-0",
+  "id": "task-packet-4df9-18d129b655774c90-1",
+  "action_id": "action-4df9-18d129b655710ee8-0",
   "packet_version": 1,
   "body": {
    "action": {
@@ -22,7 +22,7 @@ post-migration user_version: 11
    },
    "task_packet_version": 1
   },
-  "created_at_ms": 1788255807360
+  "created_at_ms": 1788256390137
  }
 }
 --- version 2 rejected
@@ -49,8 +49,8 @@ post-migration user_version: 11
  "type": "list_task_packets_response",
  "packets": [
   {
-   "id": "task-packet-2c7a-18d1292ea546fd48-1",
-   "action_id": "action-2c7a-18d1292ea540cb58-0",
+   "id": "task-packet-4df9-18d129b655774c90-1",
+   "action_id": "action-4df9-18d129b655710ee8-0",
    "packet_version": 1,
    "body": {
     "action": {
@@ -66,7 +66,7 @@ post-migration user_version: 11
     },
     "task_packet_version": 1
    },
-   "created_at_ms": 1788255807360
+   "created_at_ms": 1788256390137
   }
  ],
  "truncated": false

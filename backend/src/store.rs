@@ -244,7 +244,8 @@ pub(crate) struct Project {
 }
 
 /// The provider-neutral document one action is delegated with. The domain layer keeps the
-/// document exactly as it arrived and reads only the version it declares, so every other key
+/// document's canonical form (duplicate members collapse last-wins; numbers take their
+/// shortest round-trip spelling) and reads only the version it declares, so every other key
 /// belongs to whichever provider the packet was shaped for.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TaskPacket {

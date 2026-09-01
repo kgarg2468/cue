@@ -6,6 +6,39 @@ BINARY, WORKDIR = sys.argv[1], sys.argv[2]
 SOCK = os.path.join(WORKDIR, "demo.sock")
 STORE = os.path.join(WORKDIR, "store.sqlite")
 
+# The v10 store this demo migrates is built here, by hand, independently of the
+# backend's MIGRATIONS array — so a breaking change smuggled into an early
+# migration cannot stay self-consistent with this check.
+V10_FIXTURE = """
+CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+ALTER TABLE sessions ADD COLUMN kind TEXT;
+CREATE TABLE sources (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, speaker TEXT, text TEXT NOT NULL);
+CREATE INDEX sources_by_session_and_start ON sources (session_id, start_ms, id);
+CREATE TABLE runs (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_id TEXT REFERENCES sessions(id), executable TEXT NOT NULL, status TEXT NOT NULL, exit_code INTEGER, error_code TEXT, started_at_ms INTEGER NOT NULL, ended_at_ms INTEGER);
+CREATE INDEX runs_by_start ON runs (started_at_ms, id);
+CREATE TABLE markers (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), at_ms INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT);
+CREATE INDEX markers_by_session_and_at ON markers (session_id, at_ms, id);
+ALTER TABLE sessions ADD COLUMN note TEXT;
+CREATE TABLE transcript_segments (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, speaker TEXT, text TEXT NOT NULL);
+CREATE INDEX transcript_by_session_and_start ON transcript_segments (session_id, start_ms, id);
+CREATE TABLE run_events (id TEXT PRIMARY KEY, record_id TEXT NOT NULL REFERENCES runs(id), seq INTEGER NOT NULL, at_ms INTEGER NOT NULL, kind TEXT NOT NULL);
+CREATE INDEX run_events_by_record_and_seq ON run_events (record_id, seq);
+CREATE TABLE actions (id TEXT PRIMARY KEY, session_id TEXT REFERENCES sessions(id), kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+CREATE INDEX actions_by_creation ON actions (created_at_ms, id);
+CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+CREATE TABLE session_projects (session_id TEXT NOT NULL REFERENCES sessions(id), project_id TEXT NOT NULL REFERENCES projects(id), linked_at_ms INTEGER NOT NULL, PRIMARY KEY (session_id, project_id));
+CREATE INDEX session_projects_by_link ON session_projects (session_id, linked_at_ms, project_id);
+INSERT INTO sessions (id, title, created_at_ms, updated_at_ms) VALUES ('session-legacy', 'Before packets', 7, 7);
+INSERT INTO actions (id, kind, title, status, created_at_ms, updated_at_ms) VALUES ('action-legacy', 'custom', 'Before packets', 'draft', 7, 7);
+PRAGMA user_version = 10;
+"""
+
+assert not os.path.exists(STORE), "demo needs a fresh workdir"
+fixture = sqlite3.connect(STORE)
+fixture.executescript(V10_FIXTURE)
+fixture.close()
+os.chmod(STORE, 0o600)
+
 def start():
     p = subprocess.Popen([BINARY, "--socket", SOCK, "--store", STORE],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

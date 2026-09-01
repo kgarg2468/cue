@@ -3,8 +3,10 @@
 ## Contract
 - task_packets table (migration 11): id PK, action_id REFERENCES actions,
   packet_version, body TEXT (canonical JSON), created_at_ms; chronological
-  index. The §8 packet is a versioned DOCUMENT: the domain layer stores it
-  verbatim (round-trips exactly) and extracts only task_packet_version, which
+  index. The §8 packet is a versioned DOCUMENT: the domain layer stores its
+  canonical form (value-identical round-trip; duplicate members collapse
+  last-wins, numbers take their shortest round-trip spelling — narrowed in
+  Sol round 1) and extracts only task_packet_version, which
   must equal integer 1 exactly. Schema enforcement of packet internals lands
   with the packet-building milestones (M6/M13).
 - create_task_packet validation: action_id double-Option; body must be a JSON
@@ -114,3 +116,17 @@ Swift tests including boolean fidelity; verify-m0-round1.log), runtime demo
 green with raw wire-text fidelity assertions — the create response and the
 post-restart list both carry the exact admitted float literal, which a
 pre-fix binary cannot do, so the demo doubles as feature-presence evidence.
+
+## Sol round 2 (PASS, 2 MINOR) — dispositions
+Sol confirmed the number remediation sufficient: float_roundtrip resolves,
+the admission guard has no production bypass, finite floats including -0.0
+and subnormals stay fixed points, and removing the feature would fail both
+new regression tests. Two MINORs, both fixed:
+- A leftover "exactly as it arrived" claim on the TaskPacket struct doc
+  (store.rs) and a "verbatim" line in this file's Contract section — both
+  now state the canonical-form contract.
+- The runtime demo's v10 fixture was built by an untracked shell heredoc,
+  so the independence claim was not reproducible from the repository. The
+  archived demo script now embeds the hand-built v10 SQL and constructs its
+  own store, so the independent migration check reruns from the repo alone
+  (runtime-demo-round1-script.py; rerun green in runtime-demo-round1.log).
