@@ -1,6 +1,6 @@
 mod store;
 
-use crate::store::{Session, Store};
+use crate::store::{Session, Source, Store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +43,9 @@ const SESSION_KINDS: [&str; 6] = [
     "imported_audio",
 ];
 const LIST_SESSIONS_LIMIT: usize = 50;
+const MAX_SOURCE_TEXT_BYTES: usize = 4096;
+const MAX_SOURCE_SPEAKER_BYTES: usize = 256;
+const LIST_SOURCES_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -84,6 +87,19 @@ struct Request {
     // omitted field: only omission means uncategorized.
     #[serde(default, deserialize_with = "deserialize_present")]
     kind: Option<Option<String>>,
+    #[serde(default)]
+    session_id: Option<String>,
+    // Untyped so a float, a negative, or a string is an error frame instead of a
+    // dropped connection, matching timeout_milliseconds.
+    #[serde(default)]
+    start_ms: Option<serde_json::Value>,
+    #[serde(default)]
+    end_ms: Option<serde_json::Value>,
+    // Double option as with `kind`: only an omitted speaker means unattributed.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    speaker: Option<Option<String>>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -124,6 +140,23 @@ struct ListSessionsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     sessions: &'a [Session],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct AddSourceResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    source: &'a Source,
+}
+
+#[derive(Serialize)]
+struct ListSourcesResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    sources: &'a [Source],
     truncated: bool,
 }
 
@@ -1082,6 +1115,108 @@ fn handle_connection(
                         Ok(frame) => break frame,
                         Err(_) if !sessions.is_empty() => {
                             sessions.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "add_source" => {
+                // A span is stated in whole non-negative milliseconds; a float, a negative,
+                // or a string is a rejected field, not a rejected connection.
+                let (Some(session_id), Some(start_ms), Some(end_ms)) = (
+                    request.session_id,
+                    request.start_ms.as_ref().and_then(milliseconds_field),
+                    request.end_ms.as_ref().and_then(milliseconds_field),
+                ) else {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                };
+                if end_ms < start_ms {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                }
+                let Some(text) = request
+                    .text
+                    .map(|text| text.trim().to_owned())
+                    .filter(|text| !text.is_empty() && text.len() <= MAX_SOURCE_TEXT_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                };
+                let speaker = match request.speaker {
+                    None => None,
+                    // A blank or explicit-null speaker is not how an unattributed source is
+                    // stated; only omitting the field is.
+                    Some(Some(speaker)) => {
+                        let speaker = speaker.trim().to_owned();
+                        if speaker.is_empty() || speaker.len() > MAX_SOURCE_SPEAKER_BYTES {
+                            return write_protocol_error(&mut stream, "invalid_add_source");
+                        }
+                        Some(speaker)
+                    }
+                    Some(None) => return write_protocol_error(&mut stream, "invalid_add_source"),
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                let source =
+                    Source::draft(&session_id, start_ms, end_ms, speaker.as_deref(), &text);
+                let response = AddSourceResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "add_source_response",
+                    source: &source,
+                };
+                // Escape-heavy text can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted.
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                };
+                if let Err(error) = store.insert_source(&source) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_sources" => {
+                // A page can only be scoped to a session that exists, so a missing and an
+                // unknown session_id are the same answer.
+                let Some(session_id) = request.session_id else {
+                    return write_protocol_error(&mut stream, "unknown_session");
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut sources = match store.list_sources(&session_id, LIST_SOURCES_LIMIT + 1) {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = sources.len() > LIST_SOURCES_LIMIT;
+                sources.truncate(LIST_SOURCES_LIMIT);
+                let frame = loop {
+                    let response = ListSourcesResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_sources_response",
+                        sources: &sources,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the chronological start of the page.
+                        Err(_) if !sources.is_empty() => {
+                            sources.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),
@@ -2801,6 +2936,11 @@ fn decode_output_chunk(utf8_carry: &mut Vec<u8>, bytes: &[u8]) -> String {
 
     utf8_carry.drain(..consumed);
     output
+}
+
+/// A timeline offset in whole non-negative milliseconds, or `None` for anything else.
+fn milliseconds_field(value: &serde_json::Value) -> Option<i64> {
+    value.as_u64().and_then(|value| i64::try_from(value).ok())
 }
 
 fn serialize_json_frame<T: Serialize>(response: &T) -> io::Result<Vec<u8>> {

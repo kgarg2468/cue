@@ -161,6 +161,28 @@ fn create_session_with_kind(socket_path: &Path, title: &str, kind: &str) -> serd
     response["session"].clone()
 }
 
+fn add_source(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("add_source");
+    let response = exchange(socket_path, request);
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "add_source_response",
+        "source should be accepted, got {response}"
+    );
+    response["source"].clone()
+}
+
+fn list_sources(socket_path: &Path, session_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_sources", "session_id": session_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_sources_response");
+    response
+}
+
 fn mode_of(path: &Path) -> u32 {
     fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("{} metadata should be readable: {error}", path.display()))
@@ -430,6 +452,202 @@ fn unknown_session_kinds_are_rejected_with_an_error_frame() {
     assert!(
         list_sessions(&backend.socket_path).is_empty(),
         "rejected kinds must not persist sessions"
+    );
+}
+
+#[test]
+fn source_references_persist_chronologically_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("sources.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (session_id, other_id, expected) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Sprint planning");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+        let other = create_session(&backend.socket_path, "Unrelated session");
+        let other_id = other["id"].as_str().expect("session id").to_owned();
+
+        // Inserted out of order to pin chronological listing.
+        let late = add_source(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": session_id,
+                "start_ms": 872_000,
+                "end_ms": 884_000,
+                "speaker": "Sarah",
+                "text": "Krish, can you check PR 482 and see whether token refresh breaks?",
+            }),
+        );
+        assert_eq!(late["session_id"], session_id.as_str());
+        assert_eq!(late["start_ms"], 872_000);
+        assert_eq!(late["end_ms"], 884_000);
+        assert_eq!(late["speaker"], "Sarah");
+        assert!(
+            late["id"].as_str().is_some_and(|id| !id.trim().is_empty()),
+            "source ids should be non-empty"
+        );
+        let early = add_source(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": session_id,
+                "start_ms": 1_000,
+                "end_ms": 1_000,
+                "text": "Zero-length span without a speaker",
+            }),
+        );
+        assert!(
+            early.get("speaker").is_none(),
+            "a source without a speaker must omit the field, got {early}"
+        );
+        add_source(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": other_id,
+                "start_ms": 5,
+                "end_ms": 6,
+                "text": "Belongs to the other session",
+            }),
+        );
+        backend.stop();
+        (session_id, other_id, vec![early, late])
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_sources(&restarted.socket_path, &session_id);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["sources"].as_array().expect("sources array"),
+        &expected,
+        "sources should list chronologically for their own session only"
+    );
+    let other_page = list_sources(&restarted.socket_path, &other_id);
+    assert_eq!(
+        other_page["sources"]
+            .as_array()
+            .expect("sources array")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn invalid_source_references_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badsource.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Validation session");
+    let session_id = session["id"].as_str().expect("session id");
+
+    let unknown = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "add_source", "session_id": "ses_missing",
+            "start_ms": 0, "end_ms": 1, "text": "orphan"}),
+    );
+    assert_eq!(
+        unknown,
+        serde_json::json!({"version": 1, "type": "error", "code": "unknown_session"}),
+        "a source for a nonexistent session must be rejected"
+    );
+
+    let invalid_bodies = [
+        // end before start
+        serde_json::json!({"session_id": session_id, "start_ms": 10, "end_ms": 9, "text": "t"}),
+        // negative start
+        serde_json::json!({"session_id": session_id, "start_ms": -1, "end_ms": 9, "text": "t"}),
+        // fractional milliseconds
+        serde_json::json!({"session_id": session_id, "start_ms": 1.5, "end_ms": 9, "text": "t"}),
+        // missing text
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1}),
+        // blank text
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1, "text": " \t "}),
+        // oversized text
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1,
+            "text": "t".repeat(4097)}),
+        // blank speaker: omit the field instead
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1, "text": "t",
+            "speaker": "  "}),
+        // explicit null speaker: omit the field instead
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1, "text": "t",
+            "speaker": null}),
+        // oversized speaker
+        serde_json::json!({"session_id": session_id, "start_ms": 0, "end_ms": 1, "text": "t",
+            "speaker": "s".repeat(257)}),
+        // missing timing
+        serde_json::json!({"session_id": session_id, "text": "t"}),
+    ];
+    for mut body in invalid_bodies {
+        body["version"] = serde_json::json!(1);
+        body["type"] = serde_json::json!("add_source");
+        let response = exchange(&backend.socket_path, body.clone());
+        assert_eq!(
+            response,
+            serde_json::json!({"version": 1, "type": "error", "code": "invalid_add_source"}),
+            "body {body} should be rejected"
+        );
+    }
+
+    // Escape-heavy text passes the raw byte check but serializes past the frame bound.
+    let escape_heavy = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "add_source", "session_id": session_id,
+            "start_ms": 0, "end_ms": 1, "text": "\u{0}".repeat(1345)}),
+    );
+    assert_eq!(escape_heavy["code"], "invalid_add_source");
+
+    let page = list_sources(&backend.socket_path, session_id);
+    assert_eq!(
+        page["sources"].as_array().expect("sources array").len(),
+        0,
+        "rejected sources must not persist"
+    );
+
+    let unknown_list = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_sources", "session_id": "ses_missing"}),
+    );
+    assert_eq!(unknown_list["code"], "unknown_session");
+    let missing_list = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_sources"}),
+    );
+    assert_eq!(missing_list["code"], "unknown_session");
+}
+
+#[test]
+fn list_sources_responses_are_bounded_with_truncation_reported() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("boundedsrc.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Long transcript");
+    let session_id = session["id"].as_str().expect("session id");
+
+    for index in 0..52 {
+        add_source(
+            &backend.socket_path,
+            serde_json::json!({"session_id": session_id, "start_ms": index * 1000,
+                "end_ms": index * 1000 + 500, "text": format!("segment {index:02}")}),
+        );
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_sources", "session_id": session_id}),
+    );
+    assert!(frame.len() <= 8192, "frame should stay bounded");
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["type"], "list_sources_response");
+    assert_eq!(
+        response["sources"].as_array().expect("sources array").len(),
+        50,
+        "count cap should bound the page"
+    );
+    assert_eq!(response["truncated"], true);
+    assert_eq!(
+        response["sources"][0]["text"], "segment 00",
+        "the page should start at the chronological beginning"
     );
 }
 

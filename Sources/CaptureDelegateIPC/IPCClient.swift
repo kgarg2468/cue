@@ -41,6 +41,43 @@ public struct SessionListPage: Equatable {
     }
 }
 
+/// A stable pointer into one session's timeline, with the exact text it refers to.
+public struct Source: Equatable {
+    public let id: String
+    public let sessionID: String
+    public let startMilliseconds: Int
+    public let endMilliseconds: Int
+    /// Nil for an unattributed source; the backend omits the field entirely.
+    public let speaker: String?
+    public let text: String
+
+    public init(
+        id: String,
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.startMilliseconds = startMilliseconds
+        self.endMilliseconds = endMilliseconds
+        self.speaker = speaker
+        self.text = text
+    }
+}
+
+public struct SourceListPage: Equatable {
+    public let sources: [Source]
+    public let truncated: Bool
+
+    public init(sources: [Source], truncated: Bool) {
+        self.sources = sources
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -119,6 +156,36 @@ public enum IPCClient {
 
         try writeListSessionsRequest(to: descriptor)
         return try decodeListSessionsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func addSource(
+        socketPath: String,
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) throws -> Source {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeAddSourceRequest(
+            sessionID: sessionID,
+            startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds,
+            speaker: speaker,
+            text: text,
+            to: descriptor
+        )
+        return try decodeAddSourceResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listSources(socketPath: String, sessionID: String) throws -> SourceListPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListSourcesRequest(sessionID: sessionID, to: descriptor)
+        return try decodeListSourcesResponse(readBoundedResponseLine(from: descriptor))
     }
 
     public static func cancelProcess(socketPath: String, runID: String) throws
@@ -252,6 +319,24 @@ public enum IPCClient {
             + "\(kindField)}\n"
     }
 
+    public static func addSourceRequest(
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) -> String {
+        // An unattributed source omits the key; an explicit null is rejected by the backend.
+        let speakerField = speaker.map { ",\"speaker\":\(jsonString($0))" } ?? ""
+        return "{\"version\":1,\"type\":\"add_source\",\"session_id\":\(jsonString(sessionID)),"
+            + "\"start_ms\":\(startMilliseconds),\"end_ms\":\(endMilliseconds)\(speakerField),"
+            + "\"text\":\(jsonString(text))}\n"
+    }
+
+    public static func listSourcesRequest(sessionID: String) -> String {
+        "{\"version\":1,\"type\":\"list_sources\",\"session_id\":\(jsonString(sessionID))}\n"
+    }
+
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
     }
@@ -363,6 +448,32 @@ public enum IPCClient {
     static func writeListSessionsRequest(to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSessionsRequest.utf8), to: descriptor)
+    }
+
+    static func writeAddSourceRequest(
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String?,
+        text: String,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(
+                addSourceRequest(
+                    sessionID: sessionID,
+                    startMilliseconds: startMilliseconds,
+                    endMilliseconds: endMilliseconds,
+                    speaker: speaker,
+                    text: text
+                ).utf8
+            ), to: descriptor)
+    }
+
+    static func writeListSourcesRequest(sessionID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listSourcesRequest(sessionID: sessionID).utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -615,6 +726,69 @@ public enum IPCClient {
             createdAtMilliseconds: createdAtMilliseconds,
             updatedAtMilliseconds: updatedAtMilliseconds,
             kind: kind
+        )
+    }
+
+    static func decodeAddSourceResponse(_ response: String) throws -> Source {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "add_source_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeSource(json["source"])
+    }
+
+    static func decodeListSourcesResponse(_ response: String) throws -> SourceListPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_sources_response",
+            let sources = json["sources"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return SourceListPage(
+            sources: try sources.map { try decodeSource($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeSource(_ value: Any?) throws -> Source {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let sessionID = json["session_id"] as? String, !sessionID.isEmpty,
+            let startMilliseconds = json["start_ms"] as? Int,
+            let endMilliseconds = json["end_ms"] as? Int,
+            let text = json["text"] as? String
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // An unattributed source omits the field; a present speaker must still be a string.
+        let speaker: String?
+        if json["speaker"] == nil {
+            speaker = nil
+        } else if let value = json["speaker"] as? String {
+            speaker = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return Source(
+            id: id,
+            sessionID: sessionID,
+            startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds,
+            speaker: speaker,
+            text: text
         )
     }
 
