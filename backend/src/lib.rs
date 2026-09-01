@@ -1229,14 +1229,17 @@ fn handle_connection(
                 // is touched: escape-heavy notes can pass the raw byte check yet serialize
                 // past the frame bound. Admission is checked against the single-item LIST
                 // envelope, the larger of the two frames, so an accepted note can never
-                // leave its session unlistable. The write stamps a fresher updated_at_ms
-                // than the one carried here, but both are millisecond epoch stamps of the
-                // same width, so the probed frame and the stored one agree in size.
+                // leave its session unlistable. The write stamps a freshly sampled
+                // updated_at_ms that can be wider than the fetched one (legacy rows
+                // carry no width guarantee), so the probe uses the serialized ceiling
+                // rather than trusting the stored stamp.
                 let updated = Session { note, ..current };
+                let mut probe = updated.clone();
+                probe.updated_at_ms = i64::MAX;
                 let list_probe = ListSessionsResponse {
                     version: PROTOCOL_VERSION,
                     response_type: "list_sessions_response",
-                    sessions: std::slice::from_ref(&updated),
+                    sessions: std::slice::from_ref(&probe),
                     truncated: false,
                 };
                 if serialize_json_frame(&list_probe).is_err() {

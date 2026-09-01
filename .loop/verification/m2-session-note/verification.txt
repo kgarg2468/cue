@@ -40,3 +40,24 @@ on sessions), set_session_note, Swift Session.note + setSessionNote.
   REQUEST frame cap (connection drop by design); corrected to 1345 per the
   marker precedent — worker caught both this and a fmt violation in the
   test file rather than exceeding its allowlist.
+
+## Sol round 1 (FAIL, one MAJOR) — CONFIRMED and fixed
+Claim: the admission probe reuses the fetched row's updated_at_ms while the
+write stamps a freshly sampled one; legacy rows carry no width guarantee
+(the branch's own v5 fixture stores updated_at_ms = 7), so an update can be
+admitted yet make its session unlistable.
+
+Disposition: CONFIRMED. lib.rs built the probe as `Session { note, ..current }`
+with a comment asserting equal stamp width — false for narrow legacy stamps.
+My first repro attempt passed misleadingly: the sweep set 53 notes on one
+session, so the first small accepted note restamped a 13-digit updated_at_ms
+and healed the narrowing before the boundary was reached. Re-narrowing via
+sqlite3 before EVERY sweep step went red exactly as predicted
+(accepted-note-delists-session at nulls=1330; /tmp/red-narrow.log).
+
+Fix: the probe clone now carries updated_at_ms = i64::MAX — the serialized
+ceiling, matching the runs-probe precedent — which also covers a forward
+clock step between probe and write. Regression test
+notes_on_narrow_timestamp_sessions_stay_singly_listable kept (re-narrows the
+row per step). Gates re-run: 136 Rust tests, fmt, clippy -D warnings,
+verify-m0.sh exit 0 (verify-m0-round1.log).

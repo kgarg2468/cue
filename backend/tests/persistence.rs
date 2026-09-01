@@ -1768,3 +1768,49 @@ fn every_accepted_note_keeps_its_session_singly_listable() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+#[test]
+fn notes_on_narrow_timestamp_sessions_stay_singly_listable() {
+    // The UPDATE stamps a freshly sampled updated_at_ms that can be WIDER than
+    // the stored one (legacy rows are not guaranteed 13-digit stamps), so the
+    // admission probe must not trust the fetched row's timestamp width.
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("narrow.sock");
+    let store_path = fixture.path("store.sqlite");
+    let session_id = {
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Narrow stamps");
+        session["id"].as_str().expect("session id").to_owned()
+    };
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        // Every accepted update restamps a 13-digit updated_at_ms, so the row
+        // must be re-narrowed before each attempt or only the first one probes
+        // a narrow stamp.
+        let narrowed = Command::new("sqlite3")
+            .arg(&store_path)
+            .arg("PRAGMA busy_timeout = 5000; UPDATE sessions SET updated_at_ms = 7")
+            .status()
+            .expect("sqlite3 should run");
+        assert!(narrowed.success(), "fixture narrowing should succeed");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "set_session_note",
+                "session_id": session_id, "note": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_set_session_note");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let sessions = list_sessions(&backend.socket_path);
+        assert!(
+            sessions.iter().any(|s| s["id"] == *session_id),
+            "an accepted note must never delist its session, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
