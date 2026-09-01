@@ -278,6 +278,47 @@ public struct ActionPage: Equatable {
     }
 }
 
+/// A durable container of work that outlives any one session.
+public struct Project: Equatable {
+    public let id: String
+    public let name: String
+    public let createdAtMilliseconds: Int
+    public let updatedAtMilliseconds: Int
+
+    public init(
+        id: String,
+        name: String,
+        createdAtMilliseconds: Int,
+        updatedAtMilliseconds: Int
+    ) {
+        self.id = id
+        self.name = name
+        self.createdAtMilliseconds = createdAtMilliseconds
+        self.updatedAtMilliseconds = updatedAtMilliseconds
+    }
+}
+
+public struct ProjectPage: Equatable {
+    public let projects: [Project]
+    public let truncated: Bool
+
+    public init(projects: [Project], truncated: Bool) {
+        self.projects = projects
+        self.truncated = truncated
+    }
+}
+
+/// The membership the backend recorded: one session belongs to one project.
+public struct SessionProjectLink: Equatable {
+    public let sessionID: String
+    public let projectID: String
+
+    public init(sessionID: String, projectID: String) {
+        self.sessionID = sessionID
+        self.projectID = projectID
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -502,6 +543,38 @@ public enum IPCClient {
         return try decodeListActionsResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    public static func createProject(socketPath: String, name: String) throws -> Project {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCreateProjectRequest(name: name, to: descriptor)
+        return try decodeCreateProjectResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    /// States that one session belongs to one project; relinking an existing pair is rejected.
+    public static func linkSessionProject(
+        socketPath: String,
+        sessionID: String,
+        projectID: String
+    ) throws -> SessionProjectLink {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeLinkSessionProjectRequest(
+            sessionID: sessionID, projectID: projectID, to: descriptor)
+        return try decodeLinkSessionProjectResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listSessionProjects(socketPath: String, sessionID: String) throws
+        -> ProjectPage
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListSessionProjectsRequest(sessionID: sessionID, to: descriptor)
+        return try decodeListSessionProjectsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func cancelProcess(socketPath: String, runID: String) throws
         -> CancelProcessResult
     {
@@ -712,6 +785,21 @@ public enum IPCClient {
     }
 
     public static let listActionsRequest = "{\"version\":1,\"type\":\"list_actions\"}\n"
+
+    public static func createProjectRequest(name: String) -> String {
+        "{\"version\":1,\"type\":\"create_project\",\"name\":\(jsonString(name))}\n"
+    }
+
+    public static func linkSessionProjectRequest(sessionID: String, projectID: String) -> String {
+        // A membership names both of its sides; the backend rejects either one missing.
+        return "{\"version\":1,\"type\":\"link_session_project\","
+            + "\"session_id\":\(jsonString(sessionID)),\"project_id\":\(jsonString(projectID))}\n"
+    }
+
+    public static func listSessionProjectsRequest(sessionID: String) -> String {
+        "{\"version\":1,\"type\":\"list_session_projects\","
+            + "\"session_id\":\(jsonString(sessionID))}\n"
+    }
 
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
@@ -935,6 +1023,27 @@ public enum IPCClient {
     static func writeListActionsRequest(to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listActionsRequest.utf8), to: descriptor)
+    }
+
+    static func writeCreateProjectRequest(name: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(createProjectRequest(name: name).utf8), to: descriptor)
+    }
+
+    static func writeLinkSessionProjectRequest(
+        sessionID: String,
+        projectID: String,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(linkSessionProjectRequest(sessionID: sessionID, projectID: projectID).utf8),
+            to: descriptor)
+    }
+
+    static func writeListSessionProjectsRequest(sessionID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listSessionProjectsRequest(sessionID: sessionID).utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -1585,6 +1694,71 @@ public enum IPCClient {
             kind: kind,
             title: title,
             status: status,
+            createdAtMilliseconds: createdAtMilliseconds,
+            updatedAtMilliseconds: updatedAtMilliseconds
+        )
+    }
+
+    static func decodeCreateProjectResponse(_ response: String) throws -> Project {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "create_project_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeProject(json["project"])
+    }
+
+    static func decodeLinkSessionProjectResponse(_ response: String) throws -> SessionProjectLink {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "link_session_project_response",
+            let sessionID = json["session_id"] as? String, !sessionID.isEmpty,
+            let projectID = json["project_id"] as? String, !projectID.isEmpty
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return SessionProjectLink(sessionID: sessionID, projectID: projectID)
+    }
+
+    static func decodeListSessionProjectsResponse(_ response: String) throws -> ProjectPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_session_projects_response",
+            let projects = json["projects"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return ProjectPage(
+            projects: try projects.map { try decodeProject($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeProject(_ value: Any?) throws -> Project {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let name = json["name"] as? String, !name.isEmpty,
+            let createdAtMilliseconds = json["created_at_ms"] as? Int,
+            let updatedAtMilliseconds = json["updated_at_ms"] as? Int
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return Project(
+            id: id,
+            name: name,
             createdAtMilliseconds: createdAtMilliseconds,
             updatedAtMilliseconds: updatedAtMilliseconds
         )

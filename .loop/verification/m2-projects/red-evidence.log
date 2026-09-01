@@ -1,0 +1,8 @@
+test invalid_projects_and_links_are_rejected_before_persisting ... FAILED
+test projects_and_session_links_persist_and_survive_a_restart ... FAILED
+test every_accepted_project_is_listable_alone_and_through_its_session ... FAILED
+thread 'invalid_projects_and_links_are_rejected_before_persisting' (25352426) panicked at backend/tests/persistence.rs:2367:5:
+thread 'projects_and_session_links_persist_and_survive_a_restart' (25352427) panicked at backend/tests/persistence.rs:2367:5:
+thread 'every_accepted_project_is_listable_alone_and_through_its_session' (25352425) panicked at backend/tests/persistence.rs:2544:13:
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.24s
+reds vs f593142 Record merged M2 action-drafts slice (cycle 28 closeout) (#52)

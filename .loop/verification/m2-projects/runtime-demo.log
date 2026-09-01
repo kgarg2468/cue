@@ -1,0 +1,55 @@
+pre-migration user_version: 9
+post-migration user_version: 10
+legacy session: ses_legacy01 Pre-migration meeting
+--- project created
+{
+ "version": 1,
+ "type": "create_project_response",
+ "project": {
+  "id": "project-1ced-18d124ff831ecda0-0",
+  "name": "Hackathon Brief",
+  "created_at_ms": 1788251206877,
+  "updated_at_ms": 1788251206877
+ }
+}
+--- link to pre-migration session
+{
+ "version": 1,
+ "type": "link_session_project_response",
+ "session_id": "ses_legacy01",
+ "project_id": "project-1ced-18d124ff831ecda0-0"
+}
+--- duplicate link rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "duplicate_project_link"
+}
+--- unknown project rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "unknown_project"
+}
+--- blank name rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_create_project"
+}
+--- session's projects after restart
+{
+ "version": 1,
+ "type": "list_session_projects_response",
+ "projects": [
+  {
+   "id": "project-1ced-18d124ff831ecda0-0",
+   "name": "Hackathon Brief",
+   "created_at_ms": 1788251206877,
+   "updated_at_ms": 1788251206877
+  }
+ ],
+ "truncated": false
+}
+store mode: 0o600
+DEMO OK

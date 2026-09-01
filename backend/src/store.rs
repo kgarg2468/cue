@@ -94,6 +94,24 @@ const MIGRATIONS: &[&str] = &[
         updated_at_ms INTEGER NOT NULL
     );
     CREATE INDEX actions_by_creation ON actions (created_at_ms, id)",
+    // A project is a durable container of work that outlives any one session, and a session may
+    // belong to more than one. Membership is its own table so a link carries its own stamp
+    // instead of rewriting either side; the primary key makes a pair statable exactly once, and
+    // the index serves the only read path, which walks one session's projects in link order.
+    "CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+    );
+    CREATE TABLE session_projects (
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        linked_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (session_id, project_id)
+    );
+    CREATE INDEX session_projects_by_link
+        ON session_projects (session_id, linked_at_ms, project_id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -196,6 +214,16 @@ pub(crate) struct ActionRecord {
     pub(crate) kind: String,
     pub(crate) title: String,
     pub(crate) status: String,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+}
+
+/// A durable container of work that outlives any one session, so the sessions that touch it can
+/// come and go while the project they belong to stays.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Project {
+    pub(crate) id: String,
+    pub(crate) name: String,
     pub(crate) created_at_ms: i64,
     pub(crate) updated_at_ms: i64,
 }
@@ -332,6 +360,20 @@ impl ActionRecord {
             kind: kind.to_owned(),
             title: title.to_owned(),
             status: "draft".to_owned(),
+            created_at_ms,
+            updated_at_ms: created_at_ms,
+        }
+    }
+}
+
+impl Project {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens.
+    pub(crate) fn draft(name: &str) -> Project {
+        let created_at_ms = now_milliseconds();
+        Project {
+            id: record_id("project"),
+            name: name.to_owned(),
             created_at_ms,
             updated_at_ms: created_at_ms,
         }
@@ -797,6 +839,88 @@ impl Store {
             .collect::<rusqlite::Result<Vec<ActionRecord>>>()
             .map_err(io::Error::other)?;
         Ok(actions)
+    }
+
+    pub(crate) fn insert_project(&self, project: &Project) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO projects (id, name, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    project.id,
+                    project.name,
+                    project.created_at_ms,
+                    project.updated_at_ms
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub(crate) fn project_exists(&self, id: &str) -> io::Result<bool> {
+        self.connection()
+            .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(()))
+            .map(|()| true)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                error => Err(io::Error::other(error)),
+            })
+    }
+
+    /// States that one session belongs to one project, stamped with the moment it was stated.
+    /// Answers `true` when this call is what created the membership and `false` when the pair
+    /// was already linked: the primary key admits a pair exactly once, so the ignored insert
+    /// changes no row the second time and the caller can tell the two apart without racing a
+    /// separate existence query against another writer.
+    pub(crate) fn insert_session_project_link(
+        &self,
+        session_id: &str,
+        project_id: &str,
+    ) -> io::Result<bool> {
+        let changed = self
+            .connection()
+            .execute(
+                "INSERT OR IGNORE INTO session_projects (session_id, project_id, linked_at_ms)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, project_id, now_milliseconds()],
+            )
+            .map_err(io::Error::other)?;
+        Ok(changed > 0)
+    }
+
+    /// One session's projects, in the order their memberships were stated. Links written inside
+    /// the same millisecond fall back to the row's own insertion order rather than to the
+    /// project id, which would smuggle project creation order back into a link-ordered page.
+    pub(crate) fn list_session_projects(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<Project>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT projects.id, projects.name, projects.created_at_ms,
+                     projects.updated_at_ms
+                 FROM session_projects
+                 JOIN projects ON projects.id = session_projects.project_id
+                 WHERE session_projects.session_id = ?1
+                 ORDER BY session_projects.linked_at_ms ASC, session_projects.rowid ASC
+                 LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let projects = statement
+            .query_map(params![session_id, limit as i64], |row| {
+                Ok(Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                    updated_at_ms: row.get(3)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<Project>>>()
+            .map_err(io::Error::other)?;
+        Ok(projects)
     }
 
     fn connection(&self) -> MutexGuard<'_, Connection> {
@@ -1722,6 +1846,130 @@ mod tests {
             store.list_actions(2).expect("actions should list"),
             vec![action],
             "an action written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn a_session_lists_the_projects_it_was_linked_to_in_link_order() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let session = store
+            .create_session("Kickoff")
+            .expect("session should be created");
+        let other = store
+            .create_session("Unrelated session")
+            .expect("session should be created");
+
+        // Created brief-first and linked tool-first, to pin that link order — not project
+        // creation order — drives the page.
+        let brief = super::Project::draft("Hackathon Brief");
+        store.insert_project(&brief).expect("project should insert");
+        let tool = super::Project::draft("Capture Tool");
+        store.insert_project(&tool).expect("project should insert");
+
+        assert!(
+            store
+                .insert_session_project_link(&session.id, &tool.id)
+                .expect("link should insert"),
+            "a pair stated for the first time is a new membership"
+        );
+        assert!(
+            store
+                .insert_session_project_link(&session.id, &brief.id)
+                .expect("link should insert")
+        );
+        assert!(
+            store
+                .insert_session_project_link(&other.id, &brief.id)
+                .expect("link should insert")
+        );
+        assert!(
+            !store
+                .insert_session_project_link(&session.id, &tool.id)
+                .expect("link should insert"),
+            "relinking an existing pair states no new membership"
+        );
+
+        assert_eq!(
+            store
+                .list_session_projects(&session.id, 10)
+                .expect("projects should list"),
+            vec![tool.clone(), brief.clone()],
+            "a session's projects list in the order their memberships were stated"
+        );
+        assert_eq!(
+            store
+                .list_session_projects(&session.id, 1)
+                .expect("projects should list"),
+            vec![tool],
+            "the limit bounds the page"
+        );
+        assert_eq!(
+            store
+                .list_session_projects(&other.id, 10)
+                .expect("projects should list"),
+            vec![brief],
+            "a link stays scoped to its own session"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_nine_store_adds_projects_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before projects existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..9] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before projects', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 9)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_sessions(2)
+                .expect("sessions should list")
+                .first()
+                .map(|session| session.title.clone()),
+            Some("Before projects".to_owned()),
+            "a session written before projects existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_session_projects("session-legacy", 1)
+                .expect("projects should list")
+                .is_empty(),
+            "a session written before projects existed must survive with no memberships"
+        );
+        let project = super::Project::draft("After the upgrade");
+        store
+            .insert_project(&project)
+            .expect("project should insert");
+        assert!(
+            store
+                .insert_session_project_link("session-legacy", &project.id)
+                .expect("link should insert")
+        );
+        assert_eq!(
+            store
+                .list_session_projects("session-legacy", 2)
+                .expect("projects should list"),
+            vec![project],
+            "a project linked after the upgrade must round-trip"
         );
     }
 
