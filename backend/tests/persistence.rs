@@ -649,6 +649,38 @@ fn list_sources_responses_are_bounded_with_truncation_reported() {
         response["sources"][0]["text"], "segment 00",
         "the page should start at the chronological beginning"
     );
+
+    // A separate session whose page is byte-bounded rather than count-bounded:
+    // the budget must pop from the end so the chronological start survives.
+    let big = create_session(&backend.socket_path, "Big transcript");
+    let big_id = big["id"].as_str().expect("session id");
+    for index in 0..4 {
+        add_source(
+            &backend.socket_path,
+            serde_json::json!({"session_id": big_id, "start_ms": index,
+                "end_ms": index + 1, "text": "x".repeat(4000)}),
+        );
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_sources", "session_id": big_id}),
+    );
+    assert!(
+        frame.len() <= 8192,
+        "oversized texts must not produce an oversized frame"
+    );
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["truncated"], true);
+    let sources = response["sources"].as_array().expect("sources array");
+    assert!(
+        !sources.is_empty(),
+        "the byte budget should still deliver the earliest sources that fit"
+    );
+    assert_eq!(
+        sources[0]["start_ms"], 0,
+        "byte truncation must keep the chronological beginning"
+    );
 }
 
 #[test]
