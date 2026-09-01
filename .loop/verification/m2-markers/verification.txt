@@ -58,3 +58,9 @@ add_marker/list_markers protocol, Swift Marker/MarkerListPage.
   (accept unknown kinds / negative at_ms); client-hardening slice.
 - 130 Rust tests after remediation (35 unit + 13 health_socket + 24
   persistence + 58 process_lifecycle); verify-m0-r2.log exit 0.
+
+## Review round 2 (Sol): PASS
+- One MINOR, deferred by the reviewer's own judgment: list_runs retains the
+  pre-existing listability gap (run records grow after admission via terminal
+  fields, so the fix must probe the worst-case terminal shape) — carried to
+  the next run-records slice. Report archived as sol-round2-report.md.
