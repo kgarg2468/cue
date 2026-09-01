@@ -11,12 +11,16 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Forward-only schema steps; a step's index plus one is the `user_version` it installs.
-const MIGRATIONS: &[&str] = &["CREATE TABLE sessions (
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE sessions (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
-    )"];
+    )",
+    // Categorization is optional, so sessions written before this step stay valid with a NULL kind.
+    "ALTER TABLE sessions ADD COLUMN kind TEXT",
+];
 
 /// How long a write waits for another process holding the store's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,6 +34,9 @@ pub(crate) struct Session {
     pub(crate) title: String,
     pub(crate) created_at_ms: i64,
     pub(crate) updated_at_ms: i64,
+    /// Absent for an uncategorized session; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
 }
 
 /// Durable state shared by every connection thread; SQLite serializes writes behind the mutex.
@@ -41,13 +48,14 @@ pub(crate) struct Store {
 impl Session {
     /// A fully formed record that has not been persisted yet, so callers can
     /// bound-check the response frame before anything durable happens.
-    pub(crate) fn draft(title: &str) -> Session {
+    pub(crate) fn draft(title: &str, kind: Option<&str>) -> Session {
         let created_at_ms = now_milliseconds();
         Session {
             id: session_id(),
             title: title.to_owned(),
             created_at_ms,
             updated_at_ms: created_at_ms,
+            kind: kind.map(str::to_owned),
         }
     }
 }
@@ -55,7 +63,7 @@ impl Session {
 impl Store {
     #[cfg(test)]
     pub(crate) fn create_session(&self, title: &str) -> io::Result<Session> {
-        let session = Session::draft(title);
+        let session = Session::draft(title, None);
         self.insert_session(&session)?;
         Ok(session)
     }
@@ -63,13 +71,14 @@ impl Store {
     pub(crate) fn insert_session(&self, session: &Session) -> io::Result<()> {
         self.connection()
             .execute(
-                "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     session.id,
                     session.title,
                     session.created_at_ms,
-                    session.updated_at_ms
+                    session.updated_at_ms,
+                    session.kind
                 ],
             )
             .map_err(io::Error::other)?;
@@ -80,7 +89,7 @@ impl Store {
         let connection = self.connection();
         let mut statement = connection
             .prepare(
-                "SELECT id, title, created_at_ms, updated_at_ms FROM sessions
+                "SELECT id, title, created_at_ms, updated_at_ms, kind FROM sessions
                  ORDER BY created_at_ms DESC, id DESC LIMIT ?1",
             )
             .map_err(io::Error::other)?;
@@ -91,6 +100,7 @@ impl Store {
                     title: row.get(1)?,
                     created_at_ms: row.get(2)?,
                     updated_at_ms: row.get(3)?,
+                    kind: row.get(4)?,
                 })
             })
             .map_err(io::Error::other)?
@@ -363,6 +373,44 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_version_one_store_adds_kinds_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before session kinds existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            connection
+                .execute_batch(MIGRATIONS[0])
+                .expect("schema should apply");
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before kinds', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 1)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        let sessions = store.list_sessions(2).expect("sessions should list");
+        assert_eq!(
+            sessions,
+            vec![super::Session {
+                id: "session-legacy".to_owned(),
+                title: "Before kinds".to_owned(),
+                created_at_ms: 7,
+                updated_at_ms: 7,
+                kind: None,
+            }],
+            "a session written before kinds existed must survive as uncategorized"
+        );
+    }
+
+    #[test]
     fn opening_a_newer_store_fails_without_touching_the_data() {
         let fixture = StoreFixture::new();
         let store_path = fixture.store_path();
@@ -425,9 +473,11 @@ mod tests {
         {
             // A current-version store in the default DELETE journal mode.
             let connection = Connection::open(&store_path).expect("store should open");
-            connection
-                .execute_batch(MIGRATIONS[0])
-                .expect("schema should apply");
+            for migration in MIGRATIONS {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
             connection
                 .pragma_update(None, "user_version", MIGRATIONS.len() as i64)
                 .expect("user_version should be writable");

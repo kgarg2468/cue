@@ -174,6 +174,58 @@ func createSessionRequestAndResponse() throws {
     }
 }
 
+@Test("a session kind travels in the create request and back in its response")
+func createSessionRequestAndResponseCarryAKind() throws {
+    let request = IPCClient.createSessionRequest(title: "Standup", kind: "meeting")
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["type"] as? String == "create_session")
+    #expect(json["title"] as? String == "Standup")
+    #expect(json["kind"] as? String == "meeting")
+
+    let session = try IPCClient.decodeCreateSessionResponse(
+        "{\"version\":1,\"type\":\"create_session_response\",\"session\":"
+            + "{\"id\":\"session-1\",\"title\":\"Standup\",\"created_at_ms\":1,"
+            + "\"updated_at_ms\":1,\"kind\":\"meeting\"}}\n"
+    )
+    #expect(
+        session
+            == Session(
+                id: "session-1",
+                title: "Standup",
+                createdAtMilliseconds: 1,
+                updatedAtMilliseconds: 1,
+                kind: "meeting"
+            )
+    )
+}
+
+@Test("an uncategorized session omits the kind key in both directions")
+func uncategorizedSessionsOmitTheKindKey() throws {
+    let request = IPCClient.createSessionRequest(title: "No kind chosen")
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["kind"] == nil)
+
+    let session = try IPCClient.decodeCreateSessionResponse(
+        "{\"version\":1,\"type\":\"create_session_response\",\"session\":"
+            + "{\"id\":\"session-1\",\"title\":\"No kind chosen\",\"created_at_ms\":1,"
+            + "\"updated_at_ms\":1}}\n"
+    )
+    #expect(session.kind == nil)
+}
+
+@Test("a non-string kind makes the session response invalid")
+func nonStringKindIsRejected() throws {
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateSessionResponse(
+            "{\"version\":1,\"type\":\"create_session_response\",\"session\":"
+                + "{\"id\":\"session-1\",\"title\":\"Standup\",\"created_at_ms\":1,"
+                + "\"updated_at_ms\":1,\"kind\":7}}\n"
+        )
+    }
+}
+
 @Test("list sessions request JSON is typed and its response decodes ordered sessions")
 func listSessionsRequestAndResponse() throws {
     #expect(IPCClient.listSessionsRequest == "{\"version\":1,\"type\":\"list_sessions\"}\n")

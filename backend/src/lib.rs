@@ -33,6 +33,15 @@ const MAX_SANITIZED_RUN_ID_BYTES: usize = 48;
 const WORKTREE_ADD_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKTREE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SESSION_TITLE_BYTES: usize = 4096;
+/// Categorization is optional, but a stated kind must be one the app knows how to present.
+const SESSION_KINDS: [&str; 6] = [
+    "meeting",
+    "conversation",
+    "presentation",
+    "pair_work",
+    "personal_note",
+    "imported_audio",
+];
 const LIST_SESSIONS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
@@ -71,6 +80,8 @@ struct Request {
     worktree_repository: Option<serde_json::Value>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1015,7 +1026,12 @@ fn handle_connection(
                 else {
                     return write_protocol_error(&mut stream, "invalid_create_session");
                 };
-                let session = Session::draft(&title);
+                let kind = match request.kind {
+                    None => None,
+                    Some(kind) if SESSION_KINDS.contains(&kind.as_str()) => Some(kind),
+                    Some(_) => return write_protocol_error(&mut stream, "invalid_create_session"),
+                };
+                let session = Session::draft(&title, kind.as_deref());
                 let response = CreateSessionResponse {
                     version: PROTOCOL_VERSION,
                     response_type: "create_session_response",

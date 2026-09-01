@@ -1,0 +1,56 @@
+# Runtime demo — session kinds on the real release binary (Mon Aug 31 20:02:12 PDT 2026)
+
+## 1. Hand-built v1 store (pre-kind schema, user_version 1, one legacy row)
+user_version before: 1
+schema before: CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);
+user_version after open: 2
+
+## 2. Create sessions with and without kinds over the socket
+{"version":1,"type":"create_session_response","session":{"id":"session-156ba-18d1134937ea2a18-0","title":"Sprint planning","created_at_ms":1788231732234,"updated_at_ms":1788231732234,"kind":"meeting"}}
+{"version":1,"type":"create_session_response","session":{"id":"session-156ba-18d1134938117898-1","title":"Voice memo","created_at_ms":1788231732237,"updated_at_ms":1788231732237,"kind":"personal_note"}}
+{"version":1,"type":"create_session_response","session":{"id":"session-156ba-18d11349383705e0-2","title":"Uncategorized","created_at_ms":1788231732239,"updated_at_ms":1788231732239}}
+
+## 3. Invalid kind rejected
+{"version":1,"type":"error","code":"invalid_create_session"}
+
+## 4. Restart on the same store; legacy row has no kind, new rows keep theirs
+{
+    "version": 1,
+    "type": "list_sessions_response",
+    "sessions": [
+        {
+            "id": "session-156ba-18d11349383705e0-2",
+            "title": "Uncategorized",
+            "created_at_ms": 1788231732239,
+            "updated_at_ms": 1788231732239
+        },
+        {
+            "id": "session-156ba-18d1134938117898-1",
+            "title": "Voice memo",
+            "created_at_ms": 1788231732237,
+            "updated_at_ms": 1788231732237,
+            "kind": "personal_note"
+        },
+        {
+            "id": "session-156ba-18d1134937ea2a18-0",
+            "title": "Sprint planning",
+            "created_at_ms": 1788231732234,
+            "updated_at_ms": 1788231732234,
+            "kind": "meeting"
+        },
+        {
+            "id": "legacy-1",
+            "title": "Legacy v1 session",
+            "created_at_ms": 1000,
+            "updated_at_ms": 1000
+        }
+    ],
+    "truncated": false
+}
+
+## 5. Store hygiene
+total 152
+-rw-------@ 1 krishgarg  wheel  12288 Aug 31 20:02 store.sqlite
+-rw-------@ 1 krishgarg  wheel  32768 Aug 31 20:02 store.sqlite-shm
+-rw-------@ 1 krishgarg  wheel  28872 Aug 31 20:02 store.sqlite-wal
+-rw-------@ 1 krishgarg  wheel      0 Aug 31 20:02 store.sqlite.lock
