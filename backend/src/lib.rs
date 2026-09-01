@@ -1547,6 +1547,27 @@ fn handle_connection(
                 // The record is written while the id is admitted and before the child exists, so a
                 // backend that dies mid-run leaves a record to mark interrupted.
                 let record = RunRecord::draft(&run_id, linked_session_id.as_deref(), &executable);
+                // A run record grows at termination, so admission must bound the WORST-CASE
+                // terminal single-item list frame — an accepted run stays listable for its
+                // whole lifecycle. "interrupted" is the longest status; the error code gets
+                // headroom from the longest code in the protocol even though it never
+                // persists today; exit codes are at worst a full negative i32.
+                let mut probe = record.clone();
+                probe.status = "interrupted".to_owned();
+                probe.exit_code = Some(i64::from(i32::MIN));
+                probe.error_code = Some("capacity_exhausted".to_owned());
+                probe.ended_at_ms = Some(record.started_at_ms);
+                let list_probe = ListRunsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_runs_response",
+                    runs: std::slice::from_ref(&probe),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    drop(registration);
+                    drop(process_slot);
+                    return write_protocol_error(&mut stream, "invalid_start_process");
+                }
                 if let Err(error) = store.insert_run(&record) {
                     eprintln!("store write error: {error}");
                     drop(registration);

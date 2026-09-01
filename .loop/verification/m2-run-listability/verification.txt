@@ -1,0 +1,42 @@
+# M2 run-listability slice — verification summary (cycle 24, 2026-09-01)
+
+Slice: close the deferred Sol finding from PR #41 round 2 — extend the
+"accepted implies listable alone" admission invariant to run records
+(S05-008 continuation). Run records grow at termination (status, exit_code,
+error_code, ended_at_ms), so the admission probe must bound the WORST-CASE
+terminal single-item list_runs frame, not the record as admitted.
+
+## TDD evidence
+- red-evidence.log — every_admitted_run_stays_listable_after_termination
+  fails against merged main e49ced9: an admitted, cleanly-exited run with a
+  boundary-sized run_id produced an EMPTY list page (persisted, unlistable).
+- cargo-test.log — full green: 131 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log — verify-m0.sh exit 0 (41 Swift tests).
+- runtime-demo.log — real release binary: normal run heads the list page
+  after exit; a 1329-NUL escape-heavy run_id is rejected at admission with
+  invalid_start_process and leaves no record.
+
+## Design decisions
+- Probe is built by cloning the REAL draft record (identical generated id,
+  so no id-length race), then substituting worst-case terminal fields:
+  status "interrupted" (longest status), exit_code i32::MIN (longest exit
+  code), error_code "capacity_exhausted" (longest code in the protocol —
+  it never persists today, which gives the probe headroom against future
+  persisted codes), ended_at_ms mirroring started_at_ms (same clock, same
+  width). Rejection releases the run-id registration and process slot and
+  answers invalid_start_process before any insert.
+- The probe sits after the duplicate/capacity gates (where the real draft
+  exists) mirroring the established insert-failure rejection path.
+- Conservative over-rejection window (~50 bytes at the 8 KiB boundary) is
+  deliberate: a run near the bound that would be rejected only under the
+  worst-case terminal shape has no legitimate use.
+
+## Security invariants checked
+- Rejected runs leave no record and free their admission (slot + run id).
+- No change to sessions/sources/markers paths; all 58 process_lifecycle
+  tests untouched and green.
+
+## Routing note
+Fable-direct implementation (~70 lines including the red test): this is
+review-remediation-class work carried from PR #41, below the delegation
+threshold.

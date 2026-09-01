@@ -1,0 +1,2 @@
+=== Full suite at run-listability slice ===
+131 Rust: 35 unit + 13 health_socket + 25 persistence + 58 process_lifecycle; fmt clean; clippy -D warnings clean; 41 Swift via verify-m0.

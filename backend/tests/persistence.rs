@@ -1533,3 +1533,49 @@ fn every_accepted_session_is_singly_listable() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+#[test]
+fn every_admitted_run_stays_listable_after_termination() {
+    // Run records grow when they terminate (status, exit code, error code, end
+    // timestamp), so the admission bound must cover the WORST-CASE terminal
+    // single-item list frame — otherwise a boundary-sized run_id persists a
+    // record that the list byte budget pops even when it is alone.
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("runbound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in (1240..1330).step_by(3) {
+        let run_id = "\u{0}".repeat(nulls);
+        let response = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": run_id, "executable": "/bin/echo",
+                "arguments": ["boundary"], "timeout_milliseconds": 60_000}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(
+                response["code"], "invalid_start_process",
+                "a run rejected at the boundary must be a clean validation error"
+            );
+            rejected += 1;
+            continue;
+        }
+        assert_eq!(
+            response["exit_code"], 0,
+            "the probe run should exit cleanly"
+        );
+        accepted += 1;
+        // The just-terminated run is the newest record, so it must head the
+        // newest-first page; the byte budget pops from the end, never the head.
+        let page = list_runs(&backend.socket_path);
+        let head = &page["runs"].as_array().expect("runs array")[0];
+        assert_eq!(
+            head["run_id"], run_id,
+            "an admitted run must stay listable after termination, nulls={nulls}"
+        );
+        assert_eq!(head["status"], "exited");
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
