@@ -1,0 +1,56 @@
+pre-migration user_version: 7
+post-migration user_version: 8
+run exit_code: 0
+--- events for a clean run
+{
+ "version": 1,
+ "type": "list_run_events_response",
+ "events": [
+  {
+   "id": "run-event-6075-18d122583e945af0-1",
+   "record_id": "run-6075-18d122583e930330-0",
+   "seq": 0,
+   "at_ms": 1788248289445,
+   "kind": "launched"
+  },
+  {
+   "id": "run-event-6075-18d122583f867768-2",
+   "record_id": "run-6075-18d122583e930330-0",
+   "seq": 1,
+   "at_ms": 1788248289460,
+   "kind": "exited"
+  }
+ ],
+ "truncated": false
+}
+--- unknown record rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "unknown_run"
+}
+doomed status after sweep: interrupted
+--- events for the interrupted run
+{
+ "version": 1,
+ "type": "list_run_events_response",
+ "events": [
+  {
+   "id": "run-event-6075-18d122583f955800-4",
+   "record_id": "run-6075-18d122583f94d330-3",
+   "seq": 0,
+   "at_ms": 1788248289461,
+   "kind": "launched"
+  },
+  {
+   "id": "run-event-60d3-18d1225843632110-0",
+   "record_id": "run-6075-18d122583f94d330-3",
+   "seq": 1,
+   "at_ms": 1788248289525,
+   "kind": "interrupted"
+  }
+ ],
+ "truncated": false
+}
+store mode: 0o600
+DEMO OK

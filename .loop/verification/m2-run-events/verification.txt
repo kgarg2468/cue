@@ -1,0 +1,44 @@
+# M2 slice 9 — durable run lifecycle events (S05-008, spec §5/§10/§14)
+
+## Contract
+- run_events table (migration 8): id PK, record_id REFERENCES runs(id), seq,
+  at_ms, kind. Backend-authored only — no client-supplied event text, so all
+  frames are statically bounded and the admission-probe invariant does not
+  apply (recorded in a code comment at the insert sites).
+- Event trail per run record: seq 0 "launched" at started_at_ms (same
+  transaction as run-row insert), seq 1 terminal event at ended_at_ms (same
+  transaction as the terminal row UPDATE; kind = error_code else "exited":
+  exited | spawn_failed | timed_out | cancelled | worktree_failed |
+  internal_error), and the startup sweep closes dangling trails with seq 1
+  "interrupted" in its own transaction.
+- list_run_events(record_id): double-Option record_id (omitted/null/blank =
+  invalid_list_run_events), unknown_run split, limit 50 with limit+1
+  truncation probe, byte budget popping from the END (trail keeps its start).
+- Swift RunEvent/RunEventPage + listRunEvents(recordID:).
+
+## Red-first
+- 3 contract tests red vs origin/main 8ab6cbd (red-evidence.log).
+
+## Gates
+- 148 Rust tests (42 unit + 13 health_socket + 35 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; 50 Swift tests).
+- Runtime demo (runtime-demo.log): hand-built v7 store with a legacy run row,
+  user_version 7 -> 8 on the real binary, [launched, exited] trail for a clean
+  run, unknown_run rejection, SIGKILL mid-run then restart -> sweep closes the
+  trail with [launched, interrupted], 0600 mode.
+
+## Routing
+- 1 opus-high implementation worker (native subagent), first-pass green within
+  its 4-file allowlist; diff-gated at 766 lines. Fable red contract tests +
+  demo.
+
+## Worker-flagged bounds (recorded)
+- Terminal event kind maps error_code.unwrap_or("exited") because finish_run
+  writes status "exited" for every self-closed run and distinguishes causes
+  only via error_code; my dispatch wording ("the terminal status written to
+  the row") would have failed the red test taken literally.
+- Run rows predating migration 8 have no seq-0 launch event; a later sweep
+  interruption would leave a trail that starts at seq 1. Harmless, recorded.
+- finish_run would append a second seq-1 event if called twice on one record;
+  unreachable under the RunTerminal one-shot guard + ADR-009 single owner.

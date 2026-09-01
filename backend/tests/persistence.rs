@@ -1999,3 +1999,164 @@ fn every_accepted_transcript_segment_is_singly_listable() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+fn list_run_events(socket_path: &Path, record_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_run_events", "record_id": record_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_run_events_response");
+    response
+}
+
+fn events_of(page: &serde_json::Value) -> Vec<&serde_json::Value> {
+    page["events"]
+        .as_array()
+        .expect("events should be an array")
+        .iter()
+        .collect()
+}
+
+#[test]
+fn run_lifecycle_events_persist_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("runevents.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (clean_id, failed_id) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let exit = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "clean-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(exit["exit_code"], 0);
+        run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "ghost-run",
+                "executable": "/nonexistent/capture-delegate-run-events-probe",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        let page = list_runs(&backend.socket_path);
+        let clean = runs_named(&page, "clean-run")[0].clone();
+        let failed = runs_named(&page, "ghost-run")[0].clone();
+        backend.stop();
+        (clean.clone(), failed.clone())
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    for (run, terminal_kind) in [(&clean_id, "exited"), (&failed_id, "spawn_failed")] {
+        let record_id = run["id"].as_str().expect("record id");
+        let page = list_run_events(&restarted.socket_path, record_id);
+        assert_eq!(page["truncated"], false);
+        let events = events_of(&page);
+        assert_eq!(
+            events.len(),
+            2,
+            "a terminal run has exactly a launch and a terminal event, got {page}"
+        );
+        assert_eq!(events[0]["kind"], "launched");
+        assert_eq!(events[0]["seq"], 0);
+        assert_eq!(events[0]["record_id"], record_id);
+        assert_eq!(
+            events[0]["at_ms"], run["started_at_ms"],
+            "the launch event carries the run's start stamp"
+        );
+        assert_eq!(events[1]["kind"], terminal_kind, "got {page}");
+        assert_eq!(events[1]["seq"], 1);
+        assert_eq!(
+            events[1]["at_ms"], run["ended_at_ms"],
+            "the terminal event carries the run's end stamp"
+        );
+        assert!(
+            events[1]["id"] != events[0]["id"],
+            "event ids should be distinct"
+        );
+    }
+}
+
+#[test]
+fn interrupted_runs_record_an_interruption_event() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("intevents.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    {
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let mut stream =
+            UnixStream::connect(&backend.socket_path).expect("run client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read deadline should be configured");
+        let request = serde_json::json!({"version": 1, "type": "start_process",
+            "run_id": "doomed-run", "executable": "/bin/sleep", "arguments": ["30"],
+            "timeout_milliseconds": 60_000});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        let deadline = Instant::now() + STARTUP_DEADLINE;
+        loop {
+            let page = list_runs(&backend.socket_path);
+            if runs_named(&page, "doomed-run")
+                .first()
+                .is_some_and(|run| run["status"] == "running")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the live run should become visible as running, got {page}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // BackendProcess::stop SIGKILLs the backend: no terminal update can run.
+    }
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_runs(&restarted.socket_path);
+    let doomed = runs_named(&page, "doomed-run")[0];
+    assert_eq!(doomed["status"], "interrupted");
+    let events_page = list_run_events(
+        &restarted.socket_path,
+        doomed["id"].as_str().expect("record id"),
+    );
+    let events = events_of(&events_page);
+    assert_eq!(
+        events.len(),
+        2,
+        "the startup sweep must close the event trail, got {events_page}"
+    );
+    assert_eq!(events[0]["kind"], "launched");
+    assert_eq!(events[1]["kind"], "interrupted");
+    assert_eq!(
+        events[1]["at_ms"], doomed["ended_at_ms"],
+        "the interruption event carries the sweep's end stamp"
+    );
+}
+
+#[test]
+fn invalid_run_event_queries_are_rejected() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badevents.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let unknown = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_run_events",
+            "record_id": "run-nonexistent"}),
+    );
+    assert_eq!(unknown["type"], "error");
+    assert_eq!(unknown["code"], "unknown_run");
+
+    for request in [
+        serde_json::json!({"version": 1, "type": "list_run_events"}),
+        serde_json::json!({"version": 1, "type": "list_run_events", "record_id": null}),
+        serde_json::json!({"version": 1, "type": "list_run_events", "record_id": "   "}),
+    ] {
+        let response = exchange(&backend.socket_path, request.clone());
+        assert_eq!(response["type"], "error", "should be rejected: {request}");
+        assert_eq!(response["code"], "invalid_list_run_events");
+    }
+}

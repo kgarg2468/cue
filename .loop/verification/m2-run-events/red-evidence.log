@@ -1,0 +1,9 @@
+test invalid_run_event_queries_are_rejected ... FAILED
+test run_lifecycle_events_persist_and_survive_a_restart ... FAILED
+test interrupted_runs_record_an_interruption_event ... FAILED
+test a_failing_interruption_sweep_prevents_startup ... ok
+thread 'invalid_run_event_queries_are_rejected' (25076929) panicked at backend/tests/persistence.rs:2151:5:
+thread 'run_lifecycle_events_persist_and_survive_a_restart' (25076930) panicked at backend/tests/persistence.rs:2009:5:
+thread 'interrupted_runs_record_an_interruption_event' (25076928) panicked at backend/tests/persistence.rs:2009:5:
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.40s
+reds vs 8ab6cbd Record merged M2 transcript slice (cycle 26 closeout) (#48)

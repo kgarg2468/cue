@@ -70,6 +70,17 @@ const MIGRATIONS: &[&str] = &[
         text TEXT NOT NULL
     );
     CREATE INDEX transcript_by_session_and_start ON transcript_segments (session_id, start_ms, id)",
+    // A run event is one backend-authored moment in a run record's life. Its sequence number
+    // orders the trail independently of the clock, so a stepped wall clock cannot reorder a
+    // run's own history; the index serves the only read path, which walks one record in order.
+    "CREATE TABLE run_events (
+        id TEXT PRIMARY KEY,
+        record_id TEXT NOT NULL REFERENCES runs(id),
+        seq INTEGER NOT NULL,
+        at_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL
+    );
+    CREATE INDEX run_events_by_record_and_seq ON run_events (record_id, seq)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -149,6 +160,23 @@ pub(crate) struct RunRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) ended_at_ms: Option<i64>,
 }
+
+/// One backend-authored moment in a run record's life, written by the same store call that
+/// writes the run row it describes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct RunEvent {
+    pub(crate) id: String,
+    pub(crate) record_id: String,
+    pub(crate) seq: i64,
+    pub(crate) at_ms: i64,
+    pub(crate) kind: String,
+}
+
+/// The event a run's admission records: a run is launched exactly once, at sequence zero.
+const RUN_LAUNCHED_SEQUENCE: i64 = 0;
+/// The event a run's close records: a run reaches its single terminal moment at sequence one,
+/// whether a live backend closes it or a later startup sweep does.
+const RUN_TERMINAL_SEQUENCE: i64 = 1;
 
 /// Durable state shared by every connection thread; SQLite serializes writes behind the mutex.
 #[derive(Clone, Debug)]
@@ -243,6 +271,22 @@ impl RunRecord {
             error_code: None,
             started_at_ms: now_milliseconds(),
             ended_at_ms: None,
+        }
+    }
+}
+
+impl RunEvent {
+    /// A fully formed event that has not been persisted yet. Every field is backend-authored:
+    /// the kind comes from a fixed set of lifecycle words and the stamp is the one already
+    /// written to the run row, so no caller text can widen an event.
+    pub(crate) fn draft(record_id: &str, seq: i64, at_ms: i64, kind: &str) -> RunEvent {
+        RunEvent {
+            // Module-qualified because the record id parameter shadows the id minter here.
+            id: self::record_id("run-event"),
+            record_id: record_id.to_owned(),
+            seq,
+            at_ms,
+            kind: kind.to_owned(),
         }
     }
 }
@@ -484,8 +528,12 @@ impl Store {
         Ok(markers)
     }
 
+    /// Admits one run record and opens its event trail in the same transaction, so a record can
+    /// never exist without the launch that produced it.
     pub(crate) fn insert_run(&self, run: &RunRecord) -> io::Result<()> {
-        self.connection()
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(io::Error::other)?;
+        transaction
             .execute(
                 "INSERT INTO runs (id, run_id, session_id, executable, status, exit_code,
                      error_code, started_at_ms, ended_at_ms)
@@ -503,35 +551,129 @@ impl Store {
                 ],
             )
             .map_err(io::Error::other)?;
-        Ok(())
+        // The event carries the row's own start stamp rather than a second reading of the
+        // clock, so the trail can never disagree with the record it describes.
+        insert_run_event_row(
+            &transaction,
+            &RunEvent::draft(
+                &run.id,
+                RUN_LAUNCHED_SEQUENCE,
+                run.started_at_ms,
+                "launched",
+            ),
+        )?;
+        transaction.commit().map_err(io::Error::other)
     }
 
-    /// Closes one run record at its terminal frame.
+    /// Closes one run record at its terminal frame, and closes its event trail with it.
     pub(crate) fn finish_run(
         &self,
         id: &str,
         exit_code: Option<i64>,
         error_code: Option<&str>,
     ) -> io::Result<()> {
-        self.connection()
+        let ended_at_ms = now_milliseconds();
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(io::Error::other)?;
+        transaction
             .execute(
                 "UPDATE runs SET status = 'exited', exit_code = ?2, error_code = ?3,
                      ended_at_ms = ?4 WHERE id = ?1",
-                params![id, exit_code, error_code, now_milliseconds()],
+                params![id, exit_code, error_code, ended_at_ms],
             )
             .map_err(io::Error::other)?;
-        Ok(())
+        // Every close writes the same row status, so the error code is the more specific word
+        // for how the run ended; a run that ended on its own terms has none.
+        insert_run_event_row(
+            &transaction,
+            &RunEvent::draft(
+                id,
+                RUN_TERMINAL_SEQUENCE,
+                ended_at_ms,
+                error_code.unwrap_or("exited"),
+            ),
+        )?;
+        transaction.commit().map_err(io::Error::other)
     }
 
     /// A record still marked running at open time belongs to a backend that died mid-run:
-    /// nothing will ever close it, so the crash is recorded instead.
+    /// nothing will ever close it, so the crash is recorded instead — in the row and in the
+    /// record's event trail, which the dead backend left open too.
     pub(crate) fn mark_dangling_runs_interrupted(&self) -> io::Result<usize> {
-        self.connection()
+        let ended_at_ms = now_milliseconds();
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(io::Error::other)?;
+        let dangling = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM runs WHERE status = 'running'")
+                .map_err(io::Error::other)?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(io::Error::other)?
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .map_err(io::Error::other)?
+        };
+        let swept = transaction
             .execute(
                 "UPDATE runs SET status = 'interrupted', ended_at_ms = ?1 WHERE status = 'running'",
-                params![now_milliseconds()],
+                params![ended_at_ms],
             )
-            .map_err(io::Error::other)
+            .map_err(io::Error::other)?;
+        for id in &dangling {
+            insert_run_event_row(
+                &transaction,
+                &RunEvent::draft(id, RUN_TERMINAL_SEQUENCE, ended_at_ms, "interrupted"),
+            )?;
+        }
+        transaction.commit().map_err(io::Error::other)?;
+        Ok(swept)
+    }
+
+    /// One run event, for the paths that write a run row and its trail separately.
+    #[cfg(test)]
+    pub(crate) fn insert_run_event(&self, event: &RunEvent) -> io::Result<()> {
+        insert_run_event_row(&self.connection(), event)
+    }
+
+    /// Whether a run record exists under this record id — the run row's own primary key, not
+    /// the reusable client-chosen run id.
+    pub(crate) fn run_record_exists(&self, id: &str) -> io::Result<bool> {
+        self.connection()
+            .query_row("SELECT 1 FROM runs WHERE id = ?1", [id], |_| Ok(()))
+            .map(|()| true)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                error => Err(io::Error::other(error)),
+            })
+    }
+
+    /// One run record's events, oldest first.
+    pub(crate) fn list_run_events(
+        &self,
+        record_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<RunEvent>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, record_id, seq, at_ms, kind FROM run_events
+                 WHERE record_id = ?1 ORDER BY seq ASC, id ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let events = statement
+            .query_map(params![record_id, limit as i64], |row| {
+                Ok(RunEvent {
+                    id: row.get(0)?,
+                    record_id: row.get(1)?,
+                    seq: row.get(2)?,
+                    at_ms: row.get(3)?,
+                    kind: row.get(4)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<RunEvent>>>()
+            .map_err(io::Error::other)?;
+        Ok(events)
     }
 
     pub(crate) fn list_runs(&self, limit: usize) -> io::Result<Vec<RunRecord>> {
@@ -568,6 +710,24 @@ impl Store {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// Writes one event, on whatever connection (or open transaction) the run row was written on.
+fn insert_run_event_row(connection: &Connection, event: &RunEvent) -> io::Result<()> {
+    connection
+        .execute(
+            "INSERT INTO run_events (id, record_id, seq, at_ms, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                event.id,
+                event.record_id,
+                event.seq,
+                event.at_ms,
+                event.kind
+            ],
+        )
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 pub(crate) fn open_store(path: &Path) -> io::Result<Store> {
@@ -1175,6 +1335,201 @@ mod tests {
                 .expect("transcript should list"),
             vec![segment],
             "a segment written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn run_events_list_in_sequence_for_their_own_record() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let run = super::RunRecord::draft("build", None, "/usr/bin/true");
+        store.insert_run(&run).expect("run should insert");
+        let other = super::RunRecord::draft("lint", None, "/usr/bin/true");
+        store.insert_run(&other).expect("run should insert");
+
+        // Written out of order, and with a stamp older than the launch it follows, to pin
+        // that the sequence — not the clock or the insertion order — orders the trail.
+        let terminal = super::RunEvent::draft(&run.id, 2, run.started_at_ms - 5_000, "exited");
+        store
+            .insert_run_event(&terminal)
+            .expect("event should insert");
+        let middle = super::RunEvent::draft(&run.id, 1, run.started_at_ms, "cancelled");
+        store
+            .insert_run_event(&middle)
+            .expect("event should insert");
+
+        let events = store
+            .list_run_events(&run.id, 10)
+            .expect("events should list");
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<i64>>(),
+            vec![0, 1, 2],
+            "a record's events list in sequence order"
+        );
+        assert_eq!(
+            events[0].kind, "launched",
+            "admission opens the trail with the launch"
+        );
+        assert_eq!(events[0].at_ms, run.started_at_ms);
+        assert_eq!(events[1..], [middle, terminal]);
+        assert_eq!(
+            store
+                .list_run_events(&run.id, 2)
+                .expect("events should list")
+                .len(),
+            2,
+            "the limit bounds the page"
+        );
+        assert_eq!(
+            store
+                .list_run_events(&other.id, 10)
+                .expect("events should list")
+                .iter()
+                .map(|event| event.kind.clone())
+                .collect::<Vec<String>>(),
+            vec!["launched".to_owned()],
+            "a trail carries only its own record's events"
+        );
+    }
+
+    #[test]
+    fn closing_a_run_records_how_it_ended() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let clean = super::RunRecord::draft("clean", None, "/usr/bin/true");
+        store.insert_run(&clean).expect("run should insert");
+        let failed = super::RunRecord::draft("failed", None, "/nonexistent/probe");
+        store.insert_run(&failed).expect("run should insert");
+
+        store
+            .finish_run(&clean.id, Some(0), None)
+            .expect("run should close");
+        store
+            .finish_run(&failed.id, None, Some("spawn_failed"))
+            .expect("run should close");
+
+        for (record, kind) in [(&clean, "exited"), (&failed, "spawn_failed")] {
+            let events = store
+                .list_run_events(&record.id, 10)
+                .expect("events should list");
+            assert_eq!(events.len(), 2, "a closed run has a launch and a close");
+            assert_eq!(events[1].kind, kind);
+            let stamp = store
+                .list_runs(10)
+                .expect("runs should list")
+                .into_iter()
+                .find(|run| run.id == record.id)
+                .and_then(|run| run.ended_at_ms)
+                .expect("a closed run has an end stamp");
+            assert_eq!(
+                events[1].at_ms, stamp,
+                "the terminal event carries the row's own end stamp"
+            );
+        }
+    }
+
+    #[test]
+    fn the_interruption_sweep_closes_every_dangling_trail() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let dangling = super::RunRecord::draft("dangling", None, "/bin/sleep");
+        store.insert_run(&dangling).expect("run should insert");
+        let closed = super::RunRecord::draft("closed", None, "/usr/bin/true");
+        store.insert_run(&closed).expect("run should insert");
+        store
+            .finish_run(&closed.id, Some(0), None)
+            .expect("run should close");
+
+        assert_eq!(
+            store
+                .mark_dangling_runs_interrupted()
+                .expect("sweep should run"),
+            1,
+            "only the run left running is swept"
+        );
+
+        let swept = store
+            .list_runs(10)
+            .expect("runs should list")
+            .into_iter()
+            .find(|run| run.id == dangling.id)
+            .expect("the dangling run should still exist");
+        let events = store
+            .list_run_events(&dangling.id, 10)
+            .expect("events should list");
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.clone())
+                .collect::<Vec<String>>(),
+            vec!["launched".to_owned(), "interrupted".to_owned()],
+            "the sweep closes the trail it found open"
+        );
+        assert_eq!(
+            Some(events[1].at_ms),
+            swept.ended_at_ms,
+            "the interruption event carries the sweep's own end stamp"
+        );
+        assert_eq!(
+            store
+                .list_run_events(&closed.id, 10)
+                .expect("events should list")
+                .len(),
+            2,
+            "a run the sweep did not touch keeps its own trail"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_seven_store_adds_run_events_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before run lifecycle events existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..7] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO runs (id, run_id, executable, status, started_at_ms, ended_at_ms)
+                     VALUES ('run-legacy', 'before-events', '/usr/bin/true', 'exited', 7, 9);",
+                )
+                .expect("legacy run should be inserted");
+            connection
+                .pragma_update(None, "user_version", 7)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_runs(2)
+                .expect("runs should list")
+                .first()
+                .map(|run| run.run_id.clone()),
+            Some("before-events".to_owned()),
+            "a run written before events existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_run_events("run-legacy", 1)
+                .expect("events should list")
+                .is_empty(),
+            "a run written before events existed must survive with no trail"
+        );
+        let event = super::RunEvent::draft("run-legacy", 0, 7, "launched");
+        store.insert_run_event(&event).expect("event should insert");
+        assert_eq!(
+            store
+                .list_run_events("run-legacy", 2)
+                .expect("events should list"),
+            vec![event],
+            "an event written after the upgrade must round-trip"
         );
     }
 
