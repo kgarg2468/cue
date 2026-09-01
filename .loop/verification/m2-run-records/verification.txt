@@ -34,12 +34,17 @@ lock, list_runs page, Swift RunRecord/RunListPage.
   taken right after open_store, before any lifecycle rewrite. The socket bind
   proves socket ownership, not store ownership (Sol round 2) — a second
   backend on a different socket but the same store now fails startup with
-  "store … is already owned by another backend". Kernel releases the lock on
-  process death, so no stale-lock recovery is needed.
+  "store … is already owned by another backend". The sidecar is keyed by the
+  *canonical* store path (Sol round 3): a symlink alias contends on the same
+  lock instead of minting its own. Kernel releases the lock on process death,
+  so no stale-lock recovery is needed.
 - No terminal-write retries: ownership rules out cross-process busy
-  contention, so retrying a failed finish_run only stalls run supervision
-  (a 3×busy-timeout retry loop could hold a run terminal ~15s — Sol round 2);
-  a single attempt + startup-sweep correction is strictly better.
+  contention for all post-startup writes, so retrying a failed finish_run
+  only stalls run supervision (a 3×busy-timeout retry loop could hold a run
+  terminal ~15s — Sol round 2); a single attempt + startup-sweep correction
+  is strictly better. During the startup window itself, concurrent opens are
+  serialized by the pre-existing open-time `.lock` flock plus SQLite's 5s
+  busy_timeout; a loser that gets that far still dies at the ownership gate.
 - Startup sweep (running → interrupted + ended_at_ms) is fatal on failure and
   runs under the ownership lock, before the accept loop serves any request,
   so no client can read a page claiming a dead run is live and a backend that
@@ -57,6 +62,11 @@ lock, list_runs page, Swift RunRecord/RunListPage.
   launch cannot interrupt a live backend's runs).
 - Round 2 FAIL: bind ≠ store ownership; retry loop violates supervision
   bound. Fixed red-first with the owner flock + retry removal above.
+- Round 3 FAIL: lexical-path lock keying let a symlink alias mint a second
+  owner lock (MAJOR, fixed red-first via canonicalize); plus MINORs fixed:
+  takeover test now asserts the ownership error on stderr, and tests reap
+  their sleep workers before teardown (except the dangling-run test, whose
+  mid-run SIGKILL orphans its worker by design, bounded at 30s).
 
 ## Security invariants checked
 - Protocol change additive; all 58 process_lifecycle tests untouched and green.
@@ -71,3 +81,8 @@ lock, list_runs page, Swift RunRecord/RunListPage.
   types (rename is API-breaking; batch with a client-hardening slice).
 - status/error_code are free-form strings in the store; no per-session runs
   index yet.
+- The open-time `.lock` sidecar is still keyed by the lexical path, so an
+  aliased loser can briefly contend on SQLite during open (covered by the 5s
+  busy_timeout, then refused at the ownership gate). Canonicalizing it needs
+  parent-dir handling before the store exists — batch with a store-hardening
+  slice.

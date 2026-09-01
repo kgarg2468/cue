@@ -415,9 +415,11 @@ fn acquire_open_lock(path: &Path) -> io::Result<fs::File> {
 /// Exclusive, lifetime ownership of a store by one backend process. Held for as long as the
 /// returned handle lives; the kernel releases it when the process exits, however it exits.
 /// Binding a socket proves nothing about the store, so the sweep of dangling runs (and every
-/// later write) is only safe once this lock is held.
+/// later write) is only safe once this lock is held. The lock is keyed by the canonical store
+/// path — a symlink alias must contend on the same lock, not mint its own — which requires the
+/// store file to already exist (call after `open_store`).
 pub(crate) fn acquire_store_ownership(path: &Path) -> io::Result<fs::File> {
-    let mut owner_path = path.as_os_str().to_owned();
+    let mut owner_path = path.canonicalize()?.into_os_string();
     owner_path.push(".owner");
     let file = fs::OpenOptions::new()
         .read(true)

@@ -1,9 +1,9 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -951,6 +951,12 @@ fn a_duplicate_launch_cannot_interrupt_a_live_backends_runs() {
         "a duplicate launch must not corrupt the live backend's records, got {}",
         run[0]
     );
+
+    // Reap the sleep worker while the backend is still its parent; the
+    // teardown SIGKILL alone would orphan it for the rest of its timeout.
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string()])
+        .status();
 }
 
 #[test]
@@ -982,14 +988,36 @@ fn a_second_backend_on_the_same_store_cannot_start() {
     }
 
     // Binding a different socket must not grant the store: ownership is per
-    // store, not per socket path.
+    // store, not per socket path — and per underlying file, not per spelling,
+    // so a symlink alias of the store must contend on the same lock.
+    assert_takeover_refused(&store_path, &other_socket);
+    let alias_path = fixture.path("alias.sqlite");
+    std::os::unix::fs::symlink(&store_path, &alias_path).expect("alias should link");
+    assert_takeover_refused(&alias_path, &other_socket);
+
+    let page = list_runs(&backend.socket_path);
+    assert_eq!(
+        runs_named(&page, "owned-run")[0]["status"],
+        "running",
+        "a refused takeover must not corrupt the owner's records"
+    );
+
+    // Reap the sleep worker while the backend is still its parent; the
+    // teardown SIGKILL alone would orphan it for the rest of its timeout.
+    let _ = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string()])
+        .status();
+}
+
+fn assert_takeover_refused(store_path: &Path, socket_path: &Path) {
     let mut second = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
         .args([
             "--socket",
-            other_socket.to_str().expect("socket path is UTF-8"),
+            socket_path.to_str().expect("socket path is UTF-8"),
             "--store",
             store_path.to_str().expect("store path is UTF-8"),
         ])
+        .stderr(Stdio::piped())
         .spawn()
         .expect("second backend should spawn");
     let deadline = Instant::now() + STARTUP_DEADLINE;
@@ -1006,14 +1034,18 @@ fn a_second_backend_on_the_same_store_cannot_start() {
         }
     };
     assert!(!status.success(), "store takeover must be refused");
-    let _ = fs::remove_file(&other_socket);
-
-    let page = list_runs(&backend.socket_path);
-    assert_eq!(
-        runs_named(&page, "owned-run")[0]["status"],
-        "running",
-        "a refused takeover must not corrupt the owner's records"
+    let mut stderr = String::new();
+    second
+        .stderr
+        .take()
+        .expect("stderr should be captured")
+        .read_to_string(&mut stderr)
+        .expect("stderr should be readable");
+    assert!(
+        stderr.contains("already owned by another backend"),
+        "refusal must name store ownership, got: {stderr}"
     );
+    let _ = fs::remove_file(socket_path);
 }
 
 #[test]

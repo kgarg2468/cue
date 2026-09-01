@@ -34,3 +34,17 @@ failures:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 5.24s
 
 error: test failed, to rerun pass `--test persistence`
+
+=== Round 4 red (symlink alias bypasses lexical owner-lock keying, pre canonicalize) ===
+
+thread 'a_second_backend_on_the_same_store_cannot_start' (24141210) panicked at backend/tests/persistence.rs:1025:17:
+a second backend on an owned store must exit, not serve
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_second_backend_on_the_same_store_cannot_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 5.35s
+
+error: test failed, to rerun pass `--test persistence`
