@@ -13,17 +13,21 @@ public struct Session: Equatable {
     public let title: String
     public let createdAtMilliseconds: Int
     public let updatedAtMilliseconds: Int
+    /// Nil for an uncategorized session; the backend omits the field entirely.
+    public let kind: String?
 
     public init(
         id: String,
         title: String,
         createdAtMilliseconds: Int,
-        updatedAtMilliseconds: Int
+        updatedAtMilliseconds: Int,
+        kind: String? = nil
     ) {
         self.id = id
         self.title = title
         self.createdAtMilliseconds = createdAtMilliseconds
         self.updatedAtMilliseconds = updatedAtMilliseconds
+        self.kind = kind
     }
 }
 
@@ -99,11 +103,13 @@ public enum IPCClient {
         return try validateHealthResponse(response)
     }
 
-    public static func createSession(socketPath: String, title: String) throws -> Session {
+    public static func createSession(socketPath: String, title: String, kind: String? = nil) throws
+        -> Session
+    {
         let descriptor = try connect(to: socketPath)
         defer { _ = Darwin.close(descriptor) }
 
-        try writeCreateSessionRequest(title: title, to: descriptor)
+        try writeCreateSessionRequest(title: title, kind: kind, to: descriptor)
         return try decodeCreateSessionResponse(readBoundedResponseLine(from: descriptor))
     }
 
@@ -240,8 +246,10 @@ public enum IPCClient {
 
     public static let listSessionsRequest = "{\"version\":1,\"type\":\"list_sessions\"}\n"
 
-    public static func createSessionRequest(title: String) -> String {
-        "{\"version\":1,\"type\":\"create_session\",\"title\":\(jsonString(title))}\n"
+    public static func createSessionRequest(title: String, kind: String? = nil) -> String {
+        let kindField = kind.map { ",\"kind\":\(jsonString($0))" } ?? ""
+        return "{\"version\":1,\"type\":\"create_session\",\"title\":\(jsonString(title))"
+            + "\(kindField)}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -346,9 +354,10 @@ public enum IPCClient {
             ), to: descriptor)
     }
 
-    static func writeCreateSessionRequest(title: String, to descriptor: Int32) throws {
+    static func writeCreateSessionRequest(title: String, kind: String?, to descriptor: Int32) throws
+    {
         try suppressSIGPIPE(on: descriptor)
-        try write(Array(createSessionRequest(title: title).utf8), to: descriptor)
+        try write(Array(createSessionRequest(title: title, kind: kind).utf8), to: descriptor)
     }
 
     static func writeListSessionsRequest(to descriptor: Int32) throws {
@@ -590,11 +599,22 @@ public enum IPCClient {
             throw IPCClientError.invalidSessionResponse
         }
 
+        // An uncategorized session omits the field; a present kind must still be a string.
+        let kind: String?
+        if json["kind"] == nil {
+            kind = nil
+        } else if let value = json["kind"] as? String {
+            kind = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
         return Session(
             id: id,
             title: title,
             createdAtMilliseconds: createdAtMilliseconds,
-            updatedAtMilliseconds: updatedAtMilliseconds
+            updatedAtMilliseconds: updatedAtMilliseconds,
+            kind: kind
         )
     }
 

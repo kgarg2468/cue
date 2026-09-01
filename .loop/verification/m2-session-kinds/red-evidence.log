@@ -1,0 +1,35 @@
+# M2 session-kinds slice — red evidence (cycle 20, 2026-08-31)
+
+New protocol tests vs merged main 772f225 (backend ignores 'kind', accepts unknown kinds):
+
+assertion `left == right` failed: created session should echo its kind
+  left: Null
+ right: "meeting"
+
+
+failures:
+    session_kinds_are_persisted_and_survive_a_restart
+    unknown_session_kinds_are_rejected_with_an_error_frame
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `--test persistence`
+
+
+
+failures:
+    unknown_session_kinds_are_rejected_with_an_error_frame
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `--test persistence`
+
+--- Round-1 review fix (Sol MAJOR: explicit null kind bypassed validation) — red run BEFORE fix ---
+
+
+failures:
+    unknown_session_kinds_are_rejected_with_an_error_frame
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.29s
+
+error: test failed, to rerun pass `--test persistence`

@@ -1,0 +1,40 @@
+# M2 session-kinds slice — verification summary (cycle 20, 2026-08-31)
+
+Slice: optional typed session kinds (S05-001) — migration 2 adds a nullable
+`kind` column; create_session accepts an optional validated kind; responses
+include kind only when set; Swift Session gains optional kind.
+
+## TDD evidence
+- red-evidence.log — the 2 new protocol tests fail against merged main 772f225
+  (backend silently ignores "kind" and accepts unknown values).
+- cargo-test.log — full green: 32 lib + 13 health_socket + 9 persistence +
+  58 process_lifecycle (112 Rust); fmt and clippy -D warnings clean.
+- verify-m0.log — scripts/verify-m0.sh exit 0 (31 Swift tests, release builds,
+  swift format lint --strict, traceability validation).
+- runtime-demo.log — real release binary: hand-built v1 store (user_version 1,
+  legacy row) migrates to user_version 2 on open; sessions created with
+  kind=meeting / kind=personal_note / no kind; kind "keynote" rejected with
+  invalid_create_session; restart lists legacy row without kind and new rows
+  with theirs; store/sidecars all 0600.
+
+## Design decisions
+- Valid kinds (case-sensitive): meeting, conversation, presentation, pair_work,
+  personal_note, imported_audio (spec §5 line 169). "Auto"/uncategorized (spec
+  §18.4 "does not require categorization") is represented by OMITTING the kind
+  field — "auto" is not a wire value and is rejected.
+- Kind is validated before Session::draft, preserving the draft → frame-bound
+  check → insert ordering from the previous slice.
+- Migration 2 is a nullable ALTER TABLE ADD COLUMN: pre-existing rows stay
+  valid with NULL kind, exercised by a unit test on a hand-built v1 store and
+  by the runtime demo.
+
+## Security invariants checked
+- Protocol change additive; unknown kinds rejected before any persistence.
+- Store file/sidecar permissions unchanged (0600 in 0700-when-created dir).
+- User store at ~/Library/Application Support/CaptureDelegate untouched by the
+  full verification run (pre-existing sessions dir only, mtime 2026-07-19).
+
+## Known bounds carried forward
+- No session-kind update/rename protocol yet (later M2 slice).
+- Swift client sends kind as a raw optional String; a typed enum is deferred
+  (flagged by the implementation worker).

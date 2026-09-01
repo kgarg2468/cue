@@ -139,6 +139,28 @@ fn list_sessions(socket_path: &Path) -> Vec<serde_json::Value> {
         .clone()
 }
 
+const SESSION_KINDS: [&str; 6] = [
+    "meeting",
+    "conversation",
+    "presentation",
+    "pair_work",
+    "personal_note",
+    "imported_audio",
+];
+
+fn create_session_with_kind(socket_path: &Path, title: &str, kind: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "create_session", "title": title, "kind": kind}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "create_session_response",
+        "kind {kind:?} should be accepted, got {response}"
+    );
+    response["session"].clone()
+}
+
 fn mode_of(path: &Path) -> u32 {
     fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("{} metadata should be readable: {error}", path.display()))
@@ -333,6 +355,81 @@ fn list_sessions_responses_are_bounded_with_truncation_reported() {
             .expect("sessions should be an array")
             .is_empty(),
         "the byte budget should still deliver the newest sessions that fit"
+    );
+}
+
+#[test]
+fn session_kinds_are_persisted_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("kinds.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let expected = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let mut created = Vec::new();
+        for kind in SESSION_KINDS {
+            let session =
+                create_session_with_kind(&backend.socket_path, &format!("kind {kind}"), kind);
+            assert_eq!(
+                session["kind"], kind,
+                "created session should echo its kind"
+            );
+            created.push(session);
+        }
+        // The spec does not require categorization: an uncategorized session has
+        // no kind at all in the protocol.
+        let uncategorized = create_session(&backend.socket_path, "No kind chosen");
+        assert!(
+            uncategorized.get("kind").is_none(),
+            "an uncategorized session must omit the kind field, got {uncategorized}"
+        );
+        created.push(uncategorized);
+        created.reverse();
+        backend.stop();
+        created
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    assert_eq!(list_sessions(&restarted.socket_path), expected);
+}
+
+#[test]
+fn unknown_session_kinds_are_rejected_with_an_error_frame() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badkind.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    for kind in ["keynote", "", "MEETING", "auto"] {
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_session", "title": "t", "kind": kind}),
+        );
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "version": 1,
+                "type": "error",
+                "code": "invalid_create_session",
+            }),
+            "kind {kind:?} should be rejected"
+        );
+    }
+
+    // An explicit null is not how an uncategorized session is stated; only
+    // omitting the field is.
+    let null_kind = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "create_session", "title": "t", "kind": null}),
+    );
+    assert_eq!(
+        null_kind["code"], "invalid_create_session",
+        "an explicit null kind must be rejected, got {null_kind}"
+    );
+
+    assert!(
+        list_sessions(&backend.socket_path).is_empty(),
+        "rejected kinds must not persist sessions"
     );
 }
 
