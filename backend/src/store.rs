@@ -113,8 +113,10 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX session_projects_by_link
         ON session_projects (session_id, linked_at_ms, project_id)",
     // A task packet is the provider-neutral document one action is delegated with. The document
-    // is stored verbatim as the JSON text it arrived as, and only the version it declares is
-    // lifted out of it into a column, so a packet shaped for one provider stays readable to a
+    // is stored in canonical form — the parsed value re-serialized, so duplicate members
+    // collapse last-wins and numbers take their shortest round-trip spelling — and only the
+    // version it declares is lifted out of it into a column, so a packet shaped for one
+    // provider stays readable to a
     // build that knows nothing about that provider's keys; the index serves the only read path,
     // which walks one action's packets in the order they were written.
     "CREATE TABLE task_packets (
@@ -978,7 +980,7 @@ impl Store {
     }
 
     /// Writes one packet, keeping its document as the canonical JSON text of the value the
-    /// domain read, so the row states exactly the document the caller handed over.
+    /// domain read, so the row states exactly the document the domain admitted.
     pub(crate) fn insert_task_packet(&self, packet: &TaskPacket) -> io::Result<()> {
         let body = serde_json::to_string(&packet.body)?;
         self.connection()

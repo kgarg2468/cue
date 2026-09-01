@@ -1104,7 +1104,7 @@ func listSessionProjectsRequestAndResponse() throws {
     }
 }
 
-@Test("create task packet request carries its document verbatim and its response decodes it")
+@Test("create task packet request carries its document as JSON and its response decodes it")
 func createTaskPacketRequestAndResponse() throws {
     let body: [String: Any] = [
         "task_packet_version": 1,
@@ -1159,6 +1159,31 @@ func createTaskPacketRequestAndResponse() throws {
     #expect(throws: IPCClientError.invalidSessionResponse) {
         try IPCClient.createTaskPacketRequest(actionID: "action-1", body: ["at": Date()])
     }
+}
+
+@Test("a boolean document member stays a boolean rather than becoming the number one")
+func taskPacketBooleanFidelity() throws {
+    // NSNumber equality cannot tell `true` from `1`, so the packet Equatable would mask a
+    // boolean degrading into a number. The serialized text can tell them apart; this pins
+    // type fidelity through both the request and the decoded response.
+    let request = try IPCClient.createTaskPacketRequest(
+        actionID: "action-1",
+        body: ["task_packet_version": 1, "urgent": true, "retries": 1]
+    )
+    #expect(request.contains("\"urgent\":true"))
+    #expect(request.contains("\"retries\":1"))
+
+    let packet = try IPCClient.decodeCreateTaskPacketResponse(
+        "{\"version\":1,\"type\":\"create_task_packet_response\",\"packet\":"
+            + "{\"id\":\"packet-1\",\"action_id\":\"action-1\",\"packet_version\":1,"
+            + "\"body\":{\"task_packet_version\":1,\"urgent\":true,\"retries\":1},"
+            + "\"created_at_ms\":10}}\n"
+    )
+    let reserialized = try JSONSerialization.data(
+        withJSONObject: packet.body, options: [.sortedKeys])
+    let text = try #require(String(data: reserialized, encoding: .utf8))
+    #expect(text.contains("\"urgent\":true"), "a decoded boolean must re-serialize as a boolean")
+    #expect(text.contains("\"retries\":1"), "a decoded number must re-serialize as a number")
 }
 
 @Test("list task packets request is typed and its response decodes a chronological page")

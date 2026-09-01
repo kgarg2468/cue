@@ -12,4 +12,9 @@ libc = "0.2"
 regex = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip makes parsing correctly rounded, so the canonical text a
+# document is stored as parses back to exactly the value that produced it —
+# without it, a reloaded packet can list as a different number than it was
+# admitted as, and near the frame bound a length-growing reload can pop an
+# admitted packet from its own page (Sol review of PR #55).
+serde_json = { version = "1", features = ["float_roundtrip"] }

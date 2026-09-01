@@ -2100,6 +2100,19 @@ fn handle_connection(
                         return write_protocol_error(&mut stream, "store_unavailable");
                     }
                 }
+                // Every read of this document goes through its stored canonical text, so
+                // that text must parse back to exactly the value being admitted — otherwise
+                // the packet would list as a different document than it was accepted as, and
+                // the frame probe below would be measuring the wrong serialization. With
+                // correctly-rounded float parsing this is a fixed point; the check stands so
+                // the invariant survives a parser regression rather than trusting one.
+                let stable = serde_json::to_string(&body)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|reloaded| reloaded == body);
+                if !stable {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                }
                 let packet = TaskPacket::draft(&action_id, TASK_PACKET_VERSION, body);
                 let response = CreateTaskPacketResponse {
                     version: PROTOCOL_VERSION,

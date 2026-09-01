@@ -2567,6 +2567,31 @@ fn every_accepted_project_is_listable_alone_and_through_its_session() {
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
 
+/// Writes one raw line and reads one raw line, for requests whose exact text
+/// matters — duplicate keys and number literals that `serde_json::json!` cannot
+/// spell. Returns None when the backend closes the connection without replying.
+fn exchange_raw(socket_path: &Path, request: &str) -> Option<serde_json::Value> {
+    let mut stream = UnixStream::connect(socket_path).expect("client should connect");
+    stream
+        .set_read_timeout(Some(IO_DEADLINE))
+        .expect("read deadline should be configured");
+    stream
+        .set_write_timeout(Some(IO_DEADLINE))
+        .expect("write deadline should be configured");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+
+    let mut response = String::new();
+    let read = BufReader::new(stream)
+        .read_line(&mut response)
+        .expect("the connection should answer or close before the read deadline");
+    if read == 0 {
+        return None;
+    }
+    Some(serde_json::from_str(&response).expect("response should be JSON"))
+}
+
 fn create_task_packet(
     socket_path: &Path,
     action_id: &str,
@@ -2615,8 +2640,8 @@ fn task_packets_persist_chronologically_and_survive_a_restart() {
         );
         let other_id = other["id"].as_str().expect("action id").to_owned();
 
-        // A compact §8-shaped packet; the domain layer stores the document
-        // verbatim and extracts only its version.
+        // A compact §8-shaped packet; the domain layer stores the document's
+        // canonical form and extracts only its version.
         let body = serde_json::json!({
             "task_packet_version": 1,
             "origin": {"session_id": "ses_engineering_sync", "source_refs": [
@@ -2636,7 +2661,7 @@ fn task_packets_persist_chronologically_and_survive_a_restart() {
         );
         assert_eq!(
             first["body"], body,
-            "the packet document must round-trip verbatim"
+            "the packet document must round-trip value-identically"
         );
         assert!(
             first["created_at_ms"].as_i64().unwrap_or_default() > 0,
@@ -2776,4 +2801,151 @@ fn every_accepted_task_packet_is_singly_listable() {
     }
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
+
+/// The exact shortest-representation text of an f64 whose reload through a
+/// best-effort float parser drifts by a ULP and re-expands one character
+/// longer. With correctly-rounded parsing it is a fixed point; without it,
+/// the stored document lists as a different number than it was admitted as.
+const DRIFT_FLOAT: f64 = 3.0700532959020438e+87;
+
+#[test]
+fn task_packet_numbers_list_as_the_values_they_were_admitted_as() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("pktnum.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (action_id, body) = {
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let action = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "custom", "title": "Number fidelity"}),
+        );
+        let action_id = action["id"].as_str().expect("action id").to_owned();
+        let body = serde_json::json!({"task_packet_version": 1, "measurement": DRIFT_FLOAT});
+        let created = create_task_packet(&backend.socket_path, &action_id, body.clone());
+        assert_eq!(
+            created["body"], body,
+            "the created packet must echo the numbers it was given"
+        );
+        (action_id, body)
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_task_packets(&restarted.socket_path, &action_id);
+    assert_eq!(
+        page["packets"][0]["body"], body,
+        "a stored number must survive its reload from canonical text unchanged"
+    );
+}
+
+#[test]
+fn every_accepted_task_packet_stays_listable_after_its_text_reloads() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("pktdrift.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    // Eighty drift-prone floats give the reload eighty bytes of potential
+    // growth on top of the escape-heavy padding, so if the stored text were
+    // not a serialization fixed point, a packet admitted just under the frame
+    // bound would pop out of its own single-item page. The NUL window walks
+    // the admission boundary exactly as the plain sweep above does.
+    let drift: Vec<f64> = vec![DRIFT_FLOAT; 80];
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 975..1030 {
+        let action = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "custom", "title": format!("Drift {nulls}")}),
+        );
+        let action_id = action["id"].as_str().expect("action id");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_task_packet",
+                "action_id": action_id,
+                "body": {"task_packet_version": 1, "drift": drift,
+                    "pad": "\u{0}".repeat(nulls)}}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_create_task_packet");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_task_packets(&backend.socket_path, action_id);
+        assert_eq!(
+            page["packets"].as_array().expect("packets array").len(),
+            1,
+            "an admitted packet must survive its own reload, nulls={nulls}"
+        );
+        assert_eq!(
+            page["truncated"], false,
+            "a lone packet's page must not report truncation, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
+
+#[test]
+fn duplicate_packet_keys_collapse_to_the_last_member() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("pktdup.sock");
+    let backend = BackendProcess::start(&socket_path, None, None);
+    let action = create_action(
+        &backend.socket_path,
+        serde_json::json!({"kind": "custom", "title": "Duplicate keys"}),
+    );
+    let action_id = action["id"].as_str().expect("action id");
+
+    // The stored document is the canonicalized parse of the request, not its
+    // raw text: a duplicated member keeps its last occurrence, per JSON's
+    // last-wins convention. This pins the contract the "canonical form"
+    // comments state.
+    let response = exchange_raw(
+        &backend.socket_path,
+        &format!(
+            "{{\"version\":1,\"type\":\"create_task_packet\",\"action_id\":\"{action_id}\",\
+             \"body\":{{\"task_packet_version\":1,\"objective\":\"first\",\"objective\":\"second\"}}}}"
+        ),
+    )
+    .expect("a well-formed request should be answered");
+    assert_eq!(response["type"], "create_task_packet_response");
+    assert_eq!(
+        response["packet"]["body"]["objective"], "second",
+        "a duplicated member keeps its last occurrence"
+    );
+    let page = list_task_packets(&backend.socket_path, action_id);
+    assert_eq!(page["packets"][0]["body"]["objective"], "second");
+}
+
+#[test]
+fn packet_numbers_outside_the_f64_range_close_the_connection_unanswered() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("pktrange.sock");
+    let backend = BackendProcess::start(&socket_path, None, None);
+    let action = create_action(
+        &backend.socket_path,
+        serde_json::json!({"kind": "custom", "title": "Out of range"}),
+    );
+    let action_id = action["id"].as_str().expect("action id");
+
+    // 1e400 is valid JSON text but exceeds this build's number model, so the
+    // request fails deserialization and the connection closes without a
+    // protocol error — the same bound every syntactically malformed request
+    // gets. Pinned here as a documented bound, not an invariant to fix.
+    let response = exchange_raw(
+        &backend.socket_path,
+        &format!(
+            "{{\"version\":1,\"type\":\"create_task_packet\",\"action_id\":\"{action_id}\",\
+             \"body\":{{\"task_packet_version\":1,\"scale\":1e400}}}}"
+        ),
+    );
+    assert!(
+        response.is_none(),
+        "an unrepresentable number is a malformed request: connection closed, got {response:?}"
+    );
+    // The backend stays healthy for the next client.
+    let page = list_task_packets(&backend.socket_path, action_id);
+    assert_eq!(page["packets"].as_array().expect("packets array").len(), 0);
 }

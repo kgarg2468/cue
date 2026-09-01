@@ -320,8 +320,9 @@ public struct SessionProjectLink: Equatable {
 }
 
 /// The provider-neutral document one action is delegated with. The backend keeps the document
-/// verbatim and reads only the version it declares, so every other key belongs to whichever
-/// provider the packet was shaped for.
+/// in canonical JSON form (duplicate members collapse last-wins; numbers take their shortest
+/// round-trip spelling) and reads only the version it declares, so every other key belongs to
+/// whichever provider the packet was shaped for.
 public struct TaskPacket: Equatable {
     public let id: String
     public let actionID: String
@@ -345,7 +346,9 @@ public struct TaskPacket: Equatable {
     }
 
     /// Two packets are the same packet when their documents say the same thing; the document is
-    /// untyped JSON, so it is compared as JSON rather than key by key.
+    /// untyped JSON, so it is compared as JSON rather than key by key. NSNumber equality makes
+    /// `true` equal to `1`, so boolean type fidelity is pinned by its own serialization test
+    /// rather than by this comparison.
     public static func == (lhs: TaskPacket, rhs: TaskPacket) -> Bool {
         lhs.id == rhs.id && lhs.actionID == rhs.actionID
             && lhs.packetVersion == rhs.packetVersion
@@ -620,8 +623,8 @@ public enum IPCClient {
         return try decodeListSessionProjectsResponse(readBoundedResponseLine(from: descriptor))
     }
 
-    /// Delegates one action with a provider-neutral document; the backend stores it verbatim and
-    /// reads only the version the document declares.
+    /// Delegates one action with a provider-neutral document; the backend stores its canonical
+    /// JSON form and reads only the version the document declares.
     public static func createTaskPacket(
         socketPath: String,
         actionID: String,
@@ -870,8 +873,8 @@ public enum IPCClient {
             + "\"session_id\":\(jsonString(sessionID))}\n"
     }
 
-    /// The document travels verbatim, so it is written as the JSON it is rather than as a
-    /// string; keys are sorted so one document always makes one frame.
+    /// The document travels as the JSON it is rather than as a string; keys are sorted so one
+    /// document always makes one frame.
     public static func createTaskPacketRequest(actionID: String, body: [String: Any]) throws
         -> String
     {
@@ -1903,8 +1906,8 @@ public enum IPCClient {
             let id = json["id"] as? String, !id.isEmpty,
             let actionID = json["action_id"] as? String, !actionID.isEmpty,
             let packetVersion = json["packet_version"] as? Int,
-            // The document is kept verbatim, but it is still a document: a packet whose body is
-            // not an object is not one the backend can have admitted.
+            // The document keeps its content, but it is still a document: a packet whose body
+            // is not an object is not one the backend can have admitted.
             let body = json["body"] as? [String: Any],
             let createdAtMilliseconds = json["created_at_ms"] as? Int
         else {
