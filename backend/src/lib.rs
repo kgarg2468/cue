@@ -1,6 +1,6 @@
 mod store;
 
-use crate::store::{RunRecord, Session, Source, Store};
+use crate::store::{Marker, RunRecord, Session, Source, Store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +46,18 @@ const LIST_SESSIONS_LIMIT: usize = 50;
 const MAX_SOURCE_TEXT_BYTES: usize = 4096;
 const MAX_SOURCE_SPEAKER_BYTES: usize = 256;
 const LIST_SOURCES_LIMIT: usize = 50;
+/// A marker always states the kind of attention it deserves, and it must be one the app
+/// knows how to present.
+const MARKER_KINDS: [&str; 6] = [
+    "important",
+    "decision",
+    "action",
+    "question",
+    "delegate",
+    "research",
+];
+const MAX_MARKER_NOTE_BYTES: usize = 4096;
+const LIST_MARKERS_LIMIT: usize = 50;
 const LIST_RUNS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
@@ -98,11 +110,16 @@ struct Request {
     start_ms: Option<serde_json::Value>,
     #[serde(default)]
     end_ms: Option<serde_json::Value>,
+    #[serde(default)]
+    at_ms: Option<serde_json::Value>,
     // Double option as with `kind`: only an omitted speaker means unattributed.
     #[serde(default, deserialize_with = "deserialize_present")]
     speaker: Option<Option<String>>,
     #[serde(default)]
     text: Option<String>,
+    // Double option as with `kind`: only an omitted note means a marker without one.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    note: Option<Option<String>>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -160,6 +177,23 @@ struct ListSourcesResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     sources: &'a [Source],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct AddMarkerResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    marker: &'a Marker,
+}
+
+#[derive(Serialize)]
+struct ListMarkersResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    markers: &'a [Marker],
     truncated: bool,
 }
 
@@ -1103,7 +1137,18 @@ fn handle_connection(
                     session: &session,
                 };
                 // Escape-heavy titles can pass the raw byte check yet serialize past the
-                // frame bound; reject those before anything is persisted.
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted session can never persist yet be unlistable.
+                let list_probe = ListSessionsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_sessions_response",
+                    sessions: std::slice::from_ref(&session),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_create_session");
+                }
                 let Ok(frame) = serialize_json_frame(&response) else {
                     return write_protocol_error(&mut stream, "invalid_create_session");
                 };
@@ -1193,7 +1238,18 @@ fn handle_connection(
                     source: &source,
                 };
                 // Escape-heavy text can pass the raw byte check yet serialize past the
-                // frame bound; reject those before anything is persisted.
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted source can never persist yet be unlistable.
+                let list_probe = ListSourcesResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_sources_response",
+                    sources: std::slice::from_ref(&source),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                }
                 let Ok(frame) = serialize_json_frame(&response) else {
                     return write_protocol_error(&mut stream, "invalid_add_source");
                 };
@@ -1239,6 +1295,115 @@ fn handle_connection(
                         // Dropping from the end keeps the chronological start of the page.
                         Err(_) if !sources.is_empty() => {
                             sources.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "add_marker" => {
+                // A marker sits at a whole non-negative millisecond offset; a float, a
+                // negative, or a string is a rejected field, not a rejected connection.
+                let (Some(session_id), Some(at_ms)) = (
+                    // A marker always names its session, so an omitted and an explicitly null
+                    // session_id are the same missing field.
+                    request.session_id.flatten(),
+                    request.at_ms.as_ref().and_then(milliseconds_field),
+                ) else {
+                    return write_protocol_error(&mut stream, "invalid_add_marker");
+                };
+                let kind = match request.kind {
+                    // A marker always states its kind, so an omitted, an unknown, and an
+                    // explicitly null kind are all rejected.
+                    Some(Some(kind)) if MARKER_KINDS.contains(&kind.as_str()) => kind,
+                    _ => return write_protocol_error(&mut stream, "invalid_add_marker"),
+                };
+                let note = match request.note {
+                    None => None,
+                    // A blank or explicit-null note is not how a note-free marker is stated;
+                    // only omitting the field is.
+                    Some(Some(note)) => {
+                        let note = note.trim().to_owned();
+                        if note.is_empty() || note.len() > MAX_MARKER_NOTE_BYTES {
+                            return write_protocol_error(&mut stream, "invalid_add_marker");
+                        }
+                        Some(note)
+                    }
+                    Some(None) => return write_protocol_error(&mut stream, "invalid_add_marker"),
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                let marker = Marker::draft(&session_id, at_ms, &kind, note.as_deref());
+                let response = AddMarkerResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "add_marker_response",
+                    marker: &marker,
+                };
+                // Escape-heavy notes can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted marker can never persist yet be unlistable.
+                let list_probe = ListMarkersResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_markers_response",
+                    markers: std::slice::from_ref(&marker),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_add_marker");
+                }
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_add_marker");
+                };
+                if let Err(error) = store.insert_marker(&marker) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_markers" => {
+                // A page can only be scoped to a session that exists, so a missing and an
+                // unknown session_id are the same answer, and so is an explicitly null one.
+                let Some(session_id) = request.session_id.flatten() else {
+                    return write_protocol_error(&mut stream, "unknown_session");
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut markers = match store.list_markers(&session_id, LIST_MARKERS_LIMIT + 1) {
+                    Ok(markers) => markers,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = markers.len() > LIST_MARKERS_LIMIT;
+                markers.truncate(LIST_MARKERS_LIMIT);
+                let frame = loop {
+                    let response = ListMarkersResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_markers_response",
+                        markers: &markers,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the chronological start of the page.
+                        Err(_) if !markers.is_empty() => {
+                            markers.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),

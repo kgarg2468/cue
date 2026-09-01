@@ -399,6 +399,132 @@ func listSourcesRequestAndResponse() throws {
     }
 }
 
+@Test("add marker request JSON is typed and its response decodes a marker")
+func addMarkerRequestAndResponse() throws {
+    let request = IPCClient.addMarkerRequest(
+        sessionID: "session-1",
+        atMilliseconds: 872_000,
+        kind: "decision",
+        note: "Ship behind a \"flag\""
+    )
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "add_marker")
+    #expect(json["session_id"] as? String == "session-1")
+    #expect(json["at_ms"] as? Int == 872_000)
+    #expect(json["kind"] as? String == "decision")
+    #expect(json["note"] as? String == "Ship behind a \"flag\"")
+
+    let marker = try IPCClient.decodeAddMarkerResponse(
+        "{\"version\":1,\"type\":\"add_marker_response\",\"marker\":"
+            + "{\"id\":\"marker-1\",\"session_id\":\"session-1\",\"at_ms\":872000,"
+            + "\"kind\":\"decision\",\"note\":\"Ship behind a flag\"}}\n"
+    )
+    #expect(
+        marker
+            == Marker(
+                id: "marker-1",
+                sessionID: "session-1",
+                atMilliseconds: 872_000,
+                kind: "decision",
+                note: "Ship behind a flag"
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddMarkerResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_add_marker\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddMarkerResponse(
+            "{\"version\":1,\"type\":\"add_marker_response\",\"marker\":"
+                + "{\"id\":\"marker-1\",\"session_id\":\"session-1\",\"at_ms\":0}}\n"
+        )
+    }
+}
+
+@Test("a marker without a note omits the note key in both directions")
+func noteFreeMarkersOmitTheNoteKey() throws {
+    let request = IPCClient.addMarkerRequest(
+        sessionID: "session-1",
+        atMilliseconds: 1000,
+        kind: "important"
+    )
+    #expect(!request.contains("note"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["note"] == nil)
+
+    let marker = try IPCClient.decodeAddMarkerResponse(
+        "{\"version\":1,\"type\":\"add_marker_response\",\"marker\":"
+            + "{\"id\":\"marker-1\",\"session_id\":\"session-1\",\"at_ms\":1000,"
+            + "\"kind\":\"important\"}}\n"
+    )
+    #expect(marker.note == nil)
+}
+
+@Test("a non-string note makes the marker response invalid")
+func nonStringNoteIsRejected() throws {
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddMarkerResponse(
+            "{\"version\":1,\"type\":\"add_marker_response\",\"marker\":"
+                + "{\"id\":\"marker-1\",\"session_id\":\"session-1\",\"at_ms\":0,"
+                + "\"kind\":\"important\",\"note\":7}}\n"
+        )
+    }
+}
+
+@Test("list markers request JSON is typed and its response decodes ordered markers")
+func listMarkersRequestAndResponse() throws {
+    #expect(
+        IPCClient.listMarkersRequest(sessionID: "session-1")
+            == "{\"version\":1,\"type\":\"list_markers\",\"session_id\":\"session-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListMarkersResponse(
+        "{\"version\":1,\"type\":\"list_markers_response\",\"markers\":["
+            + "{\"id\":\"marker-1\",\"session_id\":\"session-1\",\"at_ms\":1,"
+            + "\"kind\":\"important\"},"
+            + "{\"id\":\"marker-2\",\"session_id\":\"session-1\",\"at_ms\":3,"
+            + "\"kind\":\"action\",\"note\":\"Follow up\"}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == MarkerListPage(
+                markers: [
+                    Marker(
+                        id: "marker-1", sessionID: "session-1", atMilliseconds: 1,
+                        kind: "important"),
+                    Marker(
+                        id: "marker-2", sessionID: "session-1", atMilliseconds: 3,
+                        kind: "action", note: "Follow up"),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListMarkersResponse(
+        "{\"version\":1,\"type\":\"list_markers_response\",\"markers\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.markers.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListMarkersResponse(
+            "{\"version\":1,\"type\":\"list_markers_response\",\"markers\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListMarkersResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_session\"}\n"
+        )
+    }
+}
+
 @Test("list runs request JSON is typed and its response decodes live and finished runs")
 func listRunsRequestAndResponse() throws {
     #expect(IPCClient.listRunsRequest == "{\"version\":1,\"type\":\"list_runs\"}\n")

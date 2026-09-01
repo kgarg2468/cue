@@ -1,0 +1,20 @@
+=== Runtime demo: markers on real release binary (3efd78d+worktree) ===
+--- hand-build a version-4 store (sessions+kind+sources+runs) with a legacy session row ---
+pre-open user_version: 4
+--- post-open user_version: 5 (expect 5) ---
+--- marker on the LEGACY session (proves FK against pre-migration rows) ---
+{"version":1,"type":"add_marker_response","marker":{"id":"marker-14ffe-18d11940c1170c00-0","session_id":"ses_legacy","at_ms":45000,"kind":"decision","note":"Ship migration behind a flag"}}
+{"version":1,"type":"add_marker_response","marker":{"id":"marker-14ffe-18d11940c1641e78-1","session_id":"ses_legacy","at_ms":12000,"kind":"important"}}
+--- rejections: unknown kind, unknown session ---
+{"version":1,"type":"error","code":"invalid_add_marker"}
+{"version":1,"type":"error","code":"unknown_session"}
+--- restart: markers survive, listed chronologically ---
+{"version":1,"type":"list_markers_response","markers":[{"id":"marker-14ffe-18d11940c1641e78-1","session_id":"ses_legacy","at_ms":12000,"kind":"important"},{"id":"marker-14ffe-18d11940c1170c00-0","session_id":"ses_legacy","at_ms":45000,"kind":"decision","note":"Ship migration behind a flag"}],"truncated":false}
+--- legacy session data intact ---
+ses_legacy|Legacy planning meeting|meeting
+--- store hygiene ---
+-rw------- /tmp/markers-demo.ZacgHs/store.sqlite
+-rw------- /tmp/markers-demo.ZacgHs/store.sqlite-shm
+-rw------- /tmp/markers-demo.ZacgHs/store.sqlite-wal
+-rw------- /tmp/markers-demo.ZacgHs/store.sqlite.lock
+-rw------- /tmp/markers-demo.ZacgHs/store.sqlite.owner
