@@ -1,6 +1,6 @@
 mod store;
 
-use crate::store::{Marker, RunRecord, Session, Source, Store, TranscriptSegment};
+use crate::store::{Marker, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -63,6 +63,7 @@ const MAX_TRANSCRIPT_TEXT_BYTES: usize = 4096;
 const MAX_TRANSCRIPT_SPEAKER_BYTES: usize = 256;
 const LIST_TRANSCRIPT_LIMIT: usize = 50;
 const LIST_RUNS_LIMIT: usize = 50;
+const LIST_RUN_EVENTS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -124,6 +125,10 @@ struct Request {
     // Double option as with `kind`: only an omitted note means a marker without one.
     #[serde(default, deserialize_with = "deserialize_present")]
     note: Option<Option<String>>,
+    // Double option as with `kind`: an omitted and an explicitly null record id are both
+    // unusable queries, and they are rejected together.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    record_id: Option<Option<String>>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -232,6 +237,15 @@ struct ListRunsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     runs: &'a [RunRecord],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct ListRunEventsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    events: &'a [RunEvent],
     truncated: bool,
 }
 
@@ -1665,6 +1679,55 @@ fn handle_connection(
                 };
                 write_serialized_frame(&mut stream, &frame)?;
             }
+            "list_run_events" => {
+                // A trail is always scoped to one run record, so an omitted, an explicitly
+                // null, and a blank record id are the same unusable query — none of them
+                // could ever name a record, so none of them is a lookup.
+                let Some(record_id) = request
+                    .record_id
+                    .flatten()
+                    .filter(|record_id| !record_id.trim().is_empty())
+                else {
+                    return write_protocol_error(&mut stream, "invalid_list_run_events");
+                };
+                match store.run_record_exists(&record_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_run"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut events = match store.list_run_events(&record_id, LIST_RUN_EVENTS_LIMIT + 1)
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = events.len() > LIST_RUN_EVENTS_LIMIT;
+                events.truncate(LIST_RUN_EVENTS_LIMIT);
+                let frame = loop {
+                    let response = ListRunEventsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_run_events_response",
+                        events: &events,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the start of the run's history.
+                        Err(_) if !events.is_empty() => {
+                            events.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
             "start_process" => {
                 let pty = request.pty.unwrap_or(false);
                 let worktree_repository = match request.worktree_repository {
@@ -1778,6 +1841,10 @@ fn handle_connection(
                 // persists today; exit codes are at worst a full negative i32; the end
                 // timestamp is resampled from the wall clock at termination, which a forward
                 // clock step can widen past the start's width, so only i64::MAX bounds it.
+                // The lifecycle events written alongside this record need no probe of their
+                // own: every field of an event is backend-authored — a record id this probe
+                // already bounds, a small sequence number, a stamp copied from the row, and a
+                // kind from a fixed set of lifecycle words — so no client text can widen one.
                 let mut probe = record.clone();
                 probe.status = "interrupted".to_owned();
                 probe.exit_code = Some(i64::from(i32::MIN));
@@ -2235,9 +2302,11 @@ impl RunTerminal {
         self.emitted = true;
         // The record is closed before the frame is written — and never while the client stream
         // is locked — so a client that observes run_exit can already read a finished record.
-        // Store ownership rules out cross-process contention, so a failure here is local store
-        // breakage that retrying cannot fix: it is reported loudly, never withholds the
-        // terminal frame, and the row is corrected by the next startup sweep.
+        // The close writes the row and the record's terminal event in one transaction, so this
+        // single one-shot emission writes the event exactly once too. Store ownership rules out
+        // cross-process contention, so a failure here — of the row, the event, or both — is
+        // local store breakage that retrying cannot fix: it is reported loudly, never withholds
+        // the terminal frame, and the row is corrected by the next startup sweep.
         if let Some(record) = self.record.take()
             && let Err(error) =
                 record

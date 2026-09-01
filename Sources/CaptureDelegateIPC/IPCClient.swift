@@ -202,6 +202,41 @@ public struct RunListPage: Equatable {
     }
 }
 
+/// One backend-authored moment in a run record's life, as the backend recorded it.
+public struct RunEvent: Equatable {
+    public let id: String
+    /// The run record this event belongs to — the record's own id, not the reusable run id.
+    public let recordID: String
+    /// Orders a record's trail independently of the clock.
+    public let sequence: Int
+    public let atMilliseconds: Int
+    public let kind: String
+
+    public init(
+        id: String,
+        recordID: String,
+        sequence: Int,
+        atMilliseconds: Int,
+        kind: String
+    ) {
+        self.id = id
+        self.recordID = recordID
+        self.sequence = sequence
+        self.atMilliseconds = atMilliseconds
+        self.kind = kind
+    }
+}
+
+public struct RunEventPage: Equatable {
+    public let events: [RunEvent]
+    public let truncated: Bool
+
+    public init(events: [RunEvent], truncated: Bool) {
+        self.events = events
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -389,6 +424,14 @@ public enum IPCClient {
 
         try writeListRunsRequest(to: descriptor)
         return try decodeListRunsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listRunEvents(socketPath: String, recordID: String) throws -> RunEventPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListRunEventsRequest(recordID: recordID, to: descriptor)
+        return try decodeListRunEventsResponse(readBoundedResponseLine(from: descriptor))
     }
 
     public static func cancelProcess(socketPath: String, runID: String) throws
@@ -584,6 +627,10 @@ public enum IPCClient {
     }
 
     public static let listRunsRequest = "{\"version\":1,\"type\":\"list_runs\"}\n"
+
+    public static func listRunEventsRequest(recordID: String) -> String {
+        "{\"version\":1,\"type\":\"list_run_events\",\"record_id\":\(jsonString(recordID))}\n"
+    }
 
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
@@ -785,6 +832,11 @@ public enum IPCClient {
     static func writeListRunsRequest(to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listRunsRequest.utf8), to: descriptor)
+    }
+
+    static func writeListRunEventsRequest(recordID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listRunEventsRequest(recordID: recordID).utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -1331,6 +1383,47 @@ public enum IPCClient {
             errorCode: errorCode,
             startedAtMilliseconds: startedAtMilliseconds,
             endedAtMilliseconds: endedAtMilliseconds
+        )
+    }
+
+    static func decodeListRunEventsResponse(_ response: String) throws -> RunEventPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_run_events_response",
+            let events = json["events"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return RunEventPage(
+            events: try events.map { try decodeRunEvent($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeRunEvent(_ value: Any?) throws -> RunEvent {
+        // Every field is backend-authored and always stated, so a missing one is not a
+        // decodable event.
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let recordID = json["record_id"] as? String, !recordID.isEmpty,
+            let sequence = json["seq"] as? Int,
+            let atMilliseconds = json["at_ms"] as? Int,
+            let kind = json["kind"] as? String, !kind.isEmpty
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return RunEvent(
+            id: id,
+            recordID: recordID,
+            sequence: sequence,
+            atMilliseconds: atMilliseconds,
+            kind: kind
         )
     }
 

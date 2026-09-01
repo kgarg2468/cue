@@ -767,6 +767,80 @@ func listRunsRequestAndResponse() throws {
     }
 }
 
+@Test("list run events request JSON is typed and its response decodes an ordered trail")
+func listRunEventsRequestAndResponse() throws {
+    #expect(
+        IPCClient.listRunEventsRequest(recordID: "run-record-1")
+            == "{\"version\":1,\"type\":\"list_run_events\",\"record_id\":\"run-record-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListRunEventsResponse(
+        "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":["
+            + "{\"id\":\"run-event-1\",\"record_id\":\"run-record-1\",\"seq\":0,\"at_ms\":10,"
+            + "\"kind\":\"launched\"},"
+            + "{\"id\":\"run-event-2\",\"record_id\":\"run-record-1\",\"seq\":1,\"at_ms\":110,"
+            + "\"kind\":\"timed_out\"}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == RunEventPage(
+                events: [
+                    RunEvent(
+                        id: "run-event-1", recordID: "run-record-1", sequence: 0,
+                        atMilliseconds: 10, kind: "launched"),
+                    RunEvent(
+                        id: "run-event-2", recordID: "run-record-1", sequence: 1,
+                        atMilliseconds: 110, kind: "timed_out"),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListRunEventsResponse(
+        "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.events.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunEventsResponse(
+            "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunEventsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_run\"}\n"
+        )
+    }
+}
+
+@Test("a run event missing a backend-authored field is not decodable")
+func malformedRunEventsAreRejected() throws {
+    // Every field is always stated, so an absent sequence is not a decodable event.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunEventsResponse(
+            "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":["
+                + "{\"id\":\"run-event-3\",\"record_id\":\"run-record-1\",\"at_ms\":10,"
+                + "\"kind\":\"launched\"}],\"truncated\":false}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunEventsResponse(
+            "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":["
+                + "{\"id\":\"run-event-4\",\"record_id\":\"run-record-1\",\"seq\":0,"
+                + "\"at_ms\":10,\"kind\":\"\"}],\"truncated\":false}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunEventsResponse(
+            "{\"version\":1,\"type\":\"list_run_events_response\",\"events\":["
+                + "{\"id\":\"run-event-5\",\"record_id\":\"run-record-1\",\"seq\":0,"
+                + "\"at_ms\":10,\"kind\":7}],\"truncated\":false}\n"
+        )
+    }
+}
+
 @Test("an interrupted run decodes with its error code and without an exit code")
 func interruptedRunDecodes() throws {
     let page = try IPCClient.decodeListRunsResponse(
