@@ -2,7 +2,8 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -110,10 +111,19 @@ pub(crate) fn open_store(path: &Path) -> io::Result<Store> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        // Only a directory this store created is forced private; a caller-chosen
+        // pre-existing directory keeps whatever permissions its owner gave it.
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
     }
 
+    // The schema check and the journal-mode conversion below cannot share one SQLite
+    // transaction, so an advisory lock on the store file serializes the whole open
+    // against other processes; without it a concurrent upgrade could land between
+    // the check and the conversion.
+    let _open_lock = acquire_open_lock(path)?;
     let connection = Connection::open(path).map_err(io::Error::other)?;
     connection
         .busy_timeout(BUSY_TIMEOUT)
@@ -132,6 +142,34 @@ pub(crate) fn open_store(path: &Path) -> io::Result<Store> {
     Ok(Store {
         connection: Arc::new(Mutex::new(connection)),
     })
+}
+
+/// Advisory exclusive lock held across the whole open sequence; the kernel releases it when
+/// the returned handle closes. It lives in a sidecar file because locking the store file
+/// itself would collide with SQLite's own POSIX locks (and closing an extra descriptor on
+/// the store would drop them).
+fn acquire_open_lock(path: &Path) -> io::Result<fs::File> {
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)?;
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        // SAFETY: `file` owns a valid descriptor for the flock call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EWOULDBLOCK) || Instant::now() >= deadline {
+            return Err(error);
+        }
+        thread::sleep(BUSY_RETRY_INTERVAL);
+    }
 }
 
 /// Switching journal modes needs a brief exclusive lock that SQLite reports as busy instead of
@@ -247,9 +285,12 @@ mod tests {
     use super::{MIGRATIONS, open_store};
     use rusqlite::Connection;
     use std::fs;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     static STORE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -375,5 +416,86 @@ mod tests {
             .permissions()
             .mode()
             & 0o777
+    }
+
+    #[test]
+    fn a_version_bump_during_a_blocked_open_is_rejected_without_conversion() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A current-version store in the default DELETE journal mode.
+            let connection = Connection::open(&store_path).expect("store should open");
+            connection
+                .execute_batch(MIGRATIONS[0])
+                .expect("schema should apply");
+            connection
+                .pragma_update(None, "user_version", MIGRATIONS.len() as i64)
+                .expect("user_version should be writable");
+        }
+        let mut lock_path = store_path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open-lock sidecar should open for locking");
+        // SAFETY: lock_file owns a valid descriptor for the exclusive flock.
+        assert_eq!(
+            unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
+            0
+        );
+
+        let opener = {
+            let store_path = store_path.clone();
+            thread::spawn(move || open_store(&store_path))
+        };
+        // Give the opener time to reach (and block on) the open lock, then upgrade
+        // the store the way a newer build would.
+        thread::sleep(Duration::from_millis(150));
+        Connection::open(&store_path)
+            .expect("store should open")
+            .pragma_update(None, "user_version", MIGRATIONS.len() as i64 + 1)
+            .expect("user_version should be writable");
+        // SAFETY: lock_file still owns the locked descriptor.
+        assert_eq!(
+            unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
+
+        let error = opener
+            .join()
+            .expect("opener thread should finish")
+            .expect_err("a store upgraded during the open must be rejected");
+        assert!(
+            error.to_string().contains("newer"),
+            "error should explain the version mismatch, got {error}"
+        );
+        let journal_mode: String = Connection::open(&store_path)
+            .expect("store should open")
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode should be readable");
+        assert!(
+            journal_mode.eq_ignore_ascii_case("delete"),
+            "a rejected store must keep its journal mode, got {journal_mode}"
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_parent_directory_keeps_its_permissions() {
+        let fixture = StoreFixture::new();
+        let parent = fixture.directory.join("custom");
+        fs::create_dir(&parent).expect("parent should be created");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
+            .expect("parent permissions should be settable");
+
+        open_store(&parent.join("store.sqlite")).expect("store should open");
+
+        assert_eq!(
+            file_mode(&parent),
+            0o755,
+            "a parent directory the store did not create must keep its permissions"
+        );
     }
 }

@@ -39,3 +39,33 @@ failures:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.22s
 
 error: test failed, to rerun pass `--test persistence`
+
+================================================================================
+Round-2 review fixes (Sol disposition on PR #33) — red runs BEFORE the fixes
+Date: 2026-08-31 (local), commit at time of red run: 89f838b + new tests only
+================================================================================
+
+--- cargo test --lib a_version_bump_during_a_blocked_open (pre-fix: no open lock) ---
+failures:
+    store::tests::a_version_bump_during_a_blocked_open_is_rejected_without_conversion
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 5.56s
+
+error: test failed, to rerun pass `--lib`
+
+--- cargo test --lib a_pre_existing_parent_directory (pre-fix: unconditional chmod 0700) ---
+test store::tests::a_pre_existing_parent_directory_keeps_its_permissions ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.01s
+
+--- Intermediate finding recorded for honesty ---
+First fix attempt flocked the store file itself; on macOS that collides with
+SQLite's own POSIX locks and all 5 store tests failed with DatabaseBusy
+("database is locked"). Final fix moves the advisory open lock to a 0600
+sidecar file (<store>.lock) held for the whole open sequence:
+failures:
+    store::tests::a_pre_existing_parent_directory_keeps_its_permissions
+    store::tests::a_version_bump_during_a_blocked_open_is_rejected_without_conversion
+    store::tests::opening_a_new_store_applies_every_migration
+    store::tests::opening_a_newer_store_fails_without_touching_the_data
+    store::tests::reopening_a_store_does_not_re_run_migrations
+test result: FAILED. 26 passed; 5 failed; ... finished in 5.57s

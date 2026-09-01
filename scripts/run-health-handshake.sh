@@ -15,8 +15,7 @@ cleanup() {
     kill "$backend_pid" 2>/dev/null || true
     wait "$backend_pid" 2>/dev/null || true
   fi
-  rm -f "$socket_path" "$runtime_directory"/store.sqlite*
-  rmdir "$runtime_directory" 2>/dev/null || true
+  rm -rf "$runtime_directory"
   return "$exit_code"
 }
 trap cleanup EXIT
