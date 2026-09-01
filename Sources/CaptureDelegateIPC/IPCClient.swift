@@ -78,6 +78,55 @@ public struct SourceListPage: Equatable {
     }
 }
 
+/// One durable execution of a process, as the backend recorded it.
+public struct RunRecord: Equatable {
+    public let id: String
+    public let runID: String
+    /// Nil for a run that is not linked to a session; the backend omits the field entirely.
+    public let sessionID: String?
+    public let executable: String
+    public let status: String
+    /// Nil while the run is live, and for a run that ended without an exit code.
+    public let exitCode: Int?
+    /// Nil for a run that ended cleanly; the backend omits the field entirely.
+    public let errorCode: String?
+    public let startedAtMilliseconds: Int
+    /// Nil while the run is still live; the backend omits the field entirely.
+    public let endedAtMilliseconds: Int?
+
+    public init(
+        id: String,
+        runID: String,
+        sessionID: String? = nil,
+        executable: String,
+        status: String,
+        exitCode: Int? = nil,
+        errorCode: String? = nil,
+        startedAtMilliseconds: Int,
+        endedAtMilliseconds: Int? = nil
+    ) {
+        self.id = id
+        self.runID = runID
+        self.sessionID = sessionID
+        self.executable = executable
+        self.status = status
+        self.exitCode = exitCode
+        self.errorCode = errorCode
+        self.startedAtMilliseconds = startedAtMilliseconds
+        self.endedAtMilliseconds = endedAtMilliseconds
+    }
+}
+
+public struct RunListPage: Equatable {
+    public let runs: [RunRecord]
+    public let truncated: Bool
+
+    public init(runs: [RunRecord], truncated: Bool) {
+        self.runs = runs
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -186,6 +235,14 @@ public enum IPCClient {
 
         try writeListSourcesRequest(sessionID: sessionID, to: descriptor)
         return try decodeListSourcesResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listRuns(socketPath: String) throws -> RunListPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListRunsRequest(to: descriptor)
+        return try decodeListRunsResponse(readBoundedResponseLine(from: descriptor))
     }
 
     public static func cancelProcess(socketPath: String, runID: String) throws
@@ -337,6 +394,8 @@ public enum IPCClient {
         "{\"version\":1,\"type\":\"list_sources\",\"session_id\":\(jsonString(sessionID))}\n"
     }
 
+    public static let listRunsRequest = "{\"version\":1,\"type\":\"list_runs\"}\n"
+
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
     }
@@ -474,6 +533,11 @@ public enum IPCClient {
     static func writeListSourcesRequest(sessionID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSourcesRequest(sessionID: sessionID).utf8), to: descriptor)
+    }
+
+    static func writeListRunsRequest(to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listRunsRequest.utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -789,6 +853,89 @@ public enum IPCClient {
             endMilliseconds: endMilliseconds,
             speaker: speaker,
             text: text
+        )
+    }
+
+    static func decodeListRunsResponse(_ response: String) throws -> RunListPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_runs_response",
+            let runs = json["runs"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return RunListPage(
+            runs: try runs.map { try decodeRunRecord($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeRunRecord(_ value: Any?) throws -> RunRecord {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let runID = json["run_id"] as? String, !runID.isEmpty,
+            let executable = json["executable"] as? String,
+            let status = json["status"] as? String,
+            let startedAtMilliseconds = json["started_at_ms"] as? Int
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // An unlinked run omits the field; a present link must still be a string.
+        let sessionID: String?
+        if json["session_id"] == nil {
+            sessionID = nil
+        } else if let value = json["session_id"] as? String {
+            sessionID = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // An exit code is always stated, null included, mirroring the terminal run_exit frame.
+        let exitCode: Int?
+        if json["exit_code"] is NSNull {
+            exitCode = nil
+        } else if let value = json["exit_code"] as? Int {
+            exitCode = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // A run that ended cleanly omits the field; a present code must still be a string.
+        let errorCode: String?
+        if json["error_code"] == nil {
+            errorCode = nil
+        } else if let value = json["error_code"] as? String {
+            errorCode = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // A live run omits the field; a present end must still be a whole millisecond count.
+        let endedAtMilliseconds: Int?
+        if json["ended_at_ms"] == nil {
+            endedAtMilliseconds = nil
+        } else if let value = json["ended_at_ms"] as? Int {
+            endedAtMilliseconds = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return RunRecord(
+            id: id,
+            runID: runID,
+            sessionID: sessionID,
+            executable: executable,
+            status: status,
+            exitCode: exitCode,
+            errorCode: errorCode,
+            startedAtMilliseconds: startedAtMilliseconds,
+            endedAtMilliseconds: endedAtMilliseconds
         )
     }
 

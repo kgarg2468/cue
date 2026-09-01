@@ -399,6 +399,84 @@ func listSourcesRequestAndResponse() throws {
     }
 }
 
+@Test("list runs request JSON is typed and its response decodes live and finished runs")
+func listRunsRequestAndResponse() throws {
+    #expect(IPCClient.listRunsRequest == "{\"version\":1,\"type\":\"list_runs\"}\n")
+
+    let page = try IPCClient.decodeListRunsResponse(
+        "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":["
+            + "{\"id\":\"run-record-2\",\"run_id\":\"live-run\",\"executable\":\"/bin/sleep\","
+            + "\"status\":\"running\",\"exit_code\":null,\"started_at_ms\":20},"
+            + "{\"id\":\"run-record-1\",\"run_id\":\"done-run\",\"session_id\":\"session-1\","
+            + "\"executable\":\"/usr/bin/true\",\"status\":\"exited\",\"exit_code\":0,"
+            + "\"started_at_ms\":10,\"ended_at_ms\":11}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == RunListPage(
+                runs: [
+                    RunRecord(
+                        id: "run-record-2", runID: "live-run", executable: "/bin/sleep",
+                        status: "running", startedAtMilliseconds: 20),
+                    RunRecord(
+                        id: "run-record-1", runID: "done-run", sessionID: "session-1",
+                        executable: "/usr/bin/true", status: "exited", exitCode: 0,
+                        startedAtMilliseconds: 10, endedAtMilliseconds: 11),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListRunsResponse(
+        "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.runs.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunsResponse(
+            "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"store_unavailable\"}\n"
+        )
+    }
+}
+
+@Test("an interrupted run decodes with its error code and without an exit code")
+func interruptedRunDecodes() throws {
+    let page = try IPCClient.decodeListRunsResponse(
+        "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":["
+            + "{\"id\":\"run-record-3\",\"run_id\":\"late-run\",\"executable\":\"/bin/sleep\","
+            + "\"status\":\"exited\",\"exit_code\":null,\"error_code\":\"timed_out\","
+            + "\"started_at_ms\":10,\"ended_at_ms\":110}],\"truncated\":false}\n"
+    )
+    let run = try #require(page.runs.first)
+    #expect(run.exitCode == nil)
+    #expect(run.errorCode == "timed_out")
+    #expect(run.sessionID == nil)
+
+    // exit_code is always stated on the wire, so a missing one is not a decodable record.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunsResponse(
+            "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":["
+                + "{\"id\":\"run-record-4\",\"run_id\":\"late-run\",\"executable\":\"/bin/sleep\","
+                + "\"status\":\"exited\",\"started_at_ms\":10}],\"truncated\":false}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListRunsResponse(
+            "{\"version\":1,\"type\":\"list_runs_response\",\"runs\":["
+                + "{\"id\":\"run-record-5\",\"run_id\":\"late-run\",\"executable\":\"/bin/sleep\","
+                + "\"status\":\"exited\",\"exit_code\":null,\"error_code\":7,"
+                + "\"started_at_ms\":10}],\"truncated\":false}\n"
+        )
+    }
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)

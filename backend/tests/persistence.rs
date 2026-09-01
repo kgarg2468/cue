@@ -183,6 +183,46 @@ fn list_sources(socket_path: &Path, session_id: &str) -> serde_json::Value {
     response
 }
 
+/// Streams a whole process run and returns its terminal run_exit frame.
+fn run_process(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("start_process");
+    let mut stream = UnixStream::connect(socket_path).expect("run client should connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read deadline should be configured");
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    for line in BufReader::new(stream).lines() {
+        let frame: serde_json::Value =
+            serde_json::from_str(&line.expect("frame should read")).expect("frame should be JSON");
+        if frame["type"] == "run_exit" || frame["type"] == "error" {
+            return frame;
+        }
+    }
+    panic!("run should terminate with run_exit or an error frame");
+}
+
+fn list_runs(socket_path: &Path) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_runs"}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_runs_response");
+    response
+}
+
+fn runs_named<'a>(page: &'a serde_json::Value, run_id: &str) -> Vec<&'a serde_json::Value> {
+    page["runs"]
+        .as_array()
+        .expect("runs should be an array")
+        .iter()
+        .filter(|run| run["run_id"] == run_id)
+        .collect()
+}
+
 fn mode_of(path: &Path) -> u32 {
     fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("{} metadata should be readable: {error}", path.display()))
@@ -680,6 +720,184 @@ fn list_sources_responses_are_bounded_with_truncation_reported() {
     assert_eq!(
         sources[0]["start_ms"], 0,
         "byte truncation must keep the chronological beginning"
+    );
+}
+
+#[test]
+fn process_runs_persist_terminal_records_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("runs.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let session_id = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Linked session");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+
+        let linked = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "linked-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": session_id}),
+        );
+        assert_eq!(linked["type"], "run_exit", "linked run should be admitted");
+        assert_eq!(linked["exit_code"], 0);
+        let failing = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "plain-run", "executable": "/usr/bin/false",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(failing["exit_code"], 1);
+        // Client-chosen run ids are reusable; each use must persist its own record.
+        let reused = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "plain-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(reused["exit_code"], 0);
+        let timed_out = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "late-run", "executable": "/bin/sleep",
+                "arguments": ["5"], "timeout_milliseconds": 100}),
+        );
+        assert_eq!(timed_out["error_code"], "timed_out");
+
+        let unknown = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "orphan-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": "ses_missing"}),
+        );
+        assert_eq!(
+            unknown,
+            serde_json::json!({"version": 1, "type": "error", "code": "unknown_session"}),
+            "a run for a nonexistent session must be rejected before admission"
+        );
+        let null_link = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": "null-run", "executable": "/usr/bin/true",
+                "arguments": [], "timeout_milliseconds": 5_000, "session_id": null}),
+        );
+        assert_eq!(
+            null_link["code"], "invalid_start_process",
+            "an explicit null session link must be rejected, got {null_link}"
+        );
+        backend.stop();
+        session_id
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_runs(&restarted.socket_path);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["runs"].as_array().expect("runs array").len(),
+        4,
+        "only admitted runs should persist, got {page}"
+    );
+
+    let linked = runs_named(&page, "linked-run");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0]["executable"], "/usr/bin/true");
+    assert_eq!(linked[0]["status"], "exited");
+    assert_eq!(linked[0]["exit_code"], 0);
+    assert_eq!(linked[0]["session_id"], session_id.as_str());
+    assert!(
+        linked[0].get("error_code").is_none(),
+        "a clean exit must omit error_code, got {}",
+        linked[0]
+    );
+    assert!(
+        linked[0]["started_at_ms"].as_i64().unwrap_or_default() > 0,
+        "started_at_ms should be a positive epoch timestamp"
+    );
+    assert!(
+        linked[0]["ended_at_ms"].as_i64().unwrap_or_default()
+            >= linked[0]["started_at_ms"].as_i64().unwrap_or_default(),
+        "ended_at_ms should not precede started_at_ms"
+    );
+
+    let reused = runs_named(&page, "plain-run");
+    assert_eq!(reused.len(), 2, "each reuse of a run id persists a record");
+    assert!(
+        reused[0]["id"] != reused[1]["id"],
+        "run records need distinct stable ids"
+    );
+    assert!(
+        reused
+            .iter()
+            .all(|run| run.get("session_id").is_none() && run["status"] == "exited"),
+        "unlinked runs must omit session_id, got {reused:?}"
+    );
+
+    let late = runs_named(&page, "late-run");
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0]["status"], "exited");
+    assert_eq!(late[0]["error_code"], "timed_out");
+    assert!(
+        late[0]["exit_code"].is_null() || late[0]["exit_code"].as_i64().is_some(),
+        "exit_code reflects whatever the terminal frame reported"
+    );
+
+    assert!(
+        runs_named(&page, "orphan-run").is_empty() && runs_named(&page, "null-run").is_empty(),
+        "rejected runs must not persist"
+    );
+}
+
+#[test]
+fn dangling_running_records_are_marked_interrupted_on_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("interrupted.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    {
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let mut stream =
+            UnixStream::connect(&backend.socket_path).expect("run client should connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read deadline should be configured");
+        let request = serde_json::json!({"version": 1, "type": "start_process",
+            "run_id": "doomed-run", "executable": "/bin/sleep", "arguments": ["30"],
+            "timeout_milliseconds": 60_000});
+        stream
+            .write_all(format!("{request}\n").as_bytes())
+            .expect("request should write");
+        // Wait for admission by observing the persisted record itself: the row
+        // is inserted pre-spawn, so it appears as "running" within milliseconds.
+        let deadline = Instant::now() + STARTUP_DEADLINE;
+        loop {
+            let page = list_runs(&backend.socket_path);
+            if runs_named(&page, "doomed-run")
+                .first()
+                .is_some_and(|run| run["status"] == "running")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the live run should become visible as running, got {page}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // BackendProcess::stop SIGKILLs the backend: no terminal update can run.
+    }
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_runs(&restarted.socket_path);
+    let doomed = runs_named(&page, "doomed-run");
+    assert_eq!(doomed.len(), 1, "the admitted run should have persisted");
+    assert_eq!(
+        doomed[0]["status"], "interrupted",
+        "a run that was live at crash time must be marked interrupted, got {}",
+        doomed[0]
+    );
+    assert!(
+        doomed[0]["ended_at_ms"].as_i64().unwrap_or_default() > 0,
+        "interruption should stamp ended_at_ms"
+    );
+    assert!(
+        doomed[0].get("error_code").is_none() || doomed[0]["error_code"] == "interrupted",
+        "got {}",
+        doomed[0]
     );
 }
 

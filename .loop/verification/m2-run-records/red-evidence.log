@@ -1,0 +1,12 @@
+# M2 run-records slice — red evidence (cycle 22, 2026-09-01)
+
+2 new protocol tests vs merged main ce4ee97 (no run persistence, no list_runs):
+
+
+failures:
+    dangling_running_records_are_marked_interrupted_on_restart
+    process_runs_persist_terminal_records_and_survive_a_restart
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 5.23s
+
+error: test failed, to rerun pass `--test persistence`
