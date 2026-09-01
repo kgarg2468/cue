@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 22,
-  "active_milestone": "M2 Domain/persistence (slices 1-4 merged: session store + kinds + source refs + run records)",
+  "cycle": 23,
+  "active_milestone": "M2 Domain/persistence (slices 1-5 merged: session store + kinds + source refs + run records + markers)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 22: delivered M2 slice 4 through PR #39, squash-merged as 35ab350. Durable run records (S05-008 partial): migration 4 runs table with surrogate PK and optional session link, admission-time insert, one-shot terminal close before the run_exit frame, fatal startup interruption sweep, bounded list_runs, Swift RunRecord/RunListPage. ADR-009: one backend per store via a lifetime flock on a canonical-path <store>.owner sidecar; terminal closes are single-attempt (retries stall supervision). Five Sol review rounds; MAJORs fixed red-first (sweep ordering/fatality, bind!=store ownership, symlink alias lock bypass); the round-4 pkill claim was refuted empirically and the reap hardened anyway; round 5 PASS with zero findings. Gates: 123 Rust + 37 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0 x3, real-binary v3->v4 demo, user store untouched. Next: run events/artifacts or session markers/attachments, whichever is the smaller slice.",
-  "updated_at": "2026-09-01T04:38:56+00:00",
+  "last_cycle_summary": "Cycle 23: delivered M2 slice 5 through PR #41, squash-merged as 4243901. Persisted user markers (spec 5/6.3): migration 5 markers table, add_marker with required case-sensitive kind from the 6.3 set, non-negative whole-ms at_ms, optional speaker-convention note; chronological bounded list_markers; Swift Marker/MarkerListPage. Sol round-1 MAJOR fixed red-first and broadened: admission now probes the single-item LIST envelope for markers, sources, AND sessions (accepted implies listable alone) - the latent gap also existed in merged paths. Round 2 PASS; runs listability probe deferred to the next runs slice (records grow terminal fields after admission). Gates: 130 Rust + 41 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0 x2, real-binary v4->v5 migration demo, user store untouched. Next: runs listability probe + run events/artifacts, or session note/attachments.",
+  "updated_at": "2026-09-01T05:32:09+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
