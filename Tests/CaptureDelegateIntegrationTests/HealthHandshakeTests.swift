@@ -16,8 +16,10 @@ func healthHandshake() throws {
         )
     }
 
-    let socketURL = URL(filePath: "/private/tmp")
-        .appending(path: "capture-delegate-health-\(UUID().uuidString).sock")
+    let fixtureName = "capture-delegate-health-\(UUID().uuidString)"
+    let socketURL = URL(filePath: "/private/tmp").appending(path: "\(fixtureName).sock")
+    let storeDirectoryURL = URL(filePath: "/private/tmp")
+        .appending(path: "\(fixtureName).store", directoryHint: .isDirectory)
     let backend = Process()
     let backendError = Pipe()
     var backendLaunched = false
@@ -29,10 +31,14 @@ func healthHandshake() throws {
             backend.waitUntilExit()
         }
         try? FileManager.default.removeItem(at: socketURL)
+        try? FileManager.default.removeItem(at: storeDirectoryURL)
     }
 
     backend.executableURL = URL(filePath: backendBinary)
-    backend.arguments = ["--socket", socketURL.path()]
+    backend.arguments = [
+        "--socket", socketURL.path(),
+        "--store", storeDirectoryURL.appending(path: "store.sqlite").path(),
+    ]
     backend.standardOutput = FileHandle.nullDevice
     backend.standardError = backendError
     try backend.run()

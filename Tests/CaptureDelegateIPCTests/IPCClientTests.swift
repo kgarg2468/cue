@@ -136,6 +136,87 @@ func sendInputCapacityExhaustionIsTyped() throws {
     )
 }
 
+@Test("create session request JSON is typed and its response decodes a session")
+func createSessionRequestAndResponse() throws {
+    let request = IPCClient.createSessionRequest(title: "Weekly \"review\"")
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "create_session")
+    #expect(json["title"] as? String == "Weekly \"review\"")
+
+    let session = try IPCClient.decodeCreateSessionResponse(
+        "{\"version\":1,\"type\":\"create_session_response\",\"session\":"
+            + "{\"id\":\"session-1\",\"title\":\"Weekly review\",\"created_at_ms\":1700000000000,"
+            + "\"updated_at_ms\":1700000000001}}\n"
+    )
+    #expect(
+        session
+            == Session(
+                id: "session-1",
+                title: "Weekly review",
+                createdAtMilliseconds: 1_700_000_000_000,
+                updatedAtMilliseconds: 1_700_000_000_001
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateSessionResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_create_session\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateSessionResponse(
+            "{\"version\":1,\"type\":\"create_session_response\",\"session\":"
+                + "{\"id\":\"session-1\",\"title\":\"Weekly review\"}}\n"
+        )
+    }
+}
+
+@Test("list sessions request JSON is typed and its response decodes ordered sessions")
+func listSessionsRequestAndResponse() throws {
+    #expect(IPCClient.listSessionsRequest == "{\"version\":1,\"type\":\"list_sessions\"}\n")
+
+    let page = try IPCClient.decodeListSessionsResponse(
+        "{\"version\":1,\"type\":\"list_sessions_response\",\"sessions\":["
+            + "{\"id\":\"session-2\",\"title\":\"Newer\",\"created_at_ms\":2,\"updated_at_ms\":2},"
+            + "{\"id\":\"session-1\",\"title\":\"Older\",\"created_at_ms\":1,\"updated_at_ms\":1}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == SessionListPage(
+                sessions: [
+                    Session(
+                        id: "session-2", title: "Newer", createdAtMilliseconds: 2,
+                        updatedAtMilliseconds: 2),
+                    Session(
+                        id: "session-1", title: "Older", createdAtMilliseconds: 1,
+                        updatedAtMilliseconds: 1),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListSessionsResponse(
+        "{\"version\":1,\"type\":\"list_sessions_response\",\"sessions\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.sessions.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSessionsResponse(
+            "{\"version\":2,\"type\":\"list_sessions_response\",\"sessions\":[],\"truncated\":false}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSessionsResponse(
+            "{\"version\":1,\"type\":\"list_sessions_response\",\"sessions\":[]}\n"
+        )
+    }
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)

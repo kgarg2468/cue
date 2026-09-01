@@ -1,0 +1,10 @@
+== runtime demo: session persistence across real backend restart ==
+{"version":1,"type":"create_session_response","session":{"id":"session-e5f3-18d10a0105ad5ff8-0","title":"Kickoff sync","created_at_ms":1788221526549,"updated_at_ms":1788221526549}}
+{"version":1,"type":"create_session_response","session":{"id":"session-e5f3-18d10a0105df2240-1","title":"Architecture review","created_at_ms":1788221526552,"updated_at_ms":1788221526552}}
+{"version":1,"type":"error","code":"invalid_create_session"}
+-- killing backend (SIGTERM) --
+-- restarting backend on same store --
+{"version":1,"type":"list_sessions_response","sessions":[{"id":"session-e5f3-18d10a0105df2240-1","title":"Architecture review","created_at_ms":1788221526552,"updated_at_ms":1788221526552},{"id":"session-e5f3-18d10a0105ad5ff8-0","title":"Kickoff sync","created_at_ms":1788221526549,"updated_at_ms":1788221526549}],"truncated":false}
+-- store permissions --
+-rw------- /private/tmp/cd-demo.B0C2z4/store.sqlite
+drwx------ /private/tmp/cd-demo.B0C2z4

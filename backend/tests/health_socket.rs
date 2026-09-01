@@ -25,7 +25,7 @@ impl Drop for BackendProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.socket_path);
-        let _ = fs::remove_dir(&self.directory);
+        let _ = fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -46,7 +46,7 @@ fn temporary_socket_directory() -> PathBuf {
                 if let Err(error) =
                     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
                 {
-                    let _ = fs::remove_dir(&directory);
+                    let _ = fs::remove_dir_all(&directory);
                     panic!("temporary directory should be private: {error}");
                 }
                 return directory;
@@ -60,17 +60,20 @@ fn temporary_socket_directory() -> PathBuf {
 fn start_backend() -> BackendProcess {
     let directory = temporary_socket_directory();
     let socket_path = directory.join("health.sock");
+    let store_path = directory.join("store.sqlite");
     let mut child = match Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
         .args([
             "--socket",
             socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
         ])
         .spawn()
     {
         Ok(child) => child,
         Err(error) => {
             let _ = fs::remove_file(&socket_path);
-            let _ = fs::remove_dir(&directory);
+            let _ = fs::remove_dir_all(&directory);
             panic!("backend should start: {error}");
         }
     };
@@ -82,14 +85,14 @@ fn start_backend() -> BackendProcess {
             Ok(Some(_)) => {
                 let _ = child.wait();
                 let _ = fs::remove_file(&socket_path);
-                let _ = fs::remove_dir(&directory);
+                let _ = fs::remove_dir_all(&directory);
                 panic!("backend exited before accepting socket connections");
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = fs::remove_file(&socket_path);
-                let _ = fs::remove_dir(&directory);
+                let _ = fs::remove_dir_all(&directory);
                 panic!("backend status should be readable: {error}");
             }
         }
@@ -112,7 +115,7 @@ fn start_backend() -> BackendProcess {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = fs::remove_file(&socket_path);
-                let _ = fs::remove_dir(&directory);
+                let _ = fs::remove_dir_all(&directory);
                 panic!("backend socket should accept connections: {error}");
             }
         }
@@ -122,7 +125,7 @@ fn start_backend() -> BackendProcess {
     let _ = child.kill();
     let _ = child.wait();
     let _ = fs::remove_file(&socket_path);
-    let _ = fs::remove_dir(&directory);
+    let _ = fs::remove_dir_all(&directory);
     panic!("backend did not accept socket connections");
 }
 

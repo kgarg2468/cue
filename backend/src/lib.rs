@@ -1,3 +1,6 @@
+mod store;
+
+use crate::store::{Session, Store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,6 +32,8 @@ const WORKTREE_ROOT_DIRECTORY_NAME: &str = "capture-delegate-worktrees";
 const MAX_SANITIZED_RUN_ID_BYTES: usize = 48;
 const WORKTREE_ADD_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKTREE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SESSION_TITLE_BYTES: usize = 4096;
+const LIST_SESSIONS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -64,6 +69,8 @@ struct Request {
     pty: Option<bool>,
     #[serde(default)]
     worktree_repository: Option<serde_json::Value>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -80,6 +87,23 @@ struct ProtocolErrorResponse {
     #[serde(rename = "type")]
     response_type: &'static str,
     code: &'static str,
+}
+
+#[derive(Serialize)]
+struct CreateSessionResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    session: &'a Session,
+}
+
+#[derive(Serialize)]
+struct ListSessionsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    sessions: &'a [Session],
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -708,7 +732,7 @@ impl Drop for SocketCleanup {
     }
 }
 
-pub fn run(socket_path: &Path) -> io::Result<()> {
+pub fn run(socket_path: &Path, store_path: &Path) -> io::Result<()> {
     // SAFETY: a zeroed signal set is initialized before it is used.
     let mut shutdown_signals: libc::sigset_t = unsafe { std::mem::zeroed() };
     // SAFETY: shutdown_signals owns valid storage for a signal set.
@@ -730,6 +754,8 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(mask_result));
     }
 
+    // Durable state must be usable before the socket advertises the service.
+    let store = store::open_store(store_path)?;
     remove_stale_socket(socket_path)?;
     cleanup_orphaned_worktrees();
     let listener = UnixListener::bind(socket_path)?;
@@ -768,11 +794,12 @@ pub fn run(socket_path: &Path) -> io::Result<()> {
         };
         let process_slots = process_slots.clone();
         let active_runs = active_runs.clone();
+        let store = store.clone();
         if let Err(error) = thread::Builder::new()
             .name("capture-delegate-ipc".to_owned())
             .spawn(move || {
                 let _worker_slot = worker_slot;
-                let _ = handle_connection(stream, process_slots, active_runs);
+                let _ = handle_connection(stream, process_slots, active_runs, store);
             })
         {
             eprintln!("IPC worker spawn error: {error}");
@@ -920,6 +947,7 @@ fn handle_connection(
     mut stream: UnixStream,
     process_slots: WorkerSlots,
     active_runs: ActiveRuns,
+    store: Store,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
@@ -978,6 +1006,60 @@ fn handle_connection(
                 serde_json::to_writer(&mut stream, &response)?;
                 stream.write_all(b"\n")?;
                 stream.flush()?;
+            }
+            "create_session" => {
+                let Some(title) = request
+                    .title
+                    .map(|title| title.trim().to_owned())
+                    .filter(|title| !title.is_empty() && title.len() <= MAX_SESSION_TITLE_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_create_session");
+                };
+                let session = Session::draft(&title);
+                let response = CreateSessionResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "create_session_response",
+                    session: &session,
+                };
+                // Escape-heavy titles can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted.
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_create_session");
+                };
+                if let Err(error) = store.insert_session(&session) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_sessions" => {
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut sessions = match store.list_sessions(LIST_SESSIONS_LIMIT + 1) {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = sessions.len() > LIST_SESSIONS_LIMIT;
+                sessions.truncate(LIST_SESSIONS_LIMIT);
+                let frame = loop {
+                    let response = ListSessionsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_sessions_response",
+                        sessions: &sessions,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        Err(_) if !sessions.is_empty() => {
+                            sessions.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
             }
             "start_process" => {
                 let pty = request.pty.unwrap_or(false);
@@ -2818,9 +2900,10 @@ mod tests {
     use super::{
         ActiveRuns, ClientWriter, MAX_CONCURRENT_PROCESSES, MAX_PENDING_STDIN_BYTES,
         PIPE_DRAIN_POLL_INTERVAL, ProcessSupervision, RegisterRunError, RunTerminal, RunWorktree,
-        SendInputStatus, SocketCleanup, SocketIdentity, WorkerSlots, classify_process_supervision,
-        cleanup_orphaned_worktrees_in, command_succeeds_within, drain_process_output,
-        handle_connection, redact_output, run_with_internal_error_terminal,
+        SendInputStatus, SocketCleanup, SocketIdentity, Store, WorkerSlots,
+        classify_process_supervision, cleanup_orphaned_worktrees_in, command_succeeds_within,
+        drain_process_output, handle_connection, redact_output, run_with_internal_error_terminal,
+        store,
     };
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -2831,6 +2914,10 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_store() -> Store {
+        store::in_memory_store().expect("test store should open")
+    }
 
     fn test_fixture_root(prefix: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -3730,6 +3817,7 @@ mod tests {
                 server,
                 WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
                 ActiveRuns::new(),
+                test_store(),
             )
         });
         let request = serde_json::json!({
@@ -3823,6 +3911,7 @@ mod tests {
                 server,
                 WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
                 ActiveRuns::new(),
+                test_store(),
             )
         });
         let request = serde_json::json!({
@@ -3863,8 +3952,9 @@ mod tests {
         client
             .set_read_timeout(Some(std::time::Duration::from_millis(750)))
             .expect("read timeout should configure");
-        let worker =
-            std::thread::spawn(move || handle_connection(server, process_slots, ActiveRuns::new()));
+        let worker = std::thread::spawn(move || {
+            handle_connection(server, process_slots, ActiveRuns::new(), test_store())
+        });
         let request = serde_json::json!({
             "version": 1,
             "type": "start_process",
@@ -3905,6 +3995,7 @@ mod tests {
                 server,
                 WorkerSlots::new(MAX_CONCURRENT_PROCESSES),
                 ActiveRuns::new(),
+                test_store(),
             )
         });
         let request = serde_json::json!({
