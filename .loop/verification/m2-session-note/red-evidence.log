@@ -1,0 +1,8 @@
+=== Red contract tests vs merged main bff5c6f (pre-implementation) ===
+    every_accepted_note_keeps_its_session_singly_listable
+    invalid_session_notes_are_rejected_without_touching_the_note
+    session_notes_set_clear_and_survive_a_restart
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `--test persistence`

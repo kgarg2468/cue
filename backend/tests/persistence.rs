@@ -1603,3 +1603,168 @@ fn every_admitted_run_stays_listable_after_termination() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+fn set_session_note(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("set_session_note");
+    let response = exchange(socket_path, request);
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "set_session_note_response",
+        "note should be accepted, got {response}"
+    );
+    response["session"].clone()
+}
+
+#[test]
+fn session_notes_set_clear_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("note.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let session_id = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session_with_kind(&backend.socket_path, "Sprint planning", "meeting");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+        let created_at = session["created_at_ms"].as_i64().expect("created stamp");
+
+        let updated = set_session_note(
+            &backend.socket_path,
+            serde_json::json!({"session_id": session_id, "note": "Follow up with Sarah"}),
+        );
+        assert_eq!(updated["id"], session_id.as_str());
+        assert_eq!(updated["note"], "Follow up with Sarah");
+        assert_eq!(
+            updated["kind"], "meeting",
+            "a note must not disturb the kind"
+        );
+        assert!(
+            updated["updated_at_ms"].as_i64().expect("updated stamp") >= created_at,
+            "setting a note must touch updated_at_ms"
+        );
+
+        // A note is one editable field: setting again replaces it wholesale.
+        let replaced = set_session_note(
+            &backend.socket_path,
+            serde_json::json!({"session_id": session_id, "note": "Revised after standup"}),
+        );
+        assert_eq!(replaced["note"], "Revised after standup");
+        backend.stop();
+        session_id
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let sessions = list_sessions(&restarted.socket_path);
+    assert_eq!(sessions[0]["id"], session_id.as_str());
+    assert_eq!(
+        sessions[0]["note"], "Revised after standup",
+        "the note must survive a restart"
+    );
+
+    // Explicit null is the clear operation for this update message — the one
+    // place null carries meaning, because an update needs a way to erase.
+    let cleared = set_session_note(
+        &restarted.socket_path,
+        serde_json::json!({"session_id": session_id, "note": null}),
+    );
+    assert!(
+        cleared.get("note").is_none(),
+        "a cleared note must omit the field, got {cleared}"
+    );
+    let sessions = list_sessions(&restarted.socket_path);
+    assert!(
+        sessions[0].get("note").is_none(),
+        "a cleared note must stay cleared in listings"
+    );
+}
+
+#[test]
+fn invalid_session_notes_are_rejected_without_touching_the_note() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badnote.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Validation session");
+    let session_id = session["id"].as_str().expect("session id");
+    set_session_note(
+        &backend.socket_path,
+        serde_json::json!({"session_id": session_id, "note": "The original note"}),
+    );
+
+    let unknown = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "set_session_note",
+            "session_id": "ses_missing", "note": "orphan"}),
+    );
+    assert_eq!(
+        unknown,
+        serde_json::json!({"version": 1, "type": "error", "code": "unknown_session"}),
+    );
+    let missing_session = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "set_session_note", "note": "x"}),
+    );
+    assert_eq!(missing_session["code"], "unknown_session");
+
+    let invalid_bodies = [
+        // the note field must be present (null means clear; omission is an error)
+        serde_json::json!({"session_id": session_id}),
+        // blank note: clear with null instead
+        serde_json::json!({"session_id": session_id, "note": " \t "}),
+        // oversized note
+        serde_json::json!({"session_id": session_id, "note": "n".repeat(4097)}),
+        // escape-heavy note within the raw byte cap but past the frame bound
+        serde_json::json!({"session_id": session_id, "note": "\u{0}".repeat(1345)}),
+    ];
+    for mut body in invalid_bodies {
+        body["version"] = serde_json::json!(1);
+        body["type"] = serde_json::json!("set_session_note");
+        let response = exchange(&backend.socket_path, body.clone());
+        assert_eq!(
+            response,
+            serde_json::json!({"version": 1, "type": "error", "code": "invalid_set_session_note"}),
+            "body {body} should be rejected"
+        );
+    }
+
+    let sessions = list_sessions(&backend.socket_path);
+    assert_eq!(
+        sessions[0]["note"], "The original note",
+        "rejected updates must leave the stored note untouched"
+    );
+}
+
+#[test]
+fn every_accepted_note_keeps_its_session_singly_listable() {
+    // Notes join the session record that list_sessions serializes, so the
+    // update must probe the single-item list envelope: an accepted note must
+    // never make its session unlistable.
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("notebound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        let session = create_session(&backend.socket_path, &format!("Boundary {nulls}"));
+        let session_id = session["id"].as_str().expect("session id");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "set_session_note",
+                "session_id": session_id, "note": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_set_session_note");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let sessions = list_sessions(&backend.socket_path);
+        assert!(
+            sessions.first().is_some_and(|s| s["id"] == *session_id),
+            "a session with an accepted note must head its own page, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}

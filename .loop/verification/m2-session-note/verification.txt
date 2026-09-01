@@ -1,0 +1,42 @@
+# M2 session-note slice — verification summary (cycle 25, 2026-09-01)
+
+Slice: per-session human note (S05-002 partial; spec §5 session contents) —
+the protocol's first UPDATE-class message. Migration 6 (nullable note column
+on sessions), set_session_note, Swift Session.note + setSessionNote.
+
+## TDD evidence
+- red-evidence.log — all three protocol tests fail against merged main bff5c6f.
+- cargo-test.log — full green: 135 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log — verify-m0.sh exit 0 (44 Swift tests).
+- runtime-demo.log — real release binary: hand-built v5 store migrates to
+  user_version 6 with the legacy session intact; note set on the
+  pre-migration row bumps updated_at_ms and survives restart; unknown
+  session and blank note rejected; explicit-null clear persists; 0600.
+
+## Design decisions
+- Update semantics for null (deliberate divergence from add-paths): omitted
+  note = invalid_set_session_note, explicit null = CLEAR, string = trimmed
+  non-blank ≤4096B. An update needs an erase operation; null is it. The
+  add-paths' "null rejected" convention is unchanged.
+- Ordering: fields → unknown_session (get_session read doubles as the
+  existence check) → single-item ListSessionsResponse probe of the would-be
+  record (accepted-implies-listable-alone now covers updates) → UPDATE with
+  fresh updated_at_ms → reply from the store-returned record. Probe-vs-write
+  updated_at_ms may differ by ms at equal 13-digit width.
+- update_session_note returns the full updated Session (None = vanished row
+  → unknown_session), so the response serializes exactly what persisted.
+
+## Security invariants checked
+- Rejected updates leave the stored note untouched (pinned by test).
+- Additive protocol; markers/sources/runs paths untouched.
+- User store untouched by verification.
+
+## Worker-flagged bounds (recorded)
+- store exposes both session_exists and the new get_session; consolidation
+  batched with a store-hardening slice.
+- update_session_note re-reads under a second lock acquisition (matches the
+  existing non-transactional style, e.g. finish_run).
+- My red test initially used 1400 escape-heavy nulls, which exceeds the
+  REQUEST frame cap (connection drop by design); corrected to 1345 per the
+  marker precedent — worker caught both this and a fmt violation in the
+  test file rather than exceeding its allowlist.

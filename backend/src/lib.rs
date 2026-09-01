@@ -42,6 +42,7 @@ const SESSION_KINDS: [&str; 6] = [
     "personal_note",
     "imported_audio",
 ];
+const MAX_SESSION_NOTE_BYTES: usize = 4096;
 const LIST_SESSIONS_LIMIT: usize = 50;
 const MAX_SOURCE_TEXT_BYTES: usize = 4096;
 const MAX_SOURCE_SPEAKER_BYTES: usize = 256;
@@ -161,6 +162,14 @@ struct ListSessionsResponse<'a> {
     response_type: &'static str,
     sessions: &'a [Session],
     truncated: bool,
+}
+
+#[derive(Serialize)]
+struct SetSessionNoteResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    session: &'a Session,
 }
 
 #[derive(Serialize)]
@@ -1185,6 +1194,72 @@ fn handle_connection(
                         Err(error) => return Err(error),
                     }
                 };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "set_session_note" => {
+                // A note always names its session, so an omitted and an explicitly null
+                // session_id are the same unknown session.
+                let Some(session_id) = request.session_id.flatten() else {
+                    return write_protocol_error(&mut stream, "unknown_session");
+                };
+                // This is an update, not an add, so an explicit null is the clear
+                // operation — the one place null carries meaning, because an update
+                // needs a way to erase. Only an omitted note is a missing field.
+                let note = match request.note {
+                    None => return write_protocol_error(&mut stream, "invalid_set_session_note"),
+                    Some(None) => None,
+                    // A blank note is not how a note is cleared; null is.
+                    Some(Some(note)) => {
+                        let note = note.trim().to_owned();
+                        if note.is_empty() || note.len() > MAX_SESSION_NOTE_BYTES {
+                            return write_protocol_error(&mut stream, "invalid_set_session_note");
+                        }
+                        Some(note)
+                    }
+                };
+                let current = match store.get_session(&session_id) {
+                    Ok(Some(session)) => session,
+                    Ok(None) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                // The record this update would store, bound-checked before the stored note
+                // is touched: escape-heavy notes can pass the raw byte check yet serialize
+                // past the frame bound. Admission is checked against the single-item LIST
+                // envelope, the larger of the two frames, so an accepted note can never
+                // leave its session unlistable. The write stamps a fresher updated_at_ms
+                // than the one carried here, but both are millisecond epoch stamps of the
+                // same width, so the probed frame and the stored one agree in size.
+                let updated = Session { note, ..current };
+                let list_probe = ListSessionsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_sessions_response",
+                    sessions: std::slice::from_ref(&updated),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_set_session_note");
+                }
+                let stored = match store.update_session_note(&session_id, updated.note.as_deref()) {
+                    Ok(Some(session)) => session,
+                    // The session was here a moment ago; another writer removing it is the
+                    // same answer as never having found it.
+                    Ok(None) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store write error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                // The reply states what was stored. Its envelope is smaller than the list
+                // envelope already admitted above, so this frame is bounded by that probe.
+                let response = SetSessionNoteResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "set_session_note_response",
+                    session: &stored,
+                };
+                let frame = serialize_json_frame(&response)?;
                 write_serialized_frame(&mut stream, &frame)?;
             }
             "add_source" => {
