@@ -1,0 +1,8 @@
+=== Red boundary test vs merged main e49ced9 (pre worst-case-terminal probe) ===
+failures:
+    every_admitted_run_stays_listable_after_termination
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 24 filtered out; finished in 1.19s
+
+error: test failed, to rerun pass `--test persistence`
+failure mode: admitted+exited run list page was EMPTY (len 0) - persisted but unlistable

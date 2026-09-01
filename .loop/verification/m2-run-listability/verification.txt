@@ -1,0 +1,64 @@
+# M2 run-listability slice — verification summary (cycle 24, 2026-09-01)
+
+Slice: close the deferred Sol finding from PR #41 round 2 — extend the
+"accepted implies listable alone" admission invariant to run records
+(S05-008 continuation). Run records grow at termination (status, exit_code,
+error_code, ended_at_ms), so the admission probe must bound the WORST-CASE
+terminal single-item list_runs frame, not the record as admitted.
+
+## TDD evidence
+- red-evidence.log — every_admitted_run_stays_listable_after_termination
+  fails against merged main e49ced9: an admitted, cleanly-exited run with a
+  boundary-sized run_id produced an EMPTY list page (persisted, unlistable).
+- cargo-test.log — full green: 131 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log — verify-m0.sh exit 0 (41 Swift tests).
+- runtime-demo.log — real release binary: normal run heads the list page
+  after exit; a 1329-NUL escape-heavy run_id is rejected at admission with
+  invalid_start_process and leaves no record.
+
+## Design decisions
+- Probe is built by cloning the REAL draft record (identical generated id,
+  so no id-length race), then substituting worst-case terminal fields:
+  status "interrupted" (longest status), exit_code i32::MIN (longest exit
+  code), error_code "capacity_exhausted" (longest code in the protocol —
+  it never persists today, which gives the probe headroom against future
+  persisted codes), ended_at_ms mirroring started_at_ms (same clock, same
+  width). Rejection releases the run-id registration and process slot and
+  answers invalid_start_process before any insert.
+- The probe sits after the duplicate/capacity gates (where the real draft
+  exists) mirroring the established insert-failure rejection path.
+- Conservative over-rejection window (~50 bytes at the 8 KiB boundary) is
+  deliberate: a run near the bound that would be rejected only under the
+  worst-case terminal shape has no legitimate use.
+
+## Security invariants checked
+- Rejected runs leave no record and free their admission (slot + run id).
+- No change to sessions/sources/markers paths; all 58 process_lifecycle
+  tests untouched and green.
+
+## Routing note
+Fable-direct implementation (~70 lines including the red test): this is
+review-remediation-class work carried from PR #41, below the delegation
+threshold.
+
+## Review round 1 (Sol): FAIL, 1 MAJOR + 1 MINOR — both fixed
+- MAJOR: probe ended_at_ms copied started_at_ms, but termination resamples
+  the wall clock, which a forward clock step can widen past the start's
+  serialized width. Probe now uses i64::MAX (the serialized ceiling). No
+  black-box red test is possible without clock control; correctness is
+  static (i64::MAX is the maximum width the field can serialize).
+- MINOR: the sweep only exercised clean exits. It now sweeps BOTH terminal
+  shapes per size — /bin/echo (exit_code, no error_code) and a nonexistent
+  executable (null exit_code, persisted error_code spawn_failed) — and
+  asserts the persisted error code survives listing, so a probe that stops
+  budgeting persisted error codes fails the test.
+- verify-m0-r2.log exit 0 after remediation; 131 Rust tests green.
+
+## Review round 2 (Sol): FAIL, 1 MINOR — fixed with a mutant proof
+- The 3-NUL sweep step moved the frame 18 bytes per iteration and could jump
+  the ~10-byte window that discriminates the error-code budget. run_id has no
+  raw length bound, so the sweep now uses plain single-byte padding
+  (pad 7900..7990, step 1) for exact one-byte frame granularity — no
+  listability window can be jumped. Mutant proof: with probe.error_code
+  removed the sweep FAILS ("an admitted run must stay listable after
+  termination"); restored, 131 Rust tests green. verify-m0-r3.log exit 0.

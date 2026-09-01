@@ -1,0 +1,8 @@
+=== Runtime demo: run admission bounds the worst-case terminal list frame ===
+--- normal run: admitted, exits, heads the list page ---
+{"version":1,"type":"run_metadata","run_id":"demo-run","pid":32594,"pgid":32594,"executable":"/bin/echo","arguments":["ok"],"working_directory":"/Users/krishgarg/conductor/workspaces/cue/moroni","star
+{"version":1,"type":"run_exit","run_id":"demo-run","exit_code":0}
+list head: {"id": "run-7f4d-18d11bb8f52120d8-0", "run_id": "demo-run", "executable": "/bin/echo", "status": "exited", "exit_code": 0, "started_at_ms": 1788241008243, "ende ... truncated: False
+--- boundary run_id (1329 NUL chars, escape-heavy): rejected at admission ---
+{"version":1,"type":"error","code":"invalid_start_process"}
+records after rejection: 1 (the rejected run left no record)
