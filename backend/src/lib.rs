@@ -1,8 +1,8 @@
 mod store;
 
 use crate::store::{
-    ActionRecord, Marker, Project, RunEvent, RunRecord, Session, Source, Store, TaskPacket,
-    TranscriptSegment,
+    ActionRecord, AuditEvent, Marker, Project, RunEvent, RunRecord, Session, Source, Store,
+    TaskPacket, TranscriptSegment,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,23 @@ const TASK_PACKET_VERSION: i64 = 1;
 /// text it serializes to.
 const MAX_TASK_PACKET_BYTES: usize = 4096;
 const LIST_TASK_PACKETS_LIMIT: usize = 50;
+/// The closed §14 audit-event taxonomy: one kind per fact §14's audit log records about a run.
+/// Kinds are case-sensitive and closed, like action kinds: a fact the app cannot name is a fact
+/// it cannot account for.
+const AUDIT_KINDS: [&str; 10] = [
+    "authorizer",
+    "source",
+    "packet_version",
+    "permission_granted",
+    "file_accessed",
+    "service_accessed",
+    "permission_requested",
+    "user_response",
+    "artifact",
+    "final_status",
+];
+const MAX_AUDIT_DETAIL_BYTES: usize = 4096;
+const LIST_AUDIT_EVENTS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -175,6 +192,10 @@ struct Request {
     // a plain option is enough because an explicit null body is as invalid as an omitted one.
     #[serde(default)]
     body: Option<serde_json::Value>,
+    // A plain option, as with `text`: an audit event always states the fact it records, so an
+    // explicitly null detail is as invalid as an omitted one.
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -352,6 +373,23 @@ struct ListTaskPacketsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     packets: &'a [TaskPacket],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct RecordAuditEventResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    event: &'a AuditEvent,
+}
+
+#[derive(Serialize)]
+struct ListAuditEventsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    events: &'a [AuditEvent],
     truncated: bool,
 }
 
@@ -2179,6 +2217,130 @@ fn handle_connection(
                         // Dropping from the end keeps the start of the delegation history.
                         Err(_) if !packets.is_empty() => {
                             packets.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "record_audit_event" => {
+                // A fact is always recorded against one run record, so an omitted and an
+                // explicitly null record id are the same missing field.
+                let Some(record_id) = request.record_id.flatten() else {
+                    return write_protocol_error(&mut stream, "invalid_record_audit_event");
+                };
+                // The taxonomy is closed and exact: an omitted, an explicitly null, an unknown,
+                // and a differently cased kind all name a fact the audit log has no place for.
+                let kind = match request.kind {
+                    Some(Some(kind)) if AUDIT_KINDS.contains(&kind.as_str()) => kind,
+                    _ => return write_protocol_error(&mut stream, "invalid_record_audit_event"),
+                };
+                // An event always states the fact it records, so an omitted, an explicitly null,
+                // and a blank detail are the same missing field. The sequence and the moment are
+                // not fields of this message at all: the backend stamps both, and a
+                // client-supplied one is ignored along with every other unrecognized key.
+                let Some(detail) = request
+                    .detail
+                    .map(|detail| detail.trim().to_owned())
+                    .filter(|detail| !detail.is_empty() && detail.len() <= MAX_AUDIT_DETAIL_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_record_audit_event");
+                };
+                match store.run_record_exists(&record_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_run"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                let event = AuditEvent::draft(&record_id, &kind, &detail);
+                // Escape-heavy details can pass the raw byte check yet serialize past the frame
+                // bound; reject those before anything is persisted. Admission is checked against
+                // the single-item LIST envelope, the larger of the two frames, so an accepted
+                // event can never persist yet be unlistable. The store, not this arm, stamps the
+                // sequence and the moment, and a stored stamp carries no width guarantee, so the
+                // probe measures both at their serialized ceilings rather than at whatever this
+                // particular write happens to draw.
+                let probe = AuditEvent {
+                    seq: i64::MAX,
+                    at_ms: i64::MAX,
+                    ..event.clone()
+                };
+                let list_probe = ListAuditEventsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_audit_events_response",
+                    events: std::slice::from_ref(&probe),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_record_audit_event");
+                }
+                // The store assigns the sequence and the stamp, so the reply serializes the event
+                // it answered with rather than the draft that asked for it.
+                let stored = match store.insert_audit_event(&event) {
+                    Ok(stored) => stored,
+                    Err(error) => {
+                        eprintln!("store write error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let response = RecordAuditEventResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "record_audit_event_response",
+                    event: &stored,
+                };
+                // The list envelope this admission probed is the larger frame and it was probed
+                // at stamps no real one can exceed, so this reply is already known to fit; the
+                // check stands rather than an unwrap.
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_record_audit_event");
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_audit_events" => {
+                // A trail is always scoped to one run record, so an omitted, an explicitly null,
+                // and a blank record id are the same unusable query — none of them could ever
+                // name a record, so none of them is a lookup.
+                let Some(record_id) = request
+                    .record_id
+                    .flatten()
+                    .filter(|record_id| !record_id.trim().is_empty())
+                else {
+                    return write_protocol_error(&mut stream, "invalid_list_audit_events");
+                };
+                match store.run_record_exists(&record_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_run"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut events =
+                    match store.list_audit_events(&record_id, LIST_AUDIT_EVENTS_LIMIT + 1) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            eprintln!("store read error: {error}");
+                            return write_protocol_error(&mut stream, "store_unavailable");
+                        }
+                    };
+                let mut truncated = events.len() > LIST_AUDIT_EVENTS_LIMIT;
+                events.truncate(LIST_AUDIT_EVENTS_LIMIT);
+                let frame = loop {
+                    let response = ListAuditEventsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_audit_events_response",
+                        events: &events,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the start of the accountability trail.
+                        Err(_) if !events.is_empty() => {
+                            events.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),

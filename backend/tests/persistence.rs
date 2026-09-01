@@ -2891,7 +2891,8 @@ fn every_accepted_task_packet_stays_listable_after_its_text_reloads() {
 fn duplicate_packet_keys_collapse_to_the_last_member() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("pktdup.sock");
-    let backend = BackendProcess::start(&socket_path, None, None);
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
     let action = create_action(
         &backend.socket_path,
         serde_json::json!({"kind": "custom", "title": "Duplicate keys"}),
@@ -2923,7 +2924,8 @@ fn duplicate_packet_keys_collapse_to_the_last_member() {
 fn packet_numbers_outside_the_f64_range_close_the_connection_unanswered() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("pktrange.sock");
-    let backend = BackendProcess::start(&socket_path, None, None);
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
     let action = create_action(
         &backend.socket_path,
         serde_json::json!({"kind": "custom", "title": "Out of range"}),
@@ -3089,7 +3091,8 @@ fn audit_events_persist_in_sequence_and_survive_a_restart() {
 fn invalid_audit_events_are_rejected_before_persisting() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("auditbad.sock");
-    let backend = BackendProcess::start(&socket_path, None, None);
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
     let record_id = mint_run_record(&backend.socket_path, "guarded-run");
     record_audit_event(&backend.socket_path, &record_id, "authorizer", "the user");
 
@@ -3143,7 +3146,8 @@ fn invalid_audit_events_are_rejected_before_persisting() {
 fn every_accepted_audit_event_is_singly_listable() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("auditbound.sock");
-    let backend = BackendProcess::start(&socket_path, None, None);
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
 
     let (mut accepted, mut rejected) = (0, 0);
     // Each NUL costs 1 raw detail byte but 6 serialized bytes, so the detail cap

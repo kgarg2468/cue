@@ -1246,6 +1246,139 @@ func listTaskPacketsRequestAndResponse() throws {
     }
 }
 
+@Test("record audit event request JSON is typed and its response decodes a stamped event")
+func recordAuditEventRequestAndResponse() throws {
+    // Neither the sequence nor the moment is a field of this message: the backend stamps both.
+    #expect(
+        IPCClient.recordAuditEventRequest(
+            recordID: "run-record-1", kind: "authorizer", detail: "the user")
+            == "{\"version\":1,\"type\":\"record_audit_event\","
+            + "\"record_id\":\"run-record-1\",\"kind\":\"authorizer\","
+            + "\"detail\":\"the user\"}\n"
+    )
+    // A detail is free text, so it travels escaped rather than as the characters it holds.
+    #expect(
+        IPCClient.recordAuditEventRequest(
+            recordID: "run-record-1", kind: "artifact", detail: "wrote \"notes\"\n")
+            == "{\"version\":1,\"type\":\"record_audit_event\","
+            + "\"record_id\":\"run-record-1\",\"kind\":\"artifact\","
+            + "\"detail\":\"wrote \\\"notes\\\"\\n\"}\n"
+    )
+
+    let event = try IPCClient.decodeRecordAuditEventResponse(
+        "{\"version\":1,\"type\":\"record_audit_event_response\",\"event\":"
+            + "{\"id\":\"audit-event-1\",\"record_id\":\"run-record-1\",\"seq\":0,\"at_ms\":10,"
+            + "\"kind\":\"authorizer\",\"detail\":\"the user\"}}\n"
+    )
+    #expect(
+        event
+            == AuditEvent(
+                id: "audit-event-1", recordID: "run-record-1", sequence: 0, atMilliseconds: 10,
+                kind: "authorizer", detail: "the user")
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeRecordAuditEventResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_record_audit_event\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeRecordAuditEventResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_run\"}\n"
+        )
+    }
+    // The reply always carries the event it stored; an empty envelope is not one.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeRecordAuditEventResponse(
+            "{\"version\":1,\"type\":\"record_audit_event_response\"}\n"
+        )
+    }
+}
+
+@Test("list audit events request is typed and its response decodes an ordered trail")
+func listAuditEventsRequestAndResponse() throws {
+    #expect(
+        IPCClient.listAuditEventsRequest(recordID: "run-record-1")
+            == "{\"version\":1,\"type\":\"list_audit_events\",\"record_id\":\"run-record-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListAuditEventsResponse(
+        "{\"version\":1,\"type\":\"list_audit_events_response\",\"events\":["
+            + "{\"id\":\"audit-event-1\",\"record_id\":\"run-record-1\",\"seq\":0,\"at_ms\":10,"
+            + "\"kind\":\"authorizer\",\"detail\":\"the user\"},"
+            + "{\"id\":\"audit-event-2\",\"record_id\":\"run-record-1\",\"seq\":1,\"at_ms\":110,"
+            + "\"kind\":\"final_status\",\"detail\":\"succeeded\"}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == AuditEventPage(
+                events: [
+                    AuditEvent(
+                        id: "audit-event-1", recordID: "run-record-1", sequence: 0,
+                        atMilliseconds: 10, kind: "authorizer", detail: "the user"),
+                    AuditEvent(
+                        id: "audit-event-2", recordID: "run-record-1", sequence: 1,
+                        atMilliseconds: 110, kind: "final_status", detail: "succeeded"),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListAuditEventsResponse(
+        "{\"version\":1,\"type\":\"list_audit_events_response\",\"events\":[],"
+            + "\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.events.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListAuditEventsResponse(
+            "{\"version\":1,\"type\":\"list_audit_events_response\",\"events\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListAuditEventsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_run\"}\n"
+        )
+    }
+}
+
+@Test("an audit event missing a field the backend always states is not decodable")
+func malformedAuditEventsAreRejected() throws {
+    // The sequence is always stated, so an absent one is not a decodable event.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListAuditEventsResponse(
+            "{\"version\":1,\"type\":\"list_audit_events_response\",\"events\":["
+                + "{\"id\":\"audit-event-3\",\"record_id\":\"run-record-1\",\"at_ms\":10,"
+                + "\"kind\":\"artifact\",\"detail\":\"a file\"}],\"truncated\":false}\n"
+        )
+    }
+    // The backend never admits a blank detail, so a blank one is not an event it wrote.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListAuditEventsResponse(
+            "{\"version\":1,\"type\":\"list_audit_events_response\",\"events\":["
+                + "{\"id\":\"audit-event-4\",\"record_id\":\"run-record-1\",\"seq\":0,"
+                + "\"at_ms\":10,\"kind\":\"artifact\",\"detail\":\"\"}],\"truncated\":false}\n"
+        )
+    }
+    // A stamp the backend always states cannot arrive as a string.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeRecordAuditEventResponse(
+            "{\"version\":1,\"type\":\"record_audit_event_response\",\"event\":"
+                + "{\"id\":\"audit-event-5\",\"record_id\":\"run-record-1\",\"seq\":0,"
+                + "\"at_ms\":\"10\",\"kind\":\"artifact\",\"detail\":\"a file\"}}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeRecordAuditEventResponse(
+            "{\"version\":1,\"type\":\"record_audit_event_response\",\"event\":"
+                + "{\"id\":\"audit-event-6\",\"record_id\":\"run-record-1\",\"seq\":0,"
+                + "\"at_ms\":10,\"kind\":7,\"detail\":\"a file\"}}\n"
+        )
+    }
+}
+
 @Test("an interrupted run decodes with its error code and without an exit code")
 func interruptedRunDecodes() throws {
     let page = try IPCClient.decodeListRunsResponse(

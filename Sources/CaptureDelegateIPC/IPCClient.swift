@@ -367,6 +367,48 @@ public struct TaskPacketPage: Equatable {
     }
 }
 
+/// One recorded fact in a run record's accountability trail, as the backend wrote it down. The
+/// fact is the caller's — a kind from the closed taxonomy and the detail it states — while the
+/// sequence and the stamp belong to the backend.
+public struct AuditEvent: Equatable {
+    public let id: String
+    /// The run record this fact was recorded against — the record's own id, not the reusable
+    /// run id.
+    public let recordID: String
+    /// Backend-authored; orders a record's trail independently of the clock.
+    public let sequence: Int
+    /// Backend-authored; the moment the backend recorded the fact.
+    public let atMilliseconds: Int
+    public let kind: String
+    public let detail: String
+
+    public init(
+        id: String,
+        recordID: String,
+        sequence: Int,
+        atMilliseconds: Int,
+        kind: String,
+        detail: String
+    ) {
+        self.id = id
+        self.recordID = recordID
+        self.sequence = sequence
+        self.atMilliseconds = atMilliseconds
+        self.kind = kind
+        self.detail = detail
+    }
+}
+
+public struct AuditEventPage: Equatable {
+    public let events: [AuditEvent]
+    public let truncated: Bool
+
+    public init(events: [AuditEvent], truncated: Bool) {
+        self.events = events
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -647,6 +689,32 @@ public enum IPCClient {
         return try decodeListTaskPacketsResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    /// Records one fact in a run record's accountability trail, and answers with the event the
+    /// backend stored — sequence and stamp included, neither of which is this client's to state.
+    public static func recordAuditEvent(
+        socketPath: String,
+        recordID: String,
+        kind: String,
+        detail: String
+    ) throws -> AuditEvent {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeRecordAuditEventRequest(
+            recordID: recordID, kind: kind, detail: detail, to: descriptor)
+        return try decodeRecordAuditEventResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listAuditEvents(socketPath: String, recordID: String) throws
+        -> AuditEventPage
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListAuditEventsRequest(recordID: recordID, to: descriptor)
+        return try decodeListAuditEventsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func cancelProcess(socketPath: String, runID: String) throws
         -> CancelProcessResult
     {
@@ -889,6 +957,20 @@ public enum IPCClient {
 
     public static func listTaskPacketsRequest(actionID: String) -> String {
         "{\"version\":1,\"type\":\"list_task_packets\",\"action_id\":\(jsonString(actionID))}\n"
+    }
+
+    /// The sequence and the moment are not fields of this message: the backend stamps both, and
+    /// a client-supplied one would be ignored.
+    public static func recordAuditEventRequest(recordID: String, kind: String, detail: String)
+        -> String
+    {
+        "{\"version\":1,\"type\":\"record_audit_event\","
+            + "\"record_id\":\(jsonString(recordID)),\"kind\":\(jsonString(kind)),"
+            + "\"detail\":\(jsonString(detail))}\n"
+    }
+
+    public static func listAuditEventsRequest(recordID: String) -> String {
+        "{\"version\":1,\"type\":\"list_audit_events\",\"record_id\":\(jsonString(recordID))}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -1149,6 +1231,24 @@ public enum IPCClient {
     static func writeListTaskPacketsRequest(actionID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listTaskPacketsRequest(actionID: actionID).utf8), to: descriptor)
+    }
+
+    static func writeRecordAuditEventRequest(
+        recordID: String,
+        kind: String,
+        detail: String,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(
+                recordAuditEventRequest(recordID: recordID, kind: kind, detail: detail).utf8
+            ), to: descriptor)
+    }
+
+    static func writeListAuditEventsRequest(recordID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listAuditEventsRequest(recordID: recordID).utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -1920,6 +2020,62 @@ public enum IPCClient {
             packetVersion: packetVersion,
             body: body,
             createdAtMilliseconds: createdAtMilliseconds
+        )
+    }
+
+    static func decodeRecordAuditEventResponse(_ response: String) throws -> AuditEvent {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "record_audit_event_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeAuditEvent(json["event"])
+    }
+
+    static func decodeListAuditEventsResponse(_ response: String) throws -> AuditEventPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_audit_events_response",
+            let events = json["events"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return AuditEventPage(
+            events: try events.map { try decodeAuditEvent($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeAuditEvent(_ value: Any?) throws -> AuditEvent {
+        // Every field is always stated — the caller's two and the backend's four — so a missing
+        // one is not a decodable event.
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let recordID = json["record_id"] as? String, !recordID.isEmpty,
+            let sequence = json["seq"] as? Int,
+            let atMilliseconds = json["at_ms"] as? Int,
+            let kind = json["kind"] as? String, !kind.isEmpty,
+            let detail = json["detail"] as? String, !detail.isEmpty
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return AuditEvent(
+            id: id,
+            recordID: recordID,
+            sequence: sequence,
+            atMilliseconds: atMilliseconds,
+            kind: kind,
+            detail: detail
         )
     }
 
