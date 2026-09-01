@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 25,
-  "active_milestone": "M2 Domain/persistence (slices 1-7 merged: session store + kinds + source refs + run records + markers + run listability + session note)",
+  "cycle": 26,
+  "active_milestone": "M2 Domain/persistence (slices 1-8 merged: session store + kinds + source refs + run records + markers + run listability + session note + transcript segments)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 25: delivered M2 slice 7 through PR #45, squash-merged as 23ec9f4. Per-session human note (spec \u00a75): migration 6 nullable note column; set_session_note is the protocol's first update-class message (omitted=invalid, explicit null=CLEAR, string trimmed \u22644096B) with the single-item list-envelope admission probe extended to updates. Sol round 1 MAJOR CONFIRMED: probe reused the fetched row's updated_at_ms while the write stamps fresh; narrow legacy stamps could delist an updated session. Fixed with an i64::MAX ceiling probe + a regression test that re-narrows the row before every sweep step (naive one-shot narrowing is healed by the first accepted note). Round 2 PASS zero findings. Gates: 136 Rust + 44 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v5\u2192v6 demo, user store untouched. Next: run events/artifacts or session attachments.",
-  "updated_at": "2026-09-01T06:46:18+00:00",
+  "last_cycle_summary": "Cycle 26: delivered M2 slice 8 through PR #47, squash-merged as b27c11a. Transcript segments (spec \u00a75): migration 7 transcript_segments table; add_transcript_segment/list_transcript mirror the sources contract exactly, including the single-item list-envelope admission probe and bounded chronological paging; Swift TranscriptSegment/TranscriptPage. First slice to clear Sol review PASS zero findings on round 1. Gates: 141 Rust + 48 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v6\u2192v7 demo, user store untouched. Next: session attachments or run events.",
+  "updated_at": "2026-09-01T07:03:09+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
