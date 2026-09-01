@@ -2160,3 +2160,200 @@ fn invalid_run_event_queries_are_rejected() {
         assert_eq!(response["code"], "invalid_list_run_events");
     }
 }
+
+const ACTION_KINDS: [&str; 12] = [
+    "research",
+    "review_pull_request",
+    "inspect_repository",
+    "plan_change",
+    "draft_document",
+    "build_change",
+    "run_tests",
+    "investigate_bug",
+    "create_issue",
+    "post_review",
+    "update_external_tool",
+    "custom",
+];
+
+fn create_action(socket_path: &Path, mut request: serde_json::Value) -> serde_json::Value {
+    request["version"] = serde_json::json!(1);
+    request["type"] = serde_json::json!("create_action");
+    let response = exchange(socket_path, request);
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "create_action_response",
+        "action should be accepted, got {response}"
+    );
+    response["action"].clone()
+}
+
+fn list_actions(socket_path: &Path) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_actions"}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_actions_response");
+    response
+}
+
+#[test]
+fn action_drafts_persist_newest_first_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("actions.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let expected = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Sprint planning");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+
+        let linked = create_action(
+            &backend.socket_path,
+            serde_json::json!({
+                "session_id": session_id,
+                "kind": "review_pull_request",
+                "title": "Check PR 482 for token refresh breakage",
+            }),
+        );
+        assert_eq!(linked["session_id"], session_id.as_str());
+        assert_eq!(linked["kind"], "review_pull_request");
+        assert_eq!(
+            linked["status"], "draft",
+            "every new action begins as a draft, got {linked}"
+        );
+        assert!(
+            linked["created_at_ms"].as_i64().unwrap_or_default() > 0,
+            "creation should be stamped"
+        );
+        // A manually created action needs no session; the field is omitted in
+        // the stored record.
+        let manual = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "custom", "title": "Follow up with the team"}),
+        );
+        assert!(
+            manual.get("session_id").is_none(),
+            "an unlinked action must omit session_id, got {manual}"
+        );
+        assert_eq!(manual["status"], "draft");
+        // A client cannot mint a non-draft action: a supplied status is not a
+        // recognized field of this request and must not leak into the record.
+        let forced = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "run_tests", "title": "Sneaky", "status": "approved"}),
+        );
+        assert_eq!(
+            forced["status"], "draft",
+            "actions begin as drafts regardless of client-supplied status"
+        );
+        backend.stop();
+        vec![forced, manual, linked]
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_actions(&restarted.socket_path);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["actions"].as_array().expect("actions array"),
+        &expected,
+        "actions should list newest-first and survive restart"
+    );
+}
+
+#[test]
+fn invalid_actions_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badactions.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Strict actions");
+    let session_id = session["id"].as_str().expect("session id");
+
+    for kind in ACTION_KINDS {
+        let action = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": kind, "title": format!("taxonomy {kind}")}),
+        );
+        assert_eq!(action["kind"], kind);
+    }
+
+    let cases = [
+        // Missing or malformed fields.
+        serde_json::json!({"title": "no kind"}),
+        serde_json::json!({"kind": "research"}),
+        serde_json::json!({"kind": "research", "title": "   "}),
+        serde_json::json!({"kind": "research", "title": "x".repeat(4097)}),
+        // The taxonomy is closed and case-sensitive.
+        serde_json::json!({"kind": "Research", "title": "case matters"}),
+        serde_json::json!({"kind": "ship_it", "title": "unknown kind"}),
+        serde_json::json!({"kind": "  research  ", "title": "padded kind"}),
+        serde_json::json!({"kind": null, "title": "null kind"}),
+        // A linked action names a real session; an explicit null link is not
+        // how an unlinked action is stated (only omission is).
+        serde_json::json!({"kind": "research", "title": "null link", "session_id": null}),
+    ];
+    for mut case in cases {
+        case["version"] = serde_json::json!(1);
+        case["type"] = serde_json::json!("create_action");
+        let response = exchange(&backend.socket_path, case.clone());
+        assert_eq!(response["type"], "error", "case should be rejected: {case}");
+        assert_eq!(response["code"], "invalid_create_action");
+    }
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "create_action", "kind": "research",
+            "title": "orphan link", "session_id": "ses_missing"}),
+    );
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "unknown_session");
+
+    let page = list_actions(&backend.socket_path);
+    assert_eq!(
+        page["actions"].as_array().expect("actions array").len(),
+        ACTION_KINDS.len(),
+        "only the taxonomy probes may persist"
+    );
+    assert_eq!(
+        page["actions"]
+            .as_array()
+            .expect("actions array")
+            .iter()
+            .filter(|action| action["session_id"] == *session_id)
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn every_accepted_action_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("actbound.sock");
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        // A fresh store per probe keeps the just-created action alone on its page.
+        let probe_store = fixture.path(&format!("store-{nulls}.sqlite"));
+        let backend = BackendProcess::start(&socket_path, Some(&probe_store), None);
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_action", "kind": "custom",
+                "title": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_create_action");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_actions(&backend.socket_path);
+        assert_eq!(
+            page["actions"].as_array().expect("actions array").len(),
+            1,
+            "an admitted action must be listable alone, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}

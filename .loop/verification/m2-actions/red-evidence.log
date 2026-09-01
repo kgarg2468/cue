@@ -1,0 +1,8 @@
+test action_drafts_persist_newest_first_and_survive_a_restart ... FAILED
+test invalid_actions_are_rejected_before_persisting ... FAILED
+test every_accepted_action_is_singly_listable ... FAILED
+thread 'action_drafts_persist_newest_first_and_survive_a_restart' (25249537) panicked at backend/tests/persistence.rs:2184:5:
+thread 'invalid_actions_are_rejected_before_persisting' (25249539) panicked at backend/tests/persistence.rs:2184:5:
+thread 'every_accepted_action_is_singly_listable' (25249538) panicked at backend/tests/persistence.rs:2346:13:
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.26s
+reds vs 3e82160 Record merged M2 run-events slice (cycle 27 closeout) (#50)

@@ -841,6 +841,139 @@ func malformedRunEventsAreRejected() throws {
     }
 }
 
+@Test("create action request JSON is typed and its response decodes a draft")
+func createActionRequestAndResponse() throws {
+    let request = IPCClient.createActionRequest(
+        kind: "review_pull_request",
+        title: "Check PR 482 for token refresh breakage",
+        sessionID: "session-1"
+    )
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "create_action")
+    #expect(json["kind"] as? String == "review_pull_request")
+    #expect(json["title"] as? String == "Check PR 482 for token refresh breakage")
+    #expect(json["session_id"] as? String == "session-1")
+    // Status is backend-authored, so the request never states one.
+    #expect(!request.contains("status"))
+
+    let action = try IPCClient.decodeCreateActionResponse(
+        "{\"version\":1,\"type\":\"create_action_response\",\"action\":"
+            + "{\"id\":\"action-1\",\"session_id\":\"session-1\","
+            + "\"kind\":\"review_pull_request\",\"title\":\"Check PR 482\","
+            + "\"status\":\"draft\",\"created_at_ms\":10,\"updated_at_ms\":10}}\n"
+    )
+    #expect(
+        action
+            == ActionRecord(
+                id: "action-1",
+                sessionID: "session-1",
+                kind: "review_pull_request",
+                title: "Check PR 482",
+                status: "draft",
+                createdAtMilliseconds: 10,
+                updatedAtMilliseconds: 10
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateActionResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_create_action\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateActionResponse(
+            "{\"version\":1,\"type\":\"create_action_response\",\"action\":"
+                + "{\"id\":\"action-2\",\"kind\":\"custom\",\"title\":\"No status\","
+                + "\"created_at_ms\":10,\"updated_at_ms\":10}}\n"
+        )
+    }
+}
+
+@Test("an unlinked action omits the session key in both directions")
+func unlinkedActionsOmitTheSessionKey() throws {
+    let request = IPCClient.createActionRequest(kind: "custom", title: "Follow up with the team")
+    #expect(!request.contains("session_id"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["session_id"] == nil)
+
+    let action = try IPCClient.decodeCreateActionResponse(
+        "{\"version\":1,\"type\":\"create_action_response\",\"action\":"
+            + "{\"id\":\"action-3\",\"kind\":\"custom\",\"title\":\"Follow up\","
+            + "\"status\":\"draft\",\"created_at_ms\":10,\"updated_at_ms\":10}}\n"
+    )
+    #expect(action.sessionID == nil)
+
+    // A non-string link is not an unlinked action; it is an undecodable one.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateActionResponse(
+            "{\"version\":1,\"type\":\"create_action_response\",\"action\":"
+                + "{\"id\":\"action-4\",\"session_id\":7,\"kind\":\"custom\","
+                + "\"title\":\"Follow up\",\"status\":\"draft\","
+                + "\"created_at_ms\":10,\"updated_at_ms\":10}}\n"
+        )
+    }
+}
+
+@Test("list actions request JSON is typed and its response decodes a newest-first page")
+func listActionsRequestAndResponse() throws {
+    #expect(IPCClient.listActionsRequest == "{\"version\":1,\"type\":\"list_actions\"}\n")
+
+    let page = try IPCClient.decodeListActionsResponse(
+        "{\"version\":1,\"type\":\"list_actions_response\",\"actions\":["
+            + "{\"id\":\"action-2\",\"kind\":\"custom\",\"title\":\"Follow up\","
+            + "\"status\":\"draft\",\"created_at_ms\":20,\"updated_at_ms\":20},"
+            + "{\"id\":\"action-1\",\"session_id\":\"session-1\",\"kind\":\"run_tests\","
+            + "\"title\":\"Rerun the suite\",\"status\":\"draft\","
+            + "\"created_at_ms\":10,\"updated_at_ms\":10}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == ActionPage(
+                actions: [
+                    ActionRecord(
+                        id: "action-2", kind: "custom", title: "Follow up", status: "draft",
+                        createdAtMilliseconds: 20, updatedAtMilliseconds: 20),
+                    ActionRecord(
+                        id: "action-1", sessionID: "session-1", kind: "run_tests",
+                        title: "Rerun the suite", status: "draft",
+                        createdAtMilliseconds: 10, updatedAtMilliseconds: 10),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListActionsResponse(
+        "{\"version\":1,\"type\":\"list_actions_response\",\"actions\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.actions.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListActionsResponse(
+            "{\"version\":1,\"type\":\"list_actions_response\",\"actions\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListActionsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"store_unavailable\"}\n"
+        )
+    }
+    // A blank title is not a draft the backend can have admitted.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListActionsResponse(
+            "{\"version\":1,\"type\":\"list_actions_response\",\"actions\":["
+                + "{\"id\":\"action-5\",\"kind\":\"custom\",\"title\":\"\","
+                + "\"status\":\"draft\",\"created_at_ms\":10,\"updated_at_ms\":10}],"
+                + "\"truncated\":false}\n"
+        )
+    }
+}
+
 @Test("an interrupted run decodes with its error code and without an exit code")
 func interruptedRunDecodes() throws {
     let page = try IPCClient.decodeListRunsResponse(

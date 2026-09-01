@@ -1,0 +1,41 @@
+# M2 slice 10 — durable action drafts (S05-006, spec §5 Action + §7.1 taxonomy)
+
+## Contract
+- actions table (migration 9): id PK, optional session_id REFERENCES sessions,
+  kind from the closed case-sensitive 12-member §7.1 taxonomy, title trimmed
+  non-blank <= 4096B, status, created_at_ms/updated_at_ms.
+- create_action: status is NOT a request field — every action begins "draft"
+  server-side regardless of client-supplied JSON (spec: actions begin as
+  drafts and must be approved or covered by policy before execution; the
+  approval transition is a later milestone's update-class message).
+- session_id double-Option mirrors start_process's link: omitted = unlinked,
+  explicit null = invalid_create_action, present -> unknown_session split.
+- Single-item list-envelope admission probe before insert (accepted-implies-
+  listable-alone). list_actions newest-first, limit 50, limit+1 truncation
+  probe, byte budget popping from the END (newest-first keeps its head).
+- Swift ActionRecord/ActionPage + createAction/listActions (nil sessionID
+  omits the key, never emits null).
+
+## Red-first
+- 3 contract tests red vs origin/main 3e82160 (red-evidence.log).
+
+## Gates
+- 153 Rust tests (44 unit + 13 health_socket + 38 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; 53 Swift tests).
+- Runtime demo (runtime-demo.log): hand-built v8 store, user_version 8 -> 9,
+  linked draft on the pre-migration session, unlinked draft, client-forced
+  "status":"approved" persists as "draft", unknown-kind and explicit-null-link
+  rejections, newest-first listing after restart, 0600 mode.
+
+## Routing
+- 1 opus-high implementation worker (native subagent) within its 4-file
+  allowlist; correctly STOPPED at a clippy blocker caused by an unused
+  binding in MY red test (fixture store_path shadowed by per-probe stores)
+  instead of touching the do-not-modify file. I removed the line; all gates
+  green on rerun. Diff-gated at 817 lines.
+
+## Worker-flagged bounds (recorded)
+- Request envelope now has three arms sharing `kind` with three different
+  closed taxonomies (create_session, add_marker, create_action); drifting
+  toward per-message request shapes — batched for a protocol-hardening slice.

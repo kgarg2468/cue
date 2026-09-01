@@ -1,0 +1,84 @@
+pre-migration user_version: 8
+post-migration user_version: 9
+legacy session: ses_legacy01 Pre-migration meeting
+--- linked draft on the pre-migration session
+{
+ "version": 1,
+ "type": "create_action_response",
+ "action": {
+  "id": "action-10074-18d123a3e1d04228-0",
+  "session_id": "ses_legacy01",
+  "kind": "review_pull_request",
+  "title": "Check PR 482 for token refresh breakage",
+  "status": "draft",
+  "created_at_ms": 1788249713817,
+  "updated_at_ms": 1788249713817
+ }
+}
+--- unlinked manual draft
+{
+ "version": 1,
+ "type": "create_action_response",
+ "action": {
+  "id": "action-10074-18d123a3e1d8ece8-1",
+  "kind": "custom",
+  "title": "Follow up with the team",
+  "status": "draft",
+  "created_at_ms": 1788249713818,
+  "updated_at_ms": 1788249713818
+ }
+}
+--- forced status does not leak
+{
+ "version": 1,
+ "type": "create_action_response",
+ "action": {
+  "id": "action-10074-18d123a3e1e17480-2",
+  "kind": "run_tests",
+  "title": "Sneaky",
+  "status": "draft",
+  "created_at_ms": 1788249713819,
+  "updated_at_ms": 1788249713819
+ }
+}
+--- unknown kind rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_create_action"
+}
+--- explicit-null link rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_create_action"
+}
+--- newest-first drafts after restart
+{
+ "version": 1,
+ "type": "list_actions_response",
+ "actions": [
+  {
+   "id": "action-10074-18d123a3e1e17480-2",
+   "kind": "run_tests",
+   "title": "Sneaky",
+   "status": "draft",
+   "created_at_ms": 1788249713819,
+   "updated_at_ms": 1788249713819
+  },
+  {
+   "id": "action-10074-18d123a3e1d8ece8-1",
+   "kind": "custom",
+   "title": "Follow up with the team",
+   "status": "draft",
+   "created_at_ms": 1788249713818,
+   "updated_at_ms": 1788249713818
+  },
+  {
+   "id": "action-10074-18d123a3e1d04228-0",
+   "session_id": "ses_legacy01",
+   "kind": "review_pull_request",
+   "title": "Check PR 482 for token refresh breakage",
+   "status": "draft",
+store mode: 0o600
+DEMO OK
