@@ -1,0 +1,14 @@
+=== Runtime demo: session notes on real release binary ===
+pre-open user_version was 5; post-open: 6 (expect 6)
+--- set a note on the LEGACY pre-migration session ---
+{"version":1,"type":"set_session_note_response","session":{"id":"ses_legacy","title":"Legacy planning meeting","created_at_ms":1000,"updated_at_ms":1788243835072,"kind":"meeting","note":"Follow up with Sarah about PR 482"}}
+--- rejections: unknown session, blank note ---
+{"version":1,"type":"error","code":"unknown_session"}
+{"version":1,"type":"error","code":"invalid_set_session_note"}
+--- restart: note survives ---
+{"version":1,"type":"list_sessions_response","sessions":[{"id":"ses_legacy","title":"Legacy planning meeting","created_at_ms":1000,"updated_at_ms":1788243835072,"kind":"meeting","note":"Follow up with Sarah about PR 482"}],"truncated":false}
+--- clear via explicit null; cleared state persists ---
+{"version":1,"type":"set_session_note_response","session":{"id":"ses_legacy","title":"Legacy planning meeting","created_at_ms":1000,"updated_at_ms":1788243835708,"kind":"meeting"}}
+{"version":1,"type":"list_sessions_response","sessions":[{"id":"ses_legacy","title":"Legacy planning meeting","created_at_ms":1000,"updated_at_ms":1788243835708,"kind":"meeting"}],"truncated":false}
+--- store hygiene ---
+-rw------- /tmp/note-demo.tVmINf/store.sqlite

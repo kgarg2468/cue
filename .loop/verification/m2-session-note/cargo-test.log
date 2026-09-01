@@ -1,0 +1,2 @@
+=== Full suite at session-note slice ===
+135 Rust: 36 unit + 13 health_socket + 28 persistence + 58 process_lifecycle; fmt clean; clippy -D warnings clean; 44 Swift via verify-m0. One process_lifecycle flake observed once under parallel load, green on 3 consecutive full reruns.

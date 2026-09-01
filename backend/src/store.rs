@@ -56,6 +56,9 @@ const MIGRATIONS: &[&str] = &[
         note TEXT
     );
     CREATE INDEX markers_by_session_and_at ON markers (session_id, at_ms, id)",
+    // A session's note is optional and editable, so sessions written before this step stay
+    // valid with a NULL note.
+    "ALTER TABLE sessions ADD COLUMN note TEXT",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -73,6 +76,9 @@ pub(crate) struct Session {
     /// Absent for an uncategorized session; the protocol omits the field entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kind: Option<String>,
+    /// Absent for a session without a human note; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
 }
 
 /// A stable pointer into one session's timeline, with the exact text it refers to.
@@ -137,6 +143,8 @@ impl Session {
             created_at_ms,
             updated_at_ms: created_at_ms,
             kind: kind.map(str::to_owned),
+            // A note is written by a later update, never at creation.
+            note: None,
         }
     }
 }
@@ -205,14 +213,15 @@ impl Store {
     pub(crate) fn insert_session(&self, session: &Session) -> io::Result<()> {
         self.connection()
             .execute(
-                "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms, kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms, kind, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     session.id,
                     session.title,
                     session.created_at_ms,
                     session.updated_at_ms,
-                    session.kind
+                    session.kind,
+                    session.note
                 ],
             )
             .map_err(io::Error::other)?;
@@ -223,7 +232,7 @@ impl Store {
         let connection = self.connection();
         let mut statement = connection
             .prepare(
-                "SELECT id, title, created_at_ms, updated_at_ms, kind FROM sessions
+                "SELECT id, title, created_at_ms, updated_at_ms, kind, note FROM sessions
                  ORDER BY created_at_ms DESC, id DESC LIMIT ?1",
             )
             .map_err(io::Error::other)?;
@@ -235,12 +244,58 @@ impl Store {
                     created_at_ms: row.get(2)?,
                     updated_at_ms: row.get(3)?,
                     kind: row.get(4)?,
+                    note: row.get(5)?,
                 })
             })
             .map_err(io::Error::other)?
             .collect::<rusqlite::Result<Vec<Session>>>()
             .map_err(io::Error::other)?;
         Ok(sessions)
+    }
+
+    /// One session by id, or `None` when no such session exists.
+    pub(crate) fn get_session(&self, id: &str) -> io::Result<Option<Session>> {
+        self.connection()
+            .query_row(
+                "SELECT id, title, created_at_ms, updated_at_ms, kind, note FROM sessions
+                 WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(Session {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        updated_at_ms: row.get(3)?,
+                        kind: row.get(4)?,
+                        note: row.get(5)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                error => Err(io::Error::other(error)),
+            })
+    }
+
+    /// Replaces one session's note wholesale — `None` clears it — and answers with the
+    /// stored record, or `None` when no such session exists.
+    pub(crate) fn update_session_note(
+        &self,
+        id: &str,
+        note: Option<&str>,
+    ) -> io::Result<Option<Session>> {
+        let changed = self
+            .connection()
+            .execute(
+                "UPDATE sessions SET note = ?2, updated_at_ms = ?3 WHERE id = ?1",
+                params![id, note, now_milliseconds()],
+            )
+            .map_err(io::Error::other)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_session(id)
     }
 
     pub(crate) fn insert_source(&self, source: &Source) -> io::Result<()> {
@@ -750,6 +805,7 @@ mod tests {
                 created_at_ms: 7,
                 updated_at_ms: 7,
                 kind: None,
+                note: None,
             }],
             "a session written before kinds existed must survive as uncategorized"
         );
@@ -863,6 +919,54 @@ mod tests {
                 .expect("markers should list"),
             vec![marker],
             "a marker written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_five_store_adds_notes_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before session notes existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..5] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before notes', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 5)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        let sessions = store.list_sessions(2).expect("sessions should list");
+        assert_eq!(
+            sessions.first().and_then(|session| session.note.clone()),
+            None,
+            "a session written before notes existed must survive without one"
+        );
+        let updated = store
+            .update_session_note("session-legacy", Some("Follow up"))
+            .expect("note should update")
+            .expect("the legacy session should still exist");
+        assert_eq!(updated.note.as_deref(), Some("Follow up"));
+        assert_eq!(
+            store
+                .list_sessions(2)
+                .expect("sessions should list")
+                .first()
+                .and_then(|session| session.note.clone()),
+            Some("Follow up".to_owned()),
+            "a note written after the upgrade must round-trip"
         );
     }
 

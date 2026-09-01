@@ -269,6 +269,70 @@ func listSessionsRequestAndResponse() throws {
     }
 }
 
+@Test("set session note request JSON is typed and its response decodes the updated session")
+func setSessionNoteRequestAndResponse() throws {
+    let request = IPCClient.setSessionNoteRequest(
+        sessionID: "session-1", note: "Follow up with \"Sarah\"")
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "set_session_note")
+    #expect(json["session_id"] as? String == "session-1")
+    #expect(json["note"] as? String == "Follow up with \"Sarah\"")
+
+    let session = try IPCClient.decodeSetSessionNoteResponse(
+        "{\"version\":1,\"type\":\"set_session_note_response\",\"session\":"
+            + "{\"id\":\"session-1\",\"title\":\"Sprint planning\",\"created_at_ms\":1,"
+            + "\"updated_at_ms\":2,\"kind\":\"meeting\",\"note\":\"Follow up with Sarah\"}}\n"
+    )
+    #expect(
+        session
+            == Session(
+                id: "session-1",
+                title: "Sprint planning",
+                createdAtMilliseconds: 1,
+                updatedAtMilliseconds: 2,
+                kind: "meeting",
+                note: "Follow up with Sarah"
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeSetSessionNoteResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_set_session_note\"}\n"
+        )
+    }
+}
+
+@Test("clearing a note states an explicit null, and a cleared session omits the note key")
+func clearingASessionNoteStatesAnExplicitNull() throws {
+    let request = IPCClient.setSessionNoteRequest(sessionID: "session-1", note: nil)
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    // Clearing is an update, not an omission: the key must be present and null.
+    #expect(json.keys.contains("note"))
+    #expect(json["note"] is NSNull)
+
+    let session = try IPCClient.decodeSetSessionNoteResponse(
+        "{\"version\":1,\"type\":\"set_session_note_response\",\"session\":"
+            + "{\"id\":\"session-1\",\"title\":\"Sprint planning\",\"created_at_ms\":1,"
+            + "\"updated_at_ms\":2}}\n"
+    )
+    #expect(session.note == nil)
+}
+
+@Test("a non-string session note makes the response invalid")
+func nonStringSessionNoteIsRejected() throws {
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeSetSessionNoteResponse(
+            "{\"version\":1,\"type\":\"set_session_note_response\",\"session\":"
+                + "{\"id\":\"session-1\",\"title\":\"Sprint planning\",\"created_at_ms\":1,"
+                + "\"updated_at_ms\":2,\"note\":7}}\n"
+        )
+    }
+}
+
 @Test("add source request JSON is typed and its response decodes a source")
 func addSourceRequestAndResponse() throws {
     let request = IPCClient.addSourceRequest(

@@ -15,19 +15,23 @@ public struct Session: Equatable {
     public let updatedAtMilliseconds: Int
     /// Nil for an uncategorized session; the backend omits the field entirely.
     public let kind: String?
+    /// Nil for a session without a note; the backend omits the field entirely.
+    public let note: String?
 
     public init(
         id: String,
         title: String,
         createdAtMilliseconds: Int,
         updatedAtMilliseconds: Int,
-        kind: String? = nil
+        kind: String? = nil,
+        note: String? = nil
     ) {
         self.id = id
         self.title = title
         self.createdAtMilliseconds = createdAtMilliseconds
         self.updatedAtMilliseconds = updatedAtMilliseconds
         self.kind = kind
+        self.note = note
     }
 }
 
@@ -241,6 +245,17 @@ public enum IPCClient {
         return try decodeListSessionsResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    /// Replaces one session's note wholesale; a nil note clears it.
+    public static func setSessionNote(socketPath: String, sessionID: String, note: String?) throws
+        -> Session
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeSetSessionNoteRequest(sessionID: sessionID, note: note, to: descriptor)
+        return try decodeSetSessionNoteResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func addSource(
         socketPath: String,
         sessionID: String,
@@ -438,6 +453,14 @@ public enum IPCClient {
             + "\(kindField)}\n"
     }
 
+    public static func setSessionNoteRequest(sessionID: String, note: String?) -> String {
+        // This message is an update, so the key is always stated: an explicit null is how
+        // the note is cleared, and omitting it is rejected by the backend.
+        let noteField = note.map { jsonString($0) } ?? "null"
+        return "{\"version\":1,\"type\":\"set_session_note\","
+            + "\"session_id\":\(jsonString(sessionID)),\"note\":\(noteField)}\n"
+    }
+
     public static func addSourceRequest(
         sessionID: String,
         startMilliseconds: Int,
@@ -585,6 +608,14 @@ public enum IPCClient {
     static func writeListSessionsRequest(to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSessionsRequest.utf8), to: descriptor)
+    }
+
+    static func writeSetSessionNoteRequest(sessionID: String, note: String?, to descriptor: Int32)
+        throws
+    {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(setSessionNoteRequest(sessionID: sessionID, note: note).utf8), to: descriptor)
     }
 
     static func writeAddSourceRequest(
@@ -865,6 +896,19 @@ public enum IPCClient {
         )
     }
 
+    static func decodeSetSessionNoteResponse(_ response: String) throws -> Session {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "set_session_note_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeSession(json["session"])
+    }
+
     private static func decodeSession(_ value: Any?) throws -> Session {
         guard
             let json = value as? [String: Any],
@@ -886,12 +930,23 @@ public enum IPCClient {
             throw IPCClientError.invalidSessionResponse
         }
 
+        // A session without a note omits the field; a present note must still be a string.
+        let note: String?
+        if json["note"] == nil {
+            note = nil
+        } else if let value = json["note"] as? String {
+            note = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
         return Session(
             id: id,
             title: title,
             createdAtMilliseconds: createdAtMilliseconds,
             updatedAtMilliseconds: updatedAtMilliseconds,
-            kind: kind
+            kind: kind,
+            note: note
         )
     }
 

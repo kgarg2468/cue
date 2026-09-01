@@ -1,0 +1,63 @@
+# M2 session-note slice — verification summary (cycle 25, 2026-09-01)
+
+Slice: per-session human note (S05-002 partial; spec §5 session contents) —
+the protocol's first UPDATE-class message. Migration 6 (nullable note column
+on sessions), set_session_note, Swift Session.note + setSessionNote.
+
+## TDD evidence
+- red-evidence.log — all three protocol tests fail against merged main bff5c6f.
+- cargo-test.log — full green: 135 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log — verify-m0.sh exit 0 (44 Swift tests).
+- runtime-demo.log — real release binary: hand-built v5 store migrates to
+  user_version 6 with the legacy session intact; note set on the
+  pre-migration row bumps updated_at_ms and survives restart; unknown
+  session and blank note rejected; explicit-null clear persists; 0600.
+
+## Design decisions
+- Update semantics for null (deliberate divergence from add-paths): omitted
+  note = invalid_set_session_note, explicit null = CLEAR, string = trimmed
+  non-blank ≤4096B. An update needs an erase operation; null is it. The
+  add-paths' "null rejected" convention is unchanged.
+- Ordering: fields → unknown_session (get_session read doubles as the
+  existence check) → single-item ListSessionsResponse probe of the would-be
+  record (accepted-implies-listable-alone now covers updates) → UPDATE with
+  fresh updated_at_ms → reply from the store-returned record. Probe-vs-write
+  updated_at_ms may differ by ms at equal 13-digit width.
+- update_session_note returns the full updated Session (None = vanished row
+  → unknown_session), so the response serializes exactly what persisted.
+
+## Security invariants checked
+- Rejected updates leave the stored note untouched (pinned by test).
+- Additive protocol; markers/sources/runs paths untouched.
+- User store untouched by verification.
+
+## Worker-flagged bounds (recorded)
+- store exposes both session_exists and the new get_session; consolidation
+  batched with a store-hardening slice.
+- update_session_note re-reads under a second lock acquisition (matches the
+  existing non-transactional style, e.g. finish_run).
+- My red test initially used 1400 escape-heavy nulls, which exceeds the
+  REQUEST frame cap (connection drop by design); corrected to 1345 per the
+  marker precedent — worker caught both this and a fmt violation in the
+  test file rather than exceeding its allowlist.
+
+## Sol round 1 (FAIL, one MAJOR) — CONFIRMED and fixed
+Claim: the admission probe reuses the fetched row's updated_at_ms while the
+write stamps a freshly sampled one; legacy rows carry no width guarantee
+(the branch's own v5 fixture stores updated_at_ms = 7), so an update can be
+admitted yet make its session unlistable.
+
+Disposition: CONFIRMED. lib.rs built the probe as `Session { note, ..current }`
+with a comment asserting equal stamp width — false for narrow legacy stamps.
+My first repro attempt passed misleadingly: the sweep set 53 notes on one
+session, so the first small accepted note restamped a 13-digit updated_at_ms
+and healed the narrowing before the boundary was reached. Re-narrowing via
+sqlite3 before EVERY sweep step went red exactly as predicted
+(accepted-note-delists-session at nulls=1330; /tmp/red-narrow.log).
+
+Fix: the probe clone now carries updated_at_ms = i64::MAX — the serialized
+ceiling, matching the runs-probe precedent — which also covers a forward
+clock step between probe and write. Regression test
+notes_on_narrow_timestamp_sessions_stay_singly_listable kept (re-narrows the
+row per step). Gates re-run: 136 Rust tests, fmt, clippy -D warnings,
+verify-m0.sh exit 0 (verify-m0-round1.log).
