@@ -412,6 +412,37 @@ fn acquire_open_lock(path: &Path) -> io::Result<fs::File> {
     }
 }
 
+/// Exclusive, lifetime ownership of a store by one backend process. Held for as long as the
+/// returned handle lives; the kernel releases it when the process exits, however it exits.
+/// Binding a socket proves nothing about the store, so the sweep of dangling runs (and every
+/// later write) is only safe once this lock is held.
+pub(crate) fn acquire_store_ownership(path: &Path) -> io::Result<fs::File> {
+    let mut owner_path = path.as_os_str().to_owned();
+    owner_path.push(".owner");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&owner_path)?;
+    // SAFETY: `file` owns a valid descriptor for the flock call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(file);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "store {} is already owned by another backend",
+                path.display()
+            ),
+        ));
+    }
+    Err(error)
+}
+
 /// Switching journal modes needs a brief exclusive lock that SQLite reports as busy instead of
 /// honoring the busy timeout, so first-open races between processes are retried here.
 fn enable_write_ahead_logging(connection: &Connection) -> io::Result<()> {

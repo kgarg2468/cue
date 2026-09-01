@@ -3,13 +3,16 @@
 Slice: durable run records (S05-008 partial: agent/executable, status, exit
 result; S01-005 groundwork: optional run→session linkage). Migration 4 (runs
 table, surrogate PK because client-chosen run_ids are reusable), admission-time
-insert, terminal-time finish, startup interruption sweep, list_runs page,
-Swift RunRecord/RunListPage.
+insert, terminal-time finish, startup interruption sweep, store-ownership
+lock, list_runs page, Swift RunRecord/RunListPage.
 
 ## TDD evidence
-- red-evidence.log — both protocol tests fail against merged main ce4ee97.
-- cargo-test.log — full green: 119 Rust; fmt, clippy -D warnings clean.
-- verify-m0.log — verify-m0.sh exit 0 (37 Swift tests).
+- red-evidence.log — initial 2 protocol reds against merged main ce4ee97,
+  plus review round-1 reds (fatal sweep, duplicate-launch isolation) and the
+  round-3 red (second backend on the same store must not start).
+- cargo-test.log — full green: 123 Rust; fmt, clippy -D warnings clean.
+- verify-m0.log / verify-m0-postfix.log / verify-m0-r3.log — verify-m0.sh
+  exit 0 after each review round (37 Swift tests).
 - runtime-demo.log — real release binary: v3→v4 migration; session-linked run
   exits and persists exit_code 0 with its session_id; unknown session rejected
   before admission; a live run is visible as "running"; after SIGKILL and
@@ -23,22 +26,42 @@ Swift RunRecord/RunListPage.
   store_unavailable.
 - finish_run is bound to RunTerminal's existing one-shot guard (record key is
   *taken* under the guard) → at-most-once durable close, written before the
-  run_exit frame without holding the ClientWriter mutex; store errors are
-  logged and never withhold the client's frame. Thread-spawn failure closes
-  the record with internal_error.
-- Startup sweep (running → interrupted + ended_at_ms) runs after open_store
-  and before the socket binds, so no client can read a page claiming a dead
-  run is live.
+  run_exit frame without holding the ClientWriter mutex; a store error is
+  reported loudly but never withholds the client's frame (the row is corrected
+  by the next startup sweep). Thread-spawn failure closes the record with
+  internal_error.
+- One backend per store: a lifetime flock on the `<store>.owner` sidecar is
+  taken right after open_store, before any lifecycle rewrite. The socket bind
+  proves socket ownership, not store ownership (Sol round 2) — a second
+  backend on a different socket but the same store now fails startup with
+  "store … is already owned by another backend". Kernel releases the lock on
+  process death, so no stale-lock recovery is needed.
+- No terminal-write retries: ownership rules out cross-process busy
+  contention, so retrying a failed finish_run only stalls run supervision
+  (a 3×busy-timeout retry loop could hold a run terminal ~15s — Sol round 2);
+  a single attempt + startup-sweep correction is strictly better.
+- Startup sweep (running → interrupted + ended_at_ms) is fatal on failure and
+  runs under the ownership lock, before the accept loop serves any request,
+  so no client can read a page claiming a dead run is live and a backend that
+  cannot recover state refuses to serve.
 - session_id on the wire uses the double-Option convention: omitted = unlinked,
   explicit null = invalid_start_process, unknown = unknown_session before
   admission. add_source/list_sources semantics unchanged.
 - list_runs pages newest-first (started_at_ms DESC, id DESC, limit 50, limit+1
   probe, 8 KiB budget popping from the end).
 
+## Review rounds (Sol gpt-5.6-sol xhigh)
+- Round 1 FAIL: sweep ordered before the duplicate-launch liveness gate and
+  non-fatal; terminal close droppable; list_runs bounds untested. Fixed
+  red-first (sweep after bind + fatal; bounds/truncation test; duplicate
+  launch cannot interrupt a live backend's runs).
+- Round 2 FAIL: bind ≠ store ownership; retry loop violates supervision
+  bound. Fixed red-first with the owner flock + retry removal above.
+
 ## Security invariants checked
 - Protocol change additive; all 58 process_lifecycle tests untouched and green.
 - Only admitted runs persist; rejected/refused runs leave no record.
-- Store hygiene unchanged; user store untouched by verification.
+- Owner sidecar created 0600; store hygiene unchanged; user store untouched.
 
 ## Known bounds carried forward (worker-flagged, recorded)
 - capacity_exhausted / shutdown-cancelled refusals persist no record (they

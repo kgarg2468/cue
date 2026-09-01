@@ -820,8 +820,10 @@ pub fn run(socket_path: &Path, store_path: &Path) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(mask_result));
     }
 
-    // Durable state must be usable before the socket advertises the service.
+    // Durable state must be usable before the socket advertises the service, and this
+    // backend must be the store's only owner before it may rewrite lifecycle state.
     let store = store::open_store(store_path)?;
+    let _store_owner = store::acquire_store_ownership(store_path)?;
     remove_stale_socket(socket_path)?;
     cleanup_orphaned_worktrees();
     let listener = UnixListener::bind(socket_path)?;
@@ -832,11 +834,11 @@ pub fn run(socket_path: &Path, store_path: &Path) -> io::Result<()> {
         identity: bound_identity,
     };
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
-    // Runs still marked running belong to a backend that died mid-run. The sweep happens after
-    // the exclusive bind proves no live backend owns this store (a duplicate launch must never
-    // rewrite a live backend's records), and before the accept loop serves any request, so no
-    // client can read a page that claims a dead run is live. Startup recovery is mandatory:
-    // if the sweep cannot run, the backend must not serve stale lifecycle state.
+    // Runs still marked running belong to a backend that died mid-run. The store-ownership
+    // lock held above proves no live backend can be rewritten by this sweep, and running it
+    // before the accept loop means no client can read a page that claims a dead run is live.
+    // Startup recovery is mandatory: if the sweep cannot run, the backend must not serve
+    // stale lifecycle state.
     store.mark_dangling_runs_interrupted()?;
     let worker_slots = WorkerSlots::new(MAX_CONCURRENT_CLIENTS);
     let process_slots = WorkerSlots::new(MAX_CONCURRENT_PROCESSES);
@@ -1821,22 +1823,16 @@ impl RunTerminal {
         self.emitted = true;
         // The record is closed before the frame is written — and never while the client stream
         // is locked — so a client that observes run_exit can already read a finished record.
-        // Transient store failures are retried; a persistent failure is reported but never
-        // withholds the terminal frame (the row is then corrected by the next startup sweep).
-        if let Some(record) = self.record.take() {
-            let mut attempts = 0;
-            while let Err(error) =
+        // Store ownership rules out cross-process contention, so a failure here is local store
+        // breakage that retrying cannot fix: it is reported loudly, never withholds the
+        // terminal frame, and the row is corrected by the next startup sweep.
+        if let Some(record) = self.record.take()
+            && let Err(error) =
                 record
                     .store
                     .finish_run(&record.id, exit_code.map(i64::from), error_code)
-            {
-                attempts += 1;
-                if attempts >= 3 {
-                    eprintln!("store write error: run record left open: {error}");
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
+        {
+            eprintln!("store write error: run record left open: {error}");
         }
         // The run id must be released before the terminal frame is written so a
         // client that observes run_exit can immediately reuse the id.

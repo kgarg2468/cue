@@ -954,6 +954,69 @@ fn a_duplicate_launch_cannot_interrupt_a_live_backends_runs() {
 }
 
 #[test]
+fn a_second_backend_on_the_same_store_cannot_start() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("owner.sock");
+    let other_socket = fixture.path("other.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("run client should connect");
+    let request = serde_json::json!({"version": 1, "type": "start_process",
+        "run_id": "owned-run", "executable": "/bin/sleep", "arguments": ["30"],
+        "timeout_milliseconds": 60_000});
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    loop {
+        let page = list_runs(&backend.socket_path);
+        if runs_named(&page, "owned-run")
+            .first()
+            .is_some_and(|run| run["status"] == "running")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "run should become visible");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Binding a different socket must not grant the store: ownership is per
+    // store, not per socket path.
+    let mut second = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            other_socket.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .spawn()
+        .expect("second backend should spawn");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    let status = loop {
+        match second.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = second.kill();
+                let _ = second.wait();
+                panic!("a second backend on an owned store must exit, not serve");
+            }
+            Err(error) => panic!("backend status should be readable: {error}"),
+        }
+    };
+    assert!(!status.success(), "store takeover must be refused");
+    let _ = fs::remove_file(&other_socket);
+
+    let page = list_runs(&backend.socket_path);
+    assert_eq!(
+        runs_named(&page, "owned-run")[0]["status"],
+        "running",
+        "a refused takeover must not corrupt the owner's records"
+    );
+}
+
+#[test]
 fn a_failing_interruption_sweep_prevents_startup() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("badsweep.sock");
