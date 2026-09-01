@@ -10,3 +10,19 @@ failures:
 test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 12 filtered out; finished in 5.23s
 
 error: test failed, to rerun pass `--test persistence`
+
+--- Round-1 review fixes (Sol: 3 MAJOR, 1 MINOR) — red runs BEFORE fixes ---
+
+failures:
+    a_duplicate_launch_cannot_interrupt_a_live_backends_runs
+    a_failing_interruption_sweep_prevents_startup
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 15 filtered out; finished in 5.35s
+
+error: test failed, to rerun pass `--test persistence`
+running 1 test
+test list_runs_responses_are_bounded_with_truncation_reported ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 1.22s
+
+(list_runs bounds test passed immediately: coverage, not a behavior change)

@@ -902,6 +902,138 @@ fn dangling_running_records_are_marked_interrupted_on_restart() {
 }
 
 #[test]
+fn a_duplicate_launch_cannot_interrupt_a_live_backends_runs() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("dup.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let mut stream = UnixStream::connect(&backend.socket_path).expect("run client should connect");
+    let request = serde_json::json!({"version": 1, "type": "start_process",
+        "run_id": "long-run", "executable": "/bin/sleep", "arguments": ["30"],
+        "timeout_milliseconds": 60_000});
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .expect("request should write");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    loop {
+        let page = list_runs(&backend.socket_path);
+        if runs_named(&page, "long-run")
+            .first()
+            .is_some_and(|run| run["status"] == "running")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "run should become visible");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // A second backend on the same socket and store must fail to start without
+    // touching the live backend's durable records.
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .output()
+        .expect("duplicate backend should run to completion");
+    assert!(
+        !duplicate.status.success(),
+        "a duplicate launch must refuse to start"
+    );
+
+    let page = list_runs(&backend.socket_path);
+    let run = runs_named(&page, "long-run");
+    assert_eq!(
+        run[0]["status"], "running",
+        "a duplicate launch must not corrupt the live backend's records, got {}",
+        run[0]
+    );
+}
+
+#[test]
+fn a_failing_interruption_sweep_prevents_startup() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badsweep.sock");
+    let store_path = fixture.path("store.sqlite");
+    {
+        // A store whose runs relation cannot be updated: the sweep must fail
+        // and the backend must refuse to serve rather than show stale rows.
+        let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        drop(backend);
+    }
+    let output = Command::new("sqlite3")
+        .arg(&store_path)
+        .arg("ALTER TABLE runs RENAME TO runs_real; CREATE VIEW runs AS SELECT * FROM runs_real;")
+        .output()
+        .expect("sqlite3 should rewrite the store");
+    assert!(output.status.success(), "store rewrite should succeed");
+
+    let mut crippled = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
+        .args([
+            "--socket",
+            socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
+        ])
+        .spawn()
+        .expect("backend should spawn");
+    let deadline = Instant::now() + STARTUP_DEADLINE;
+    let status = loop {
+        match crippled.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = crippled.kill();
+                let _ = crippled.wait();
+                panic!("a backend that cannot complete startup recovery must exit, not serve");
+            }
+            Err(error) => panic!("backend status should be readable: {error}"),
+        }
+    };
+    assert!(
+        !status.success(),
+        "a failed startup recovery must exit non-zero"
+    );
+}
+
+#[test]
+fn list_runs_responses_are_bounded_with_truncation_reported() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("boundedruns.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    for index in 0..54 {
+        let padding = "x".repeat(90);
+        let exit = run_process(
+            &backend.socket_path,
+            serde_json::json!({"run_id": format!("bounded-{index:02}-{padding}"),
+                "executable": "/usr/bin/true", "arguments": [],
+                "timeout_milliseconds": 5_000}),
+        );
+        assert_eq!(exit["type"], "run_exit");
+    }
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_runs"}),
+    );
+    assert!(frame.len() <= 8192, "frame should stay bounded");
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(response["type"], "list_runs_response");
+    assert_eq!(response["truncated"], true);
+    let runs = response["runs"].as_array().expect("runs array");
+    assert!(
+        !runs.is_empty() && runs.len() < 54,
+        "the byte budget should deliver a bounded non-empty page, got {}",
+        runs.len()
+    );
+}
+
+#[test]
 fn escape_heavy_titles_cannot_produce_an_oversized_create_response() {
     let fixture = Fixture::new();
     let socket_path = fixture.path("escape.sock");
