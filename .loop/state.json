@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 26,
-  "active_milestone": "M2 Domain/persistence (slices 1-8 merged: session store + kinds + source refs + run records + markers + run listability + session note + transcript segments)",
+  "cycle": 27,
+  "active_milestone": "M2 Domain/persistence (slices 1-9 merged: session store + kinds + source refs + run records + markers + run listability + session note + transcript segments + run events)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 26: delivered M2 slice 8 through PR #47, squash-merged as b27c11a. Transcript segments (spec \u00a75): migration 7 transcript_segments table; add_transcript_segment/list_transcript mirror the sources contract exactly, including the single-item list-envelope admission probe and bounded chronological paging; Swift TranscriptSegment/TranscriptPage. First slice to clear Sol review PASS zero findings on round 1. Gates: 141 Rust + 48 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v6\u2192v7 demo, user store untouched. Next: session attachments or run events.",
-  "updated_at": "2026-09-01T07:03:09+00:00",
+  "last_cycle_summary": "Cycle 27: delivered M2 slice 9 through PR #49, squash-merged as 7b34e65. Run lifecycle events (spec \u00a75/\u00a710/\u00a714): migration 8 run_events, backend-authored \u2014 launch event transactional with admission, terminal event transactional with the one-shot close (kind from error_code else exited), startup sweep closes dangling trails with interrupted. list_run_events pages under the frame budget; Sol verified the 50-event worst case pops to 36. Swift RunEvent/RunEventPage. Sol round 1 PASS zero findings (second consecutive). Gates: 148 Rust + 50 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v7\u2192v8 demo incl. SIGKILL interruption trail. Next: session attachments or run permissions/environment fields.",
+  "updated_at": "2026-09-01T07:48:52+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
