@@ -1,0 +1,59 @@
+# M2 slice 12 — durable task packets (spec §8; roadmap M2 "TaskPacket model")
+
+## Contract
+- task_packets table (migration 11): id PK, action_id REFERENCES actions,
+  packet_version, body TEXT (canonical JSON), created_at_ms; chronological
+  index. The §8 packet is a versioned DOCUMENT: the domain layer stores it
+  verbatim (round-trips exactly) and extracts only task_packet_version, which
+  must equal integer 1 exactly. Schema enforcement of packet internals lands
+  with the packet-building milestones (M6/M13).
+- create_task_packet validation: action_id double-Option; body must be a JSON
+  object; version pinned; content-byte cap 4096 (strings measured as the raw
+  bytes they hold, NOT their JSON escapes — the analog of .len() on flat text
+  fields); unknown_action split; single-item list-envelope probe as the
+  BINDING frame guard (mutant-proven: forcing the probe to pass fails the
+  sweep). list_task_packets chronological with limit-51 truncation probe and
+  end-popping byte budget; ordering tie-break by rowid (ids embed the minting
+  pid, so id order could reorder same-millisecond history across processes).
+
+## Remediation history (this slice had two worker rounds — both recorded)
+1. Worker 1 (full slice) correctly identified that my red sweep window
+   (1250..1302) was mis-derived: a raw serialized cap rejects every
+   escape-heavy body in it. It shipped a two-measure design whose second
+   measure (a 512-byte "envelope reserve" on the escaped document) was tuned
+   to my window and made the probe dead code. I rejected the reserve: the
+   uniform design keeps the probe binding, and admission's sensitivity to
+   id length is an accepted recorded bound (sources-slice precedent). I
+   removed the reserve (+const) and fixed my window to 1300..1338, straddling
+   the probe's true boundary (~1322 nulls) while keeping requests under the
+   8 KiB cap with id-length margin.
+2. MY ERROR: I verified the mutant with `git checkout backend/src/lib.rs`,
+   which discarded worker 1's entire uncommitted lib.rs diff. Store/Swift
+   files were unaffected. A focused worker 2 re-implemented the lib.rs arms
+   against the pinned red tests; all gates green. Lesson recorded: mutants on
+   uncommitted trees restore from a copy, never via git checkout.
+
+## Red-first
+- 3 contract tests red vs origin/main b33638c (red-evidence.log).
+
+## Gates
+- 163 Rust tests (48 unit + 13 health_socket + 44 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; 59 Swift tests).
+- Mutant proof: probe forced to pass -> sweep fails; restored -> green.
+- Runtime demo (runtime-demo.log): hand-built v10 store, user_version
+  10 -> 11, §8-shaped packet round-trip on a real binary, version-2 /
+  non-object / unknown-action rejections, chronological listing after
+  restart, 0600 mode.
+
+## Routing
+- 2 opus-high implementation workers (full slice + lib.rs restore after my
+  git-checkout error), Fable red contract tests + remediation + mutant +
+  demo. Diff-gated at 899 lines total.
+
+## Worker-flagged bounds (recorded)
+- unknown_action is a new protocol error code (first action-scoped read).
+- Swift TaskPacket.body is [String: Any] with NSDictionary equality; request
+  bodies serialize with .sortedKeys so one document makes one frame.
+- IPCClientError.invalidSessionResponse reused on a request-encoding path
+  (name reads oddly; widening the enum deferred to protocol hardening).

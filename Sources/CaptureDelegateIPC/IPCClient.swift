@@ -319,6 +319,51 @@ public struct SessionProjectLink: Equatable {
     }
 }
 
+/// The provider-neutral document one action is delegated with. The backend keeps the document
+/// verbatim and reads only the version it declares, so every other key belongs to whichever
+/// provider the packet was shaped for.
+public struct TaskPacket: Equatable {
+    public let id: String
+    public let actionID: String
+    public let packetVersion: Int
+    /// The document itself, exactly as the backend stored it.
+    public let body: [String: Any]
+    public let createdAtMilliseconds: Int
+
+    public init(
+        id: String,
+        actionID: String,
+        packetVersion: Int,
+        body: [String: Any],
+        createdAtMilliseconds: Int
+    ) {
+        self.id = id
+        self.actionID = actionID
+        self.packetVersion = packetVersion
+        self.body = body
+        self.createdAtMilliseconds = createdAtMilliseconds
+    }
+
+    /// Two packets are the same packet when their documents say the same thing; the document is
+    /// untyped JSON, so it is compared as JSON rather than key by key.
+    public static func == (lhs: TaskPacket, rhs: TaskPacket) -> Bool {
+        lhs.id == rhs.id && lhs.actionID == rhs.actionID
+            && lhs.packetVersion == rhs.packetVersion
+            && lhs.createdAtMilliseconds == rhs.createdAtMilliseconds
+            && NSDictionary(dictionary: lhs.body).isEqual(to: rhs.body)
+    }
+}
+
+public struct TaskPacketPage: Equatable {
+    public let packets: [TaskPacket]
+    public let truncated: Bool
+
+    public init(packets: [TaskPacket], truncated: Bool) {
+        self.packets = packets
+        self.truncated = truncated
+    }
+}
+
 public enum ProcessOutputStream: String, Equatable {
     case stdout
     case stderr
@@ -575,6 +620,30 @@ public enum IPCClient {
         return try decodeListSessionProjectsResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    /// Delegates one action with a provider-neutral document; the backend stores it verbatim and
+    /// reads only the version the document declares.
+    public static func createTaskPacket(
+        socketPath: String,
+        actionID: String,
+        body: [String: Any]
+    ) throws -> TaskPacket {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCreateTaskPacketRequest(actionID: actionID, body: body, to: descriptor)
+        return try decodeCreateTaskPacketResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listTaskPackets(socketPath: String, actionID: String) throws
+        -> TaskPacketPage
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListTaskPacketsRequest(actionID: actionID, to: descriptor)
+        return try decodeListTaskPacketsResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func cancelProcess(socketPath: String, runID: String) throws
         -> CancelProcessResult
     {
@@ -799,6 +868,24 @@ public enum IPCClient {
     public static func listSessionProjectsRequest(sessionID: String) -> String {
         "{\"version\":1,\"type\":\"list_session_projects\","
             + "\"session_id\":\(jsonString(sessionID))}\n"
+    }
+
+    /// The document travels verbatim, so it is written as the JSON it is rather than as a
+    /// string; keys are sorted so one document always makes one frame.
+    public static func createTaskPacketRequest(actionID: String, body: [String: Any]) throws
+        -> String
+    {
+        guard JSONSerialization.isValidJSONObject(body) else {
+            throw IPCClientError.invalidSessionResponse
+        }
+        let document = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        return "{\"version\":1,\"type\":\"create_task_packet\","
+            + "\"action_id\":\(jsonString(actionID)),"
+            + "\"body\":\(String(decoding: document, as: UTF8.self))}\n"
+    }
+
+    public static func listTaskPacketsRequest(actionID: String) -> String {
+        "{\"version\":1,\"type\":\"list_task_packets\",\"action_id\":\(jsonString(actionID))}\n"
     }
 
     public static func cancelProcessRequest(runID: String) -> String {
@@ -1044,6 +1131,21 @@ public enum IPCClient {
     static func writeListSessionProjectsRequest(sessionID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSessionProjectsRequest(sessionID: sessionID).utf8), to: descriptor)
+    }
+
+    static func writeCreateTaskPacketRequest(
+        actionID: String,
+        body: [String: Any],
+        to descriptor: Int32
+    ) throws {
+        let request = try createTaskPacketRequest(actionID: actionID, body: body)
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(request.utf8), to: descriptor)
+    }
+
+    static func writeListTaskPacketsRequest(actionID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listTaskPacketsRequest(actionID: actionID).utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -1761,6 +1863,60 @@ public enum IPCClient {
             name: name,
             createdAtMilliseconds: createdAtMilliseconds,
             updatedAtMilliseconds: updatedAtMilliseconds
+        )
+    }
+
+    static func decodeCreateTaskPacketResponse(_ response: String) throws -> TaskPacket {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "create_task_packet_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeTaskPacket(json["packet"])
+    }
+
+    static func decodeListTaskPacketsResponse(_ response: String) throws -> TaskPacketPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_task_packets_response",
+            let packets = json["packets"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return TaskPacketPage(
+            packets: try packets.map { try decodeTaskPacket($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeTaskPacket(_ value: Any?) throws -> TaskPacket {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let actionID = json["action_id"] as? String, !actionID.isEmpty,
+            let packetVersion = json["packet_version"] as? Int,
+            // The document is kept verbatim, but it is still a document: a packet whose body is
+            // not an object is not one the backend can have admitted.
+            let body = json["body"] as? [String: Any],
+            let createdAtMilliseconds = json["created_at_ms"] as? Int
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return TaskPacket(
+            id: id,
+            actionID: actionID,
+            packetVersion: packetVersion,
+            body: body,
+            createdAtMilliseconds: createdAtMilliseconds
         )
     }
 

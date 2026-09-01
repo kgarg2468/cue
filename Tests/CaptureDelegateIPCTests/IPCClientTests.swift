@@ -1104,6 +1104,123 @@ func listSessionProjectsRequestAndResponse() throws {
     }
 }
 
+@Test("create task packet request carries its document verbatim and its response decodes it")
+func createTaskPacketRequestAndResponse() throws {
+    let body: [String: Any] = [
+        "task_packet_version": 1,
+        "action": ["type": "review_pull_request", "objective": "Determine whether it breaks."],
+        "execution": ["preferred_agent": "codex", "max_minutes": 20],
+    ]
+    let request = try IPCClient.createTaskPacketRequest(actionID: "action-1", body: body)
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "create_task_packet")
+    #expect(json["action_id"] as? String == "action-1")
+    // The document travels as the JSON it is, key for key, not as a string holding JSON.
+    let sentBody = try #require(json["body"] as? [String: Any])
+    #expect(NSDictionary(dictionary: sentBody).isEqual(to: body))
+
+    let packet = try IPCClient.decodeCreateTaskPacketResponse(
+        "{\"version\":1,\"type\":\"create_task_packet_response\",\"packet\":"
+            + "{\"id\":\"packet-1\",\"action_id\":\"action-1\",\"packet_version\":1,"
+            + "\"body\":{\"task_packet_version\":1,\"execution\":{\"max_minutes\":20}},"
+            + "\"created_at_ms\":10}}\n"
+    )
+    #expect(
+        packet
+            == TaskPacket(
+                id: "packet-1",
+                actionID: "action-1",
+                packetVersion: 1,
+                body: ["task_packet_version": 1, "execution": ["max_minutes": 20]],
+                createdAtMilliseconds: 10
+            )
+    )
+    // The document round-trips whole, not just the keys this client happens to know.
+    let execution = try #require(packet.body["execution"] as? [String: Any])
+    #expect(execution["max_minutes"] as? Int == 20)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateTaskPacketResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_create_task_packet\"}\n"
+        )
+    }
+    // A document that is not an object is not a packet the backend can have admitted.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateTaskPacketResponse(
+            "{\"version\":1,\"type\":\"create_task_packet_response\",\"packet\":"
+                + "{\"id\":\"packet-2\",\"action_id\":\"action-1\",\"packet_version\":1,"
+                + "\"body\":\"not an object\",\"created_at_ms\":10}}\n"
+        )
+    }
+    // A body that is not JSON at all never reaches the socket.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.createTaskPacketRequest(actionID: "action-1", body: ["at": Date()])
+    }
+}
+
+@Test("list task packets request is typed and its response decodes a chronological page")
+func listTaskPacketsRequestAndResponse() throws {
+    let request = IPCClient.listTaskPacketsRequest(actionID: "action-1")
+    #expect(
+        request == "{\"version\":1,\"type\":\"list_task_packets\","
+            + "\"action_id\":\"action-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListTaskPacketsResponse(
+        "{\"version\":1,\"type\":\"list_task_packets_response\",\"packets\":["
+            + "{\"id\":\"packet-1\",\"action_id\":\"action-1\",\"packet_version\":1,"
+            + "\"body\":{\"task_packet_version\":1},\"created_at_ms\":10},"
+            + "{\"id\":\"packet-2\",\"action_id\":\"action-1\",\"packet_version\":1,"
+            + "\"body\":{\"task_packet_version\":1,\"revised\":true},\"created_at_ms\":20}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == TaskPacketPage(
+                packets: [
+                    TaskPacket(
+                        id: "packet-1", actionID: "action-1", packetVersion: 1,
+                        body: ["task_packet_version": 1], createdAtMilliseconds: 10),
+                    TaskPacket(
+                        id: "packet-2", actionID: "action-1", packetVersion: 1,
+                        body: ["task_packet_version": 1, "revised": true],
+                        createdAtMilliseconds: 20),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListTaskPacketsResponse(
+        "{\"version\":1,\"type\":\"list_task_packets_response\",\"packets\":[],"
+            + "\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.packets.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListTaskPacketsResponse(
+            "{\"version\":1,\"type\":\"list_task_packets_response\",\"packets\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListTaskPacketsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_action\"}\n"
+        )
+    }
+    // A stamp the backend always states cannot arrive as a string.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListTaskPacketsResponse(
+            "{\"version\":1,\"type\":\"list_task_packets_response\",\"packets\":["
+                + "{\"id\":\"packet-3\",\"action_id\":\"action-1\",\"packet_version\":1,"
+                + "\"body\":{\"task_packet_version\":1},\"created_at_ms\":\"10\"}],"
+                + "\"truncated\":false}\n"
+        )
+    }
+}
+
 @Test("an interrupted run decodes with its error code and without an exit code")
 func interruptedRunDecodes() throws {
     let page = try IPCClient.decodeListRunsResponse(

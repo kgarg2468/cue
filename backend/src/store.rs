@@ -112,6 +112,19 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX session_projects_by_link
         ON session_projects (session_id, linked_at_ms, project_id)",
+    // A task packet is the provider-neutral document one action is delegated with. The document
+    // is stored verbatim as the JSON text it arrived as, and only the version it declares is
+    // lifted out of it into a column, so a packet shaped for one provider stays readable to a
+    // build that knows nothing about that provider's keys; the index serves the only read path,
+    // which walks one action's packets in the order they were written.
+    "CREATE TABLE task_packets (
+        id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL REFERENCES actions(id),
+        packet_version INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX task_packets_by_action ON task_packets (action_id, created_at_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -226,6 +239,18 @@ pub(crate) struct Project {
     pub(crate) name: String,
     pub(crate) created_at_ms: i64,
     pub(crate) updated_at_ms: i64,
+}
+
+/// The provider-neutral document one action is delegated with. The domain layer keeps the
+/// document exactly as it arrived and reads only the version it declares, so every other key
+/// belongs to whichever provider the packet was shaped for.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct TaskPacket {
+    pub(crate) id: String,
+    pub(crate) action_id: String,
+    pub(crate) packet_version: i64,
+    pub(crate) body: serde_json::Value,
+    pub(crate) created_at_ms: i64,
 }
 
 /// The event a run's admission records: a run is launched exactly once, at sequence zero.
@@ -376,6 +401,25 @@ impl Project {
             name: name.to_owned(),
             created_at_ms,
             updated_at_ms: created_at_ms,
+        }
+    }
+}
+
+impl TaskPacket {
+    /// A fully formed packet that has not been persisted yet, so callers can bound-check the
+    /// response frame before anything durable happens. The version is the one the document
+    /// itself declares, lifted out by the caller that read it.
+    pub(crate) fn draft(
+        action_id: &str,
+        packet_version: i64,
+        body: serde_json::Value,
+    ) -> TaskPacket {
+        TaskPacket {
+            id: record_id("task-packet"),
+            action_id: action_id.to_owned(),
+            packet_version,
+            body,
+            created_at_ms: now_milliseconds(),
         }
     }
 }
@@ -921,6 +965,80 @@ impl Store {
             .collect::<rusqlite::Result<Vec<Project>>>()
             .map_err(io::Error::other)?;
         Ok(projects)
+    }
+
+    pub(crate) fn action_exists(&self, id: &str) -> io::Result<bool> {
+        self.connection()
+            .query_row("SELECT 1 FROM actions WHERE id = ?1", [id], |_| Ok(()))
+            .map(|()| true)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                error => Err(io::Error::other(error)),
+            })
+    }
+
+    /// Writes one packet, keeping its document as the canonical JSON text of the value the
+    /// domain read, so the row states exactly the document the caller handed over.
+    pub(crate) fn insert_task_packet(&self, packet: &TaskPacket) -> io::Result<()> {
+        let body = serde_json::to_string(&packet.body)?;
+        self.connection()
+            .execute(
+                "INSERT INTO task_packets (id, action_id, packet_version, body, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    packet.id,
+                    packet.action_id,
+                    packet.packet_version,
+                    body,
+                    packet.created_at_ms
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// One action's packets, oldest-first, so a page reads as the delegation history it is.
+    /// Packets written inside the same millisecond fall back to the row's own insertion order
+    /// rather than to the packet id, which carries the minting process into the ordering.
+    pub(crate) fn list_task_packets(
+        &self,
+        action_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<TaskPacket>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, action_id, packet_version, body, created_at_ms
+                 FROM task_packets WHERE action_id = ?1
+                 ORDER BY created_at_ms ASC, rowid ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let rows = statement
+            .query_map(params![action_id, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<(String, String, i64, String, i64)>>>()
+            .map_err(io::Error::other)?;
+        let mut packets = Vec::with_capacity(rows.len());
+        for (id, action_id, packet_version, body, created_at_ms) in rows {
+            packets.push(TaskPacket {
+                id,
+                action_id,
+                packet_version,
+                // The column holds the document the write serialized; a row that cannot be
+                // read back as one is a corrupt store, not an empty packet.
+                body: serde_json::from_str(&body)?,
+                created_at_ms,
+            });
+        }
+        Ok(packets)
     }
 
     fn connection(&self) -> MutexGuard<'_, Connection> {
@@ -1970,6 +2088,126 @@ mod tests {
                 .expect("projects should list"),
             vec![project],
             "a project linked after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn task_packets_list_in_write_order_for_their_own_action() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let action = super::ActionRecord::draft(None, "custom", "Review PR 482");
+        store.insert_action(&action).expect("action should insert");
+        let other = super::ActionRecord::draft(None, "custom", "Unrelated");
+        store.insert_action(&other).expect("action should insert");
+
+        // Every packet is stamped with the same millisecond, so only the order the rows were
+        // written in can decide the page. Minted brief-first and written revision-first, to pin
+        // that write order — not the order the ids happened to be minted in — drives it.
+        let mut brief = super::TaskPacket::draft(
+            &action.id,
+            1,
+            serde_json::json!({"task_packet_version": 1, "action": {"objective": "Read it."}}),
+        );
+        brief.created_at_ms = 7;
+        let mut revision = super::TaskPacket::draft(
+            &action.id,
+            1,
+            serde_json::json!({"task_packet_version": 1, "revised": true}),
+        );
+        revision.created_at_ms = 7;
+        let mut unrelated =
+            super::TaskPacket::draft(&other.id, 1, serde_json::json!({"task_packet_version": 1}));
+        unrelated.created_at_ms = 7;
+
+        store
+            .insert_task_packet(&revision)
+            .expect("packet should insert");
+        store
+            .insert_task_packet(&brief)
+            .expect("packet should insert");
+        store
+            .insert_task_packet(&unrelated)
+            .expect("packet should insert");
+
+        assert_eq!(
+            store
+                .list_task_packets(&action.id, 10)
+                .expect("packets should list"),
+            vec![revision.clone(), brief],
+            "an action's packets list in the order they were written, documents intact"
+        );
+        assert_eq!(
+            store
+                .list_task_packets(&action.id, 1)
+                .expect("packets should list"),
+            vec![revision],
+            "the limit bounds the page"
+        );
+        assert_eq!(
+            store
+                .list_task_packets(&other.id, 10)
+                .expect("packets should list"),
+            vec![unrelated],
+            "a packet stays scoped to its own action"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_ten_store_adds_task_packets_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before task packets existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..10] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO actions (id, kind, title, status, created_at_ms, updated_at_ms)
+                     VALUES ('action-legacy', 'custom', 'Before packets', 'draft', 7, 7);",
+                )
+                .expect("legacy action should be inserted");
+            connection
+                .pragma_update(None, "user_version", 10)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_actions(2)
+                .expect("actions should list")
+                .first()
+                .map(|action| action.title.clone()),
+            Some("Before packets".to_owned()),
+            "an action written before task packets existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_task_packets("action-legacy", 1)
+                .expect("packets should list")
+                .is_empty(),
+            "an action written before task packets existed must survive with no packets"
+        );
+        let packet = super::TaskPacket::draft(
+            "action-legacy",
+            1,
+            serde_json::json!({"task_packet_version": 1, "note": "After the upgrade"}),
+        );
+        store
+            .insert_task_packet(&packet)
+            .expect("packet should insert");
+        assert_eq!(
+            store
+                .list_task_packets("action-legacy", 2)
+                .expect("packets should list"),
+            vec![packet],
+            "a packet written after the upgrade must round-trip"
         );
     }
 

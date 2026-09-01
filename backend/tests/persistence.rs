@@ -2566,3 +2566,214 @@ fn every_accepted_project_is_listable_alone_and_through_its_session() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+fn create_task_packet(
+    socket_path: &Path,
+    action_id: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "create_task_packet",
+            "action_id": action_id, "body": body}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "create_task_packet_response",
+        "packet should be accepted, got {response}"
+    );
+    response["packet"].clone()
+}
+
+fn list_task_packets(socket_path: &Path, action_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_task_packets",
+            "action_id": action_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_task_packets_response");
+    response
+}
+
+#[test]
+fn task_packets_persist_chronologically_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("packets.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (action_id, other_id, expected) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let action = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "review_pull_request", "title": "Review PR 482"}),
+        );
+        let action_id = action["id"].as_str().expect("action id").to_owned();
+        let other = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "custom", "title": "Unrelated"}),
+        );
+        let other_id = other["id"].as_str().expect("action id").to_owned();
+
+        // A compact §8-shaped packet; the domain layer stores the document
+        // verbatim and extracts only its version.
+        let body = serde_json::json!({
+            "task_packet_version": 1,
+            "origin": {"session_id": "ses_engineering_sync", "source_refs": [
+                {"start_ms": 872_000, "end_ms": 884_000, "speaker": "Sarah",
+                 "text": "Krish, can you check PR 482?"}]},
+            "action": {"type": "review_pull_request",
+                "objective": "Determine whether token refresh breaks.",
+                "constraints": ["Do not modify code."]},
+            "execution": {"preferred_agent": "codex", "mode": "run",
+                "capability": "read", "max_minutes": 20},
+        });
+        let first = create_task_packet(&backend.socket_path, &action_id, body.clone());
+        assert_eq!(first["action_id"], action_id.as_str());
+        assert_eq!(
+            first["packet_version"], 1,
+            "the packet's own version is surfaced, got {first}"
+        );
+        assert_eq!(
+            first["body"], body,
+            "the packet document must round-trip verbatim"
+        );
+        assert!(
+            first["created_at_ms"].as_i64().unwrap_or_default() > 0,
+            "creation should be stamped"
+        );
+        let second = create_task_packet(
+            &backend.socket_path,
+            &action_id,
+            serde_json::json!({"task_packet_version": 1, "revised": true}),
+        );
+        create_task_packet(
+            &backend.socket_path,
+            &other_id,
+            serde_json::json!({"task_packet_version": 1}),
+        );
+        backend.stop();
+        (action_id, other_id, vec![first, second])
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_task_packets(&restarted.socket_path, &action_id);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["packets"].as_array().expect("packets array"),
+        &expected,
+        "packets should list oldest-first for their own action only"
+    );
+    let other_page = list_task_packets(&restarted.socket_path, &other_id);
+    assert_eq!(
+        other_page["packets"]
+            .as_array()
+            .expect("packets array")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn invalid_task_packets_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badpackets.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let action = create_action(
+        &backend.socket_path,
+        serde_json::json!({"kind": "custom", "title": "Strict packets"}),
+    );
+    let action_id = action["id"].as_str().expect("action id");
+
+    let cases = [
+        // Missing or malformed identifiers and bodies.
+        serde_json::json!({"body": {"task_packet_version": 1}}),
+        serde_json::json!({"action_id": null, "body": {"task_packet_version": 1}}),
+        serde_json::json!({"action_id": action_id}),
+        serde_json::json!({"action_id": action_id, "body": null}),
+        serde_json::json!({"action_id": action_id, "body": "not an object"}),
+        serde_json::json!({"action_id": action_id, "body": [1, 2]}),
+        serde_json::json!({"action_id": action_id, "body": 7}),
+        // The document must declare the one packet version this protocol knows.
+        serde_json::json!({"action_id": action_id, "body": {}}),
+        serde_json::json!({"action_id": action_id,
+            "body": {"task_packet_version": 2}}),
+        serde_json::json!({"action_id": action_id,
+            "body": {"task_packet_version": "1"}}),
+        serde_json::json!({"action_id": action_id,
+            "body": {"task_packet_version": null}}),
+        // Oversized document (raw serialized bound).
+        serde_json::json!({"action_id": action_id,
+            "body": {"task_packet_version": 1, "pad": "x".repeat(4097)}}),
+    ];
+    for mut case in cases {
+        case["version"] = serde_json::json!(1);
+        case["type"] = serde_json::json!("create_task_packet");
+        let response = exchange(&backend.socket_path, case.clone());
+        assert_eq!(response["type"], "error", "case should be rejected: {case}");
+        assert_eq!(response["code"], "invalid_create_task_packet");
+    }
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "create_task_packet",
+            "action_id": "action-missing", "body": {"task_packet_version": 1}}),
+    );
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["code"], "unknown_action");
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_task_packets",
+            "action_id": "action-missing"}),
+    );
+    assert_eq!(response["code"], "unknown_action");
+
+    let page = list_task_packets(&backend.socket_path, action_id);
+    assert_eq!(
+        page["packets"].as_array().expect("packets array").len(),
+        0,
+        "no rejected packet may persist"
+    );
+}
+
+#[test]
+fn every_accepted_task_packet_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("pktbound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    // Each NUL costs 1 content byte but 6 serialized bytes, so the content cap
+    // admits every body in this window and the list-envelope probe is the
+    // binding rejection (~1322 nulls). The top stays under the request frame
+    // cap with margin for id-length variation.
+    for nulls in 1300..1338 {
+        // A fresh action per probe keeps the just-created packet alone.
+        let action = create_action(
+            &backend.socket_path,
+            serde_json::json!({"kind": "custom", "title": format!("Boundary {nulls}")}),
+        );
+        let action_id = action["id"].as_str().expect("action id");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_task_packet",
+                "action_id": action_id,
+                "body": {"task_packet_version": 1, "pad": "\u{0}".repeat(nulls)}}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_create_task_packet");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_task_packets(&backend.socket_path, action_id);
+        assert_eq!(
+            page["packets"].as_array().expect("packets array").len(),
+            1,
+            "an admitted packet must be listable alone, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
