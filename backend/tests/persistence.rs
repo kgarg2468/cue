@@ -335,3 +335,35 @@ fn list_sessions_responses_are_bounded_with_truncation_reported() {
         "the byte budget should still deliver the newest sessions that fit"
     );
 }
+
+#[test]
+fn escape_heavy_titles_cannot_produce_an_oversized_create_response() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("escape.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    // 1,345 NULs pass the 4,096-byte raw-title check and fit the 8 KiB request
+    // bound, but JSON-escape sixfold in the response.
+    let title = "\u{0}".repeat(1345);
+    let frame = raw_exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "create_session", "title": title}),
+    );
+    assert!(
+        frame.len() <= 8192,
+        "create responses must stay within the frame bound, got {} bytes",
+        frame.len()
+    );
+    let response: serde_json::Value =
+        serde_json::from_str(&frame).expect("response should be JSON");
+    assert_eq!(
+        response["type"], "error",
+        "an unrepresentable session must be rejected, got {response}"
+    );
+    assert_eq!(response["code"], "invalid_create_session");
+    assert!(
+        list_sessions(&backend.socket_path).is_empty(),
+        "a rejected session must not be persisted"
+    );
+}

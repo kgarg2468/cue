@@ -1015,21 +1015,22 @@ fn handle_connection(
                 else {
                     return write_protocol_error(&mut stream, "invalid_create_session");
                 };
-                let session = match store.create_session(&title) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        eprintln!("store write error: {error}");
-                        return write_protocol_error(&mut stream, "store_unavailable");
-                    }
-                };
+                let session = Session::draft(&title);
                 let response = CreateSessionResponse {
                     version: PROTOCOL_VERSION,
                     response_type: "create_session_response",
                     session: &session,
                 };
-                serde_json::to_writer(&mut stream, &response)?;
-                stream.write_all(b"\n")?;
-                stream.flush()?;
+                // Escape-heavy titles can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted.
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_create_session");
+                };
+                if let Err(error) = store.insert_session(&session) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
             }
             "list_sessions" => {
                 // Fetch one past the page cap so truncation is observable without a count query.

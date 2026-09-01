@@ -37,15 +37,29 @@ pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
 }
 
-impl Store {
-    pub(crate) fn create_session(&self, title: &str) -> io::Result<Session> {
+impl Session {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens.
+    pub(crate) fn draft(title: &str) -> Session {
         let created_at_ms = now_milliseconds();
-        let session = Session {
+        Session {
             id: session_id(),
             title: title.to_owned(),
             created_at_ms,
             updated_at_ms: created_at_ms,
-        };
+        }
+    }
+}
+
+impl Store {
+    #[cfg(test)]
+    pub(crate) fn create_session(&self, title: &str) -> io::Result<Session> {
+        let session = Session::draft(title);
+        self.insert_session(&session)?;
+        Ok(session)
+    }
+
+    pub(crate) fn insert_session(&self, session: &Session) -> io::Result<()> {
         self.connection()
             .execute(
                 "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
@@ -58,7 +72,7 @@ impl Store {
                 ],
             )
             .map_err(io::Error::other)?;
-        Ok(session)
+        Ok(())
     }
 
     pub(crate) fn list_sessions(&self, limit: usize) -> io::Result<Vec<Session>> {
@@ -101,11 +115,14 @@ pub(crate) fn open_store(path: &Path) -> io::Result<Store> {
     }
 
     let connection = Connection::open(path).map_err(io::Error::other)?;
-    // Tighten the freshly created database before WAL sidecars inherit its mode.
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     connection
         .busy_timeout(BUSY_TIMEOUT)
         .map_err(io::Error::other)?;
+    // A store from a newer build must be rejected before the journal mode, the
+    // permissions, or any byte of the file is changed.
+    supported_schema_version(&connection)?;
+    // Tighten the freshly created database before WAL sidecars inherit its mode.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(io::Error::other)?;
@@ -169,7 +186,7 @@ fn migrate(connection: &Connection) -> io::Result<()> {
     }
 }
 
-fn apply_migrations(connection: &Connection) -> io::Result<()> {
+fn supported_schema_version(connection: &Connection) -> io::Result<usize> {
     let user_version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(io::Error::other)?;
@@ -185,6 +202,13 @@ fn apply_migrations(connection: &Connection) -> io::Result<()> {
             MIGRATIONS.len()
         )));
     }
+    Ok(applied)
+}
+
+fn apply_migrations(connection: &Connection) -> io::Result<()> {
+    // Re-checked inside the write transaction: another process may have migrated
+    // (or upgraded) the store between the open-time check and this lock.
+    let applied = supported_schema_version(connection)?;
 
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
         let next_version = index + 1;
@@ -223,7 +247,8 @@ mod tests {
     use super::{MIGRATIONS, open_store};
     use rusqlite::Connection;
     use std::fs;
-    use std::path::PathBuf;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static STORE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -300,15 +325,22 @@ mod tests {
     fn opening_a_newer_store_fails_without_touching_the_data() {
         let fixture = StoreFixture::new();
         let store_path = fixture.store_path();
-        open_store(&store_path)
-            .expect("store should open")
-            .create_session("Future session")
-            .expect("session should be created");
         let future_version = MIGRATIONS.len() as i64 + 1;
-        Connection::open(&store_path)
-            .expect("store should open")
-            .pragma_update(None, "user_version", future_version)
-            .expect("user_version should be writable");
+        {
+            // A future store in the default DELETE journal mode, never touched by open_store.
+            let connection = Connection::open(&store_path).expect("store should open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE future_data (payload TEXT NOT NULL);
+                     INSERT INTO future_data (payload) VALUES ('from the future');",
+                )
+                .expect("future store should be prepared");
+            connection
+                .pragma_update(None, "user_version", future_version)
+                .expect("user_version should be writable");
+        }
+        let original_bytes = fs::read(&store_path).expect("store bytes should be readable");
+        let original_mode = file_mode(&store_path);
 
         let error = open_store(&store_path).expect_err("newer store should not open");
 
@@ -317,10 +349,31 @@ mod tests {
             "error should explain the version mismatch, got {error}"
         );
         assert_eq!(user_version(&store_path), future_version);
-        let sessions: i64 = Connection::open(&store_path)
-            .expect("store should open")
-            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
-            .expect("sessions should be counted");
-        assert_eq!(sessions, 1);
+        assert_eq!(
+            fs::read(&store_path).expect("store bytes should be readable"),
+            original_bytes,
+            "a rejected store's bytes must be untouched"
+        );
+        assert_eq!(
+            file_mode(&store_path),
+            original_mode,
+            "a rejected store's permissions must be untouched"
+        );
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = store_path.clone().into_os_string();
+            sidecar.push(suffix);
+            assert!(
+                !Path::new(&sidecar).exists(),
+                "a rejected store must not gain a {suffix} sidecar"
+            );
+        }
+    }
+
+    fn file_mode(path: &Path) -> u32 {
+        fs::symlink_metadata(path)
+            .expect("metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777
     }
 }

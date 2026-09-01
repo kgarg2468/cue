@@ -26,3 +26,16 @@ failures:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.50s
 
 error: test failed, to rerun pass `--test persistence`
+== review-fix red evidence (cycle 19) ==
+failures:
+    store::tests::opening_a_newer_store_fails_without_touching_the_data
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+failures:
+    escape_heavy_titles_cannot_produce_an_oversized_create_response
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `--test persistence`

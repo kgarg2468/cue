@@ -15,7 +15,7 @@ cleanup() {
     kill "$backend_pid" 2>/dev/null || true
     wait "$backend_pid" 2>/dev/null || true
   fi
-  rm -f "$socket_path"
+  rm -f "$socket_path" "$runtime_directory"/store.sqlite*
   rmdir "$runtime_directory" 2>/dev/null || true
   return "$exit_code"
 }
@@ -26,7 +26,7 @@ mkdir -p "$module_cache_path"
 export CLANG_MODULE_CACHE_PATH="$module_cache_path"
 cargo build --release -p capture_delegate_backend
 swift build -c release --disable-sandbox
-"$backend_binary" --socket "$socket_path" &
+"$backend_binary" --socket "$socket_path" --store "$runtime_directory/store.sqlite" &
 backend_pid=$!
 
 for _ in {1..100}; do
