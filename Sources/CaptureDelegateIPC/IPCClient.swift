@@ -82,6 +82,43 @@ public struct SourceListPage: Equatable {
     }
 }
 
+/// One span of spoken text inside a session's timeline, as the transcript recorded it.
+public struct TranscriptSegment: Equatable {
+    public let id: String
+    public let sessionID: String
+    public let startMilliseconds: Int
+    public let endMilliseconds: Int
+    /// Nil for an unattributed segment; the backend omits the field entirely.
+    public let speaker: String?
+    public let text: String
+
+    public init(
+        id: String,
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) {
+        self.id = id
+        self.sessionID = sessionID
+        self.startMilliseconds = startMilliseconds
+        self.endMilliseconds = endMilliseconds
+        self.speaker = speaker
+        self.text = text
+    }
+}
+
+public struct TranscriptPage: Equatable {
+    public let segments: [TranscriptSegment]
+    public let truncated: Bool
+
+    public init(segments: [TranscriptSegment], truncated: Bool) {
+        self.segments = segments
+        self.truncated = truncated
+    }
+}
+
 /// A user-placed moment inside one session's timeline, with the kind of attention it deserves.
 public struct Marker: Equatable {
     public let id: String
@@ -286,6 +323,38 @@ public enum IPCClient {
         return try decodeListSourcesResponse(readBoundedResponseLine(from: descriptor))
     }
 
+    public static func addTranscriptSegment(
+        socketPath: String,
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) throws -> TranscriptSegment {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeAddTranscriptSegmentRequest(
+            sessionID: sessionID,
+            startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds,
+            speaker: speaker,
+            text: text,
+            to: descriptor
+        )
+        return try decodeAddTranscriptSegmentResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listTranscript(socketPath: String, sessionID: String) throws
+        -> TranscriptPage
+    {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListTranscriptRequest(sessionID: sessionID, to: descriptor)
+        return try decodeListTranscriptResponse(readBoundedResponseLine(from: descriptor))
+    }
+
     public static func addMarker(
         socketPath: String,
         sessionID: String,
@@ -479,6 +548,25 @@ public enum IPCClient {
         "{\"version\":1,\"type\":\"list_sources\",\"session_id\":\(jsonString(sessionID))}\n"
     }
 
+    public static func addTranscriptSegmentRequest(
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String? = nil,
+        text: String
+    ) -> String {
+        // An unattributed segment omits the key; an explicit null is rejected by the backend.
+        let speakerField = speaker.map { ",\"speaker\":\(jsonString($0))" } ?? ""
+        return "{\"version\":1,\"type\":\"add_transcript_segment\","
+            + "\"session_id\":\(jsonString(sessionID)),"
+            + "\"start_ms\":\(startMilliseconds),\"end_ms\":\(endMilliseconds)\(speakerField),"
+            + "\"text\":\(jsonString(text))}\n"
+    }
+
+    public static func listTranscriptRequest(sessionID: String) -> String {
+        "{\"version\":1,\"type\":\"list_transcript\",\"session_id\":\(jsonString(sessionID))}\n"
+    }
+
     public static func addMarkerRequest(
         sessionID: String,
         atMilliseconds: Int,
@@ -642,6 +730,32 @@ public enum IPCClient {
     static func writeListSourcesRequest(sessionID: String, to descriptor: Int32) throws {
         try suppressSIGPIPE(on: descriptor)
         try write(Array(listSourcesRequest(sessionID: sessionID).utf8), to: descriptor)
+    }
+
+    static func writeAddTranscriptSegmentRequest(
+        sessionID: String,
+        startMilliseconds: Int,
+        endMilliseconds: Int,
+        speaker: String?,
+        text: String,
+        to descriptor: Int32
+    ) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(
+            Array(
+                addTranscriptSegmentRequest(
+                    sessionID: sessionID,
+                    startMilliseconds: startMilliseconds,
+                    endMilliseconds: endMilliseconds,
+                    speaker: speaker,
+                    text: text
+                ).utf8
+            ), to: descriptor)
+    }
+
+    static func writeListTranscriptRequest(sessionID: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listTranscriptRequest(sessionID: sessionID).utf8), to: descriptor)
     }
 
     static func writeAddMarkerRequest(
@@ -1004,6 +1118,69 @@ public enum IPCClient {
         }
 
         return Source(
+            id: id,
+            sessionID: sessionID,
+            startMilliseconds: startMilliseconds,
+            endMilliseconds: endMilliseconds,
+            speaker: speaker,
+            text: text
+        )
+    }
+
+    static func decodeAddTranscriptSegmentResponse(_ response: String) throws -> TranscriptSegment {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "add_transcript_segment_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeTranscriptSegment(json["segment"])
+    }
+
+    static func decodeListTranscriptResponse(_ response: String) throws -> TranscriptPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_transcript_response",
+            let segments = json["segments"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return TranscriptPage(
+            segments: try segments.map { try decodeTranscriptSegment($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeTranscriptSegment(_ value: Any?) throws -> TranscriptSegment {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let sessionID = json["session_id"] as? String, !sessionID.isEmpty,
+            let startMilliseconds = json["start_ms"] as? Int,
+            let endMilliseconds = json["end_ms"] as? Int,
+            let text = json["text"] as? String
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        // An unattributed segment omits the field; a present speaker must still be a string.
+        let speaker: String?
+        if json["speaker"] == nil {
+            speaker = nil
+        } else if let value = json["speaker"] as? String {
+            speaker = value
+        } else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return TranscriptSegment(
             id: id,
             sessionID: sessionID,
             startMilliseconds: startMilliseconds,

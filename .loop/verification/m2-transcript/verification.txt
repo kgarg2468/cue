@@ -1,0 +1,35 @@
+# M2 slice 8 — durable transcript segments (S05-002, spec §5)
+
+## Contract
+- transcript_segments table (migration 7): id PK, session_id NOT NULL REFERENCES
+  sessions, start_ms/end_ms whole non-negative ms with end >= start, optional
+  speaker (omitted = unattributed; explicit null/blank/>256B invalid — add-path
+  double-Option convention), text trimmed non-blank <= 4096B.
+- add_transcript_segment / list_transcript mirror add_source / list_sources:
+  same validation order, unknown_session split, single-item list-envelope
+  admission probe before insert (accepted-implies-listable-alone), page limit
+  50 with limit+1 truncation probe, byte budget popping from the page END
+  (chronological list keeps its beginning).
+- Swift TranscriptSegment/TranscriptPage + addTranscriptSegment/listTranscript.
+
+## Red-first
+- 3 contract tests red vs origin/main f30ce51 (red-evidence.log).
+
+## Gates
+- 141 Rust tests (38 unit + 13 health_socket + 32 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; includes 48 Swift tests).
+- Runtime demo (runtime-demo.log): hand-built v6 store, user_version 6 -> 7 on
+  a real binary, segments added to the pre-migration session, inverted-span and
+  unknown-session rejections, chronological listing after restart, 0600 mode.
+
+## Routing
+- 1 opus-high implementation worker (native subagent), first-pass green within
+  its 4-file allowlist; diff-gated. Fable red contract tests + demo.
+
+## Worker-flagged bounds (recorded)
+- Index name transcript_by_session_and_start breaks the <table>_by_* prefix
+  convention (sources_by_session_and_start, markers_by_session_and_at); my
+  dispatch specified it verbatim. Cosmetic; renaming would need a migration.
+- Bare `swift test` requires CAPTURE_DELEGATE_BACKEND_BINARY env (pre-existing;
+  verify-m0.sh provides it).
