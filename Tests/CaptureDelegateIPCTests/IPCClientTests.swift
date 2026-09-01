@@ -269,6 +269,136 @@ func listSessionsRequestAndResponse() throws {
     }
 }
 
+@Test("add source request JSON is typed and its response decodes a source")
+func addSourceRequestAndResponse() throws {
+    let request = IPCClient.addSourceRequest(
+        sessionID: "session-1",
+        startMilliseconds: 872_000,
+        endMilliseconds: 884_000,
+        speaker: "Sarah",
+        text: "Check PR \"482\""
+    )
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "add_source")
+    #expect(json["session_id"] as? String == "session-1")
+    #expect(json["start_ms"] as? Int == 872_000)
+    #expect(json["end_ms"] as? Int == 884_000)
+    #expect(json["speaker"] as? String == "Sarah")
+    #expect(json["text"] as? String == "Check PR \"482\"")
+
+    let source = try IPCClient.decodeAddSourceResponse(
+        "{\"version\":1,\"type\":\"add_source_response\",\"source\":"
+            + "{\"id\":\"source-1\",\"session_id\":\"session-1\",\"start_ms\":872000,"
+            + "\"end_ms\":884000,\"speaker\":\"Sarah\",\"text\":\"Check PR 482\"}}\n"
+    )
+    #expect(
+        source
+            == Source(
+                id: "source-1",
+                sessionID: "session-1",
+                startMilliseconds: 872_000,
+                endMilliseconds: 884_000,
+                speaker: "Sarah",
+                text: "Check PR 482"
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddSourceResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_add_source\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddSourceResponse(
+            "{\"version\":1,\"type\":\"add_source_response\",\"source\":"
+                + "{\"id\":\"source-1\",\"session_id\":\"session-1\",\"start_ms\":0}}\n"
+        )
+    }
+}
+
+@Test("an unattributed source omits the speaker key in both directions")
+func unattributedSourcesOmitTheSpeakerKey() throws {
+    let request = IPCClient.addSourceRequest(
+        sessionID: "session-1",
+        startMilliseconds: 1000,
+        endMilliseconds: 1000,
+        text: "Zero-length unattributed span"
+    )
+    #expect(!request.contains("speaker"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["speaker"] == nil)
+
+    let source = try IPCClient.decodeAddSourceResponse(
+        "{\"version\":1,\"type\":\"add_source_response\",\"source\":"
+            + "{\"id\":\"source-1\",\"session_id\":\"session-1\",\"start_ms\":1000,"
+            + "\"end_ms\":1000,\"text\":\"Zero-length unattributed span\"}}\n"
+    )
+    #expect(source.speaker == nil)
+}
+
+@Test("a non-string speaker makes the source response invalid")
+func nonStringSpeakerIsRejected() throws {
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeAddSourceResponse(
+            "{\"version\":1,\"type\":\"add_source_response\",\"source\":"
+                + "{\"id\":\"source-1\",\"session_id\":\"session-1\",\"start_ms\":0,"
+                + "\"end_ms\":1,\"speaker\":7,\"text\":\"t\"}}\n"
+        )
+    }
+}
+
+@Test("list sources request JSON is typed and its response decodes ordered sources")
+func listSourcesRequestAndResponse() throws {
+    #expect(
+        IPCClient.listSourcesRequest(sessionID: "session-1")
+            == "{\"version\":1,\"type\":\"list_sources\",\"session_id\":\"session-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListSourcesResponse(
+        "{\"version\":1,\"type\":\"list_sources_response\",\"sources\":["
+            + "{\"id\":\"source-1\",\"session_id\":\"session-1\",\"start_ms\":1,\"end_ms\":2,"
+            + "\"text\":\"Earlier\"},"
+            + "{\"id\":\"source-2\",\"session_id\":\"session-1\",\"start_ms\":3,\"end_ms\":4,"
+            + "\"speaker\":\"Sarah\",\"text\":\"Later\"}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == SourceListPage(
+                sources: [
+                    Source(
+                        id: "source-1", sessionID: "session-1", startMilliseconds: 1,
+                        endMilliseconds: 2, text: "Earlier"),
+                    Source(
+                        id: "source-2", sessionID: "session-1", startMilliseconds: 3,
+                        endMilliseconds: 4, speaker: "Sarah", text: "Later"),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListSourcesResponse(
+        "{\"version\":1,\"type\":\"list_sources_response\",\"sources\":[],\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.sources.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSourcesResponse(
+            "{\"version\":1,\"type\":\"list_sources_response\",\"sources\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSourcesResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_session\"}\n"
+        )
+    }
+}
+
 @Test("closed peer returns an error without SIGPIPE termination")
 func closedPeerDoesNotRaiseSIGPIPE() throws {
     var descriptors = [Int32](repeating: -1, count: 2)

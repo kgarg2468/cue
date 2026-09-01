@@ -1,0 +1,14 @@
+# M2 source-refs slice — red evidence (cycle 21, 2026-09-01)
+
+3 new protocol tests vs merged main 9a931c4 (backend has no add_source/list_sources):
+
+
+
+failures:
+    invalid_source_references_are_rejected_before_persisting
+    list_sources_responses_are_bounded_with_truncation_reported
+    source_references_persist_chronologically_and_survive_a_restart
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.24s
+
+error: test failed, to rerun pass `--test persistence`

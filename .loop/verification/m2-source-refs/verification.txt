@@ -1,0 +1,47 @@
+# M2 source-refs slice — verification summary (cycle 21, 2026-09-01)
+
+Slice: persisted source references (S05-003) — spec §5 "Source reference":
+stable pointer with session_id, start_ms, end_ms, optional speaker, exact
+text. Migration 3 (sources table + chronological index), add_source /
+list_sources protocol, Swift Source/SourceListPage surface.
+
+## TDD evidence
+- red-evidence.log — the 3 new protocol tests fail against merged main 9a931c4
+  (backend has no add_source/list_sources).
+- cargo-test.log — full green: 33 lib + 13 health_socket + 12 persistence +
+  58 process_lifecycle (116 Rust); fmt and clippy -D warnings clean.
+- verify-m0.log — scripts/verify-m0.sh exit 0 (35 Swift tests, release builds,
+  swift format lint --strict, traceability validation).
+- runtime-demo.log — real release binary: hand-built v2 store migrates to
+  user_version 3 on open; sources added out of order to a migrated legacy
+  session with and without speaker; unknown session → unknown_session,
+  end<start → invalid_add_source; restart lists chronologically with speaker
+  omitted when unattributed; store/sidecars 0600.
+
+## Design decisions
+- Validation order: fields (invalid_add_source) → session existence
+  (unknown_session) → draft → frame-bound check → insert (the slice-1
+  ordering invariant, now also protecting sources).
+- start_ms/end_ms parsed via serde_json::Value (timeout precedent): floats,
+  negatives, and strings produce error frames, not dropped connections;
+  end_ms >= start_ms with zero-length spans allowed.
+- speaker mirrors kind: optional, omitted when unattributed, explicit null
+  rejected (double-Option deserialize_present), trimmed non-empty, <=256 bytes.
+- text: trimmed non-empty, <=4096 bytes (MAX_SOURCE_TEXT_BYTES).
+- list_sources pages chronologically (start_ms ASC, id ASC, limit 50, limit+1
+  truncation probe) and pops from the END under the byte budget so the page
+  always starts at the session's chronological beginning.
+- Missing or unknown session_id on list_sources → unknown_session.
+
+## Security invariants checked
+- Protocol change additive; unknown sessions and malformed fields rejected
+  before any persistence; frames stay under the 8 KiB bound.
+- foreign_keys ON backs the session existence check at the storage layer.
+- Store hygiene unchanged (0600 files); user store untouched by verification.
+
+## Known bounds carried forward (flagged by worker/orchestrator)
+- unknown_session conflates missing and nonexistent session_id on list_sources.
+- No ON DELETE CASCADE yet; a future delete-session slice must handle sources.
+- Escape-heavy rejection margin is ~50 bytes and sensitive to id length; any
+  id-format change must re-check the bound tests.
+- Bounds are enforced on trimmed values (title precedent).

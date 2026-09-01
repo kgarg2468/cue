@@ -1,0 +1,44 @@
+# Runtime demo — source references on the real release binary (Mon Aug 31 20:20:23 PDT 2026)
+
+## 1. Hand-built v2 store (sessions with kind, no sources table, user_version 2)
+user_version before: 2
+user_version after open: 3
+
+## 2. Add sources to the migrated legacy session (out of order, with/without speaker)
+{"version":1,"type":"add_source_response","source":{"id":"source-7c2a-18d114476c7e9490-0","session_id":"ses_01","start_ms":872000,"end_ms":884000,"speaker":"Sarah","text":"Krish, can you check PR 482 and see whether token refresh breaks?"}}
+{"version":1,"type":"add_source_response","source":{"id":"source-7c2a-18d114476cb0df90-1","session_id":"ses_01","start_ms":1000,"end_ms":4000,"text":"Unattributed opening remark"}}
+
+## 3. Invalid sources rejected
+{"version":1,"type":"error","code":"unknown_session"}
+{"version":1,"type":"error","code":"invalid_add_source"}
+
+## 4. Restart; chronological list survives
+{
+    "version": 1,
+    "type": "list_sources_response",
+    "sources": [
+        {
+            "id": "source-7c2a-18d114476cb0df90-1",
+            "session_id": "ses_01",
+            "start_ms": 1000,
+            "end_ms": 4000,
+            "text": "Unattributed opening remark"
+        },
+        {
+            "id": "source-7c2a-18d114476c7e9490-0",
+            "session_id": "ses_01",
+            "start_ms": 872000,
+            "end_ms": 884000,
+            "speaker": "Sarah",
+            "text": "Krish, can you check PR 482 and see whether token refresh breaks?"
+        }
+    ],
+    "truncated": false
+}
+
+## 5. Store hygiene
+total 176
+-rw-------@ 1 krishgarg  wheel  12288 Aug 31 20:20 store.sqlite
+-rw-------@ 1 krishgarg  wheel  32768 Aug 31 20:20 store.sqlite-shm
+-rw-------@ 1 krishgarg  wheel  41232 Aug 31 20:20 store.sqlite-wal
+-rw-------@ 1 krishgarg  wheel      0 Aug 31 20:20 store.sqlite.lock

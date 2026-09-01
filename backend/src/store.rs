@@ -20,13 +20,24 @@ const MIGRATIONS: &[&str] = &[
     )",
     // Categorization is optional, so sessions written before this step stay valid with a NULL kind.
     "ALTER TABLE sessions ADD COLUMN kind TEXT",
+    // A source reference is a stable pointer back into a session's timeline; the index
+    // serves the only read path, which walks one session chronologically.
+    "CREATE TABLE sources (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL,
+        speaker TEXT,
+        text TEXT NOT NULL
+    );
+    CREATE INDEX sources_by_session_and_start ON sources (session_id, start_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
-static SESSION_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static RECORD_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct Session {
@@ -37,6 +48,19 @@ pub(crate) struct Session {
     /// Absent for an uncategorized session; the protocol omits the field entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kind: Option<String>,
+}
+
+/// A stable pointer into one session's timeline, with the exact text it refers to.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Source {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    /// Absent when the speaker is unattributed; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker: Option<String>,
+    pub(crate) text: String,
 }
 
 /// Durable state shared by every connection thread; SQLite serializes writes behind the mutex.
@@ -56,6 +80,27 @@ impl Session {
             created_at_ms,
             updated_at_ms: created_at_ms,
             kind: kind.map(str::to_owned),
+        }
+    }
+}
+
+impl Source {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens.
+    pub(crate) fn draft(
+        session_id: &str,
+        start_ms: i64,
+        end_ms: i64,
+        speaker: Option<&str>,
+        text: &str,
+    ) -> Source {
+        Source {
+            id: record_id("source"),
+            session_id: session_id.to_owned(),
+            start_ms,
+            end_ms,
+            speaker: speaker.map(str::to_owned),
+            text: text.to_owned(),
         }
     }
 }
@@ -107,6 +152,59 @@ impl Store {
             .collect::<rusqlite::Result<Vec<Session>>>()
             .map_err(io::Error::other)?;
         Ok(sessions)
+    }
+
+    pub(crate) fn insert_source(&self, source: &Source) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO sources (id, session_id, start_ms, end_ms, speaker, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    source.id,
+                    source.session_id,
+                    source.start_ms,
+                    source.end_ms,
+                    source.speaker,
+                    source.text
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub(crate) fn session_exists(&self, id: &str) -> io::Result<bool> {
+        self.connection()
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1", [id], |_| Ok(()))
+            .map(|()| true)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                error => Err(io::Error::other(error)),
+            })
+    }
+
+    pub(crate) fn list_sources(&self, session_id: &str, limit: usize) -> io::Result<Vec<Source>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, start_ms, end_ms, speaker, text FROM sources
+                 WHERE session_id = ?1 ORDER BY start_ms ASC, id ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let sources = statement
+            .query_map(params![session_id, limit as i64], |row| {
+                Ok(Source {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    start_ms: row.get(2)?,
+                    end_ms: row.get(3)?,
+                    speaker: row.get(4)?,
+                    text: row.get(5)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<Source>>>()
+            .map_err(io::Error::other)?;
+        Ok(sources)
     }
 
     fn connection(&self) -> MutexGuard<'_, Connection> {
@@ -271,13 +369,18 @@ fn apply_migrations(connection: &Connection) -> io::Result<()> {
 }
 
 fn session_id() -> String {
+    record_id("session")
+}
+
+/// Process, wall clock, and sequence together keep ids unique across restarts and threads.
+fn record_id(prefix: &str) -> String {
     let nanoseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let sequence = SESSION_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sequence = RECORD_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
-        "session-{:x}-{nanoseconds:x}-{sequence:x}",
+        "{prefix}-{:x}-{nanoseconds:x}-{sequence:x}",
         std::process::id()
     )
 }
@@ -407,6 +510,41 @@ mod tests {
                 kind: None,
             }],
             "a session written before kinds existed must survive as uncategorized"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_two_store_adds_sources_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before source references existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..2] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before sources', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 2)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert!(
+            store
+                .list_sources("session-legacy", 1)
+                .expect("sources should list")
+                .is_empty(),
+            "a session written before sources existed must survive with no sources"
         );
     }
 
