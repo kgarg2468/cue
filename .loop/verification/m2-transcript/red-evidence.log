@@ -1,0 +1,11 @@
+test invalid_transcript_segments_are_rejected_before_persisting ... FAILED
+test transcript_segments_persist_chronologically_and_survive_a_restart ... FAILED
+test every_accepted_transcript_segment_is_singly_listable ... FAILED
+thread 'invalid_transcript_segments_are_rejected_before_persisting' (24951509) panicked at backend/tests/persistence.rs:1951:9:
+assertion `left == right` failed
+thread 'transcript_segments_persist_chronologically_and_survive_a_restart' (24951510) panicked at backend/tests/persistence.rs:1823:5:
+assertion `left == right` failed: segment should be accepted, got {"code":"unknown_request_type","type":"error","version":1}
+thread 'every_accepted_transcript_segment_is_singly_listable' (24951508) panicked at backend/tests/persistence.rs:1987:13:
+assertion `left == right` failed
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.27s
+reds vs f30ce51 Record merged M2 session-note slice (cycle 25 closeout) (#46)

@@ -1,0 +1,65 @@
+pre-migration user_version: 6
+post-migration user_version: 7
+legacy session: ses_legacy01 Pre-migration meeting
+--- segment on pre-migration session
+{
+ "version": 1,
+ "type": "add_transcript_segment_response",
+ "segment": {
+  "id": "segment-10803-18d120102bd8c288-0",
+  "session_id": "ses_legacy01",
+  "start_ms": 872000,
+  "end_ms": 884000,
+  "speaker": "Sarah",
+  "text": "Krish, can you check PR 482 and see whether token refresh breaks?"
+ }
+}
+--- speakerless segment
+{
+ "version": 1,
+ "type": "add_transcript_segment_response",
+ "segment": {
+  "id": "segment-10803-18d120102be735c0-1",
+  "session_id": "ses_legacy01",
+  "start_ms": 1000,
+  "end_ms": 1000,
+  "text": "Earlier, unattributed"
+ }
+}
+--- inverted span rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_add_transcript_segment"
+}
+--- unknown session rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "unknown_session"
+}
+--- chronological transcript after restart
+{
+ "version": 1,
+ "type": "list_transcript_response",
+ "segments": [
+  {
+   "id": "segment-10803-18d120102be735c0-1",
+   "session_id": "ses_legacy01",
+   "start_ms": 1000,
+   "end_ms": 1000,
+   "text": "Earlier, unattributed"
+  },
+  {
+   "id": "segment-10803-18d120102bd8c288-0",
+   "session_id": "ses_legacy01",
+   "start_ms": 872000,
+   "end_ms": 884000,
+   "speaker": "Sarah",
+   "text": "Krish, can you check PR 482 and see whether token refresh breaks?"
+  }
+ ],
+ "truncated": false
+}
+store mode: 0o600
+DEMO OK

@@ -1,6 +1,6 @@
 mod store;
 
-use crate::store::{Marker, RunRecord, Session, Source, Store};
+use crate::store::{Marker, RunRecord, Session, Source, Store, TranscriptSegment};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -59,6 +59,9 @@ const MARKER_KINDS: [&str; 6] = [
 ];
 const MAX_MARKER_NOTE_BYTES: usize = 4096;
 const LIST_MARKERS_LIMIT: usize = 50;
+const MAX_TRANSCRIPT_TEXT_BYTES: usize = 4096;
+const MAX_TRANSCRIPT_SPEAKER_BYTES: usize = 256;
+const LIST_TRANSCRIPT_LIMIT: usize = 50;
 const LIST_RUNS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
@@ -203,6 +206,23 @@ struct ListMarkersResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     markers: &'a [Marker],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct AddTranscriptSegmentResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    segment: &'a TranscriptSegment,
+}
+
+#[derive(Serialize)]
+struct ListTranscriptResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    segments: &'a [TranscriptSegment],
     truncated: bool,
 }
 
@@ -1482,6 +1502,132 @@ fn handle_connection(
                         // Dropping from the end keeps the chronological start of the page.
                         Err(_) if !markers.is_empty() => {
                             markers.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "add_transcript_segment" => {
+                // A span is stated in whole non-negative milliseconds; a float, a negative,
+                // or a string is a rejected field, not a rejected connection.
+                let (Some(session_id), Some(start_ms), Some(end_ms)) = (
+                    // A segment always names its session, so an omitted and an explicitly null
+                    // session_id are the same missing field.
+                    request.session_id.flatten(),
+                    request.start_ms.as_ref().and_then(milliseconds_field),
+                    request.end_ms.as_ref().and_then(milliseconds_field),
+                ) else {
+                    return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                };
+                if end_ms < start_ms {
+                    return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                }
+                let Some(text) = request
+                    .text
+                    .map(|text| text.trim().to_owned())
+                    .filter(|text| !text.is_empty() && text.len() <= MAX_TRANSCRIPT_TEXT_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                };
+                let speaker = match request.speaker {
+                    None => None,
+                    // A blank or explicit-null speaker is not how an unattributed segment is
+                    // stated; only omitting the field is.
+                    Some(Some(speaker)) => {
+                        let speaker = speaker.trim().to_owned();
+                        if speaker.is_empty() || speaker.len() > MAX_TRANSCRIPT_SPEAKER_BYTES {
+                            return write_protocol_error(
+                                &mut stream,
+                                "invalid_add_transcript_segment",
+                            );
+                        }
+                        Some(speaker)
+                    }
+                    Some(None) => {
+                        return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                    }
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                let segment = TranscriptSegment::draft(
+                    &session_id,
+                    start_ms,
+                    end_ms,
+                    speaker.as_deref(),
+                    &text,
+                );
+                let response = AddTranscriptSegmentResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "add_transcript_segment_response",
+                    segment: &segment,
+                };
+                // Escape-heavy text can pass the raw byte check yet serialize past the
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted segment can never persist yet be unlistable.
+                let list_probe = ListTranscriptResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_transcript_response",
+                    segments: std::slice::from_ref(&segment),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                }
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_add_transcript_segment");
+                };
+                if let Err(error) = store.insert_transcript_segment(&segment) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_transcript" => {
+                // A page can only be scoped to a session that exists, so a missing and an
+                // unknown session_id are the same answer, and so is an explicitly null one.
+                let Some(session_id) = request.session_id.flatten() else {
+                    return write_protocol_error(&mut stream, "unknown_session");
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut segments =
+                    match store.list_transcript(&session_id, LIST_TRANSCRIPT_LIMIT + 1) {
+                        Ok(segments) => segments,
+                        Err(error) => {
+                            eprintln!("store read error: {error}");
+                            return write_protocol_error(&mut stream, "store_unavailable");
+                        }
+                    };
+                let mut truncated = segments.len() > LIST_TRANSCRIPT_LIMIT;
+                segments.truncate(LIST_TRANSCRIPT_LIMIT);
+                let frame = loop {
+                    let response = ListTranscriptResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_transcript_response",
+                        segments: &segments,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the chronological start of the page.
+                        Err(_) if !segments.is_empty() => {
+                            segments.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),

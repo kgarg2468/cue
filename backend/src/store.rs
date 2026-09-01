@@ -59,6 +59,17 @@ const MIGRATIONS: &[&str] = &[
     // A session's note is optional and editable, so sessions written before this step stay
     // valid with a NULL note.
     "ALTER TABLE sessions ADD COLUMN note TEXT",
+    // A transcript segment is one span of spoken text inside a session's timeline; the index
+    // serves the only read path, which walks one session chronologically.
+    "CREATE TABLE transcript_segments (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL,
+        speaker TEXT,
+        text TEXT NOT NULL
+    );
+    CREATE INDEX transcript_by_session_and_start ON transcript_segments (session_id, start_ms, id)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -84,6 +95,19 @@ pub(crate) struct Session {
 /// A stable pointer into one session's timeline, with the exact text it refers to.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct Source {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    /// Absent when the speaker is unattributed; the protocol omits the field entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker: Option<String>,
+    pub(crate) text: String,
+}
+
+/// One span of spoken text inside a session's timeline, as the transcript recorded it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct TranscriptSegment {
     pub(crate) id: String,
     pub(crate) session_id: String,
     pub(crate) start_ms: i64,
@@ -161,6 +185,27 @@ impl Source {
     ) -> Source {
         Source {
             id: record_id("source"),
+            session_id: session_id.to_owned(),
+            start_ms,
+            end_ms,
+            speaker: speaker.map(str::to_owned),
+            text: text.to_owned(),
+        }
+    }
+}
+
+impl TranscriptSegment {
+    /// A fully formed record that has not been persisted yet, so callers can
+    /// bound-check the response frame before anything durable happens.
+    pub(crate) fn draft(
+        session_id: &str,
+        start_ms: i64,
+        end_ms: i64,
+        speaker: Option<&str>,
+        text: &str,
+    ) -> TranscriptSegment {
+        TranscriptSegment {
+            id: record_id("segment"),
             session_id: session_id.to_owned(),
             start_ms,
             end_ms,
@@ -349,6 +394,53 @@ impl Store {
             .collect::<rusqlite::Result<Vec<Source>>>()
             .map_err(io::Error::other)?;
         Ok(sources)
+    }
+
+    pub(crate) fn insert_transcript_segment(&self, segment: &TranscriptSegment) -> io::Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO transcript_segments (id, session_id, start_ms, end_ms, speaker, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    segment.id,
+                    segment.session_id,
+                    segment.start_ms,
+                    segment.end_ms,
+                    segment.speaker,
+                    segment.text
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub(crate) fn list_transcript(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<TranscriptSegment>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, session_id, start_ms, end_ms, speaker, text FROM transcript_segments
+                 WHERE session_id = ?1 ORDER BY start_ms ASC, id ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let segments = statement
+            .query_map(params![session_id, limit as i64], |row| {
+                Ok(TranscriptSegment {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    start_ms: row.get(2)?,
+                    end_ms: row.get(3)?,
+                    speaker: row.get(4)?,
+                    text: row.get(5)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<TranscriptSegment>>>()
+            .map_err(io::Error::other)?;
+        Ok(segments)
     }
 
     pub(crate) fn insert_marker(&self, marker: &Marker) -> io::Result<()> {
@@ -967,6 +1059,122 @@ mod tests {
                 .and_then(|session| session.note.clone()),
             Some("Follow up".to_owned()),
             "a note written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn transcript_segments_list_chronologically_for_their_own_session() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let session = store
+            .create_session("Sprint planning")
+            .expect("session should be created");
+        let other = store
+            .create_session("Unrelated session")
+            .expect("session should be created");
+
+        // Inserted out of order to pin chronological listing.
+        let late = super::TranscriptSegment::draft(
+            &session.id,
+            872_000,
+            884_000,
+            Some("Sarah"),
+            "Can you check PR 482?",
+        );
+        store
+            .insert_transcript_segment(&late)
+            .expect("segment should insert");
+        let early = super::TranscriptSegment::draft(&session.id, 1_000, 1_000, None, "Zero-length");
+        store
+            .insert_transcript_segment(&early)
+            .expect("segment should insert");
+        let elsewhere =
+            super::TranscriptSegment::draft(&other.id, 5, 6, None, "Belongs to the other session");
+        store
+            .insert_transcript_segment(&elsewhere)
+            .expect("segment should insert");
+
+        assert_eq!(
+            store
+                .list_transcript(&session.id, 10)
+                .expect("transcript should list"),
+            vec![early, late],
+            "a transcript lists chronologically for its own session only"
+        );
+        assert_eq!(
+            store
+                .list_transcript(&session.id, 1)
+                .expect("transcript should list")
+                .len(),
+            1,
+            "the limit bounds the page"
+        );
+        assert_eq!(
+            store
+                .list_transcript(&other.id, 10)
+                .expect("transcript should list"),
+            vec![elsewhere]
+        );
+    }
+
+    #[test]
+    fn opening_a_version_six_store_adds_transcripts_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before transcript segments existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..6] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                     VALUES ('session-legacy', 'Before transcripts', 7, 7);",
+                )
+                .expect("legacy session should be inserted");
+            connection
+                .pragma_update(None, "user_version", 6)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_sessions(2)
+                .expect("sessions should list")
+                .first()
+                .map(|session| session.title.clone()),
+            Some("Before transcripts".to_owned()),
+            "a session written before transcripts existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_transcript("session-legacy", 1)
+                .expect("transcript should list")
+                .is_empty(),
+            "a session written before transcripts existed must survive with no segments"
+        );
+        let segment = super::TranscriptSegment::draft(
+            "session-legacy",
+            872_000,
+            884_000,
+            Some("Sarah"),
+            "Written after the upgrade",
+        );
+        store
+            .insert_transcript_segment(&segment)
+            .expect("segment should insert");
+        assert_eq!(
+            store
+                .list_transcript("session-legacy", 2)
+                .expect("transcript should list"),
+            vec![segment],
+            "a segment written after the upgrade must round-trip"
         );
     }
 
