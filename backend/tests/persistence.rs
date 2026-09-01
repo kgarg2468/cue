@@ -954,9 +954,11 @@ fn a_duplicate_launch_cannot_interrupt_a_live_backends_runs() {
 
     // Reap the sleep worker while the backend is still its parent; the
     // teardown SIGKILL alone would orphan it for the rest of its timeout.
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-P", &backend.child.id().to_string()])
-        .status();
+    let reaped = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string(), "sleep"])
+        .status()
+        .expect("pkill should run");
+    assert!(reaped.success(), "the sleep worker should be reaped");
 }
 
 #[test]
@@ -1004,9 +1006,11 @@ fn a_second_backend_on_the_same_store_cannot_start() {
 
     // Reap the sleep worker while the backend is still its parent; the
     // teardown SIGKILL alone would orphan it for the rest of its timeout.
-    let _ = Command::new("/usr/bin/pkill")
-        .args(["-P", &backend.child.id().to_string()])
-        .status();
+    let reaped = Command::new("/usr/bin/pkill")
+        .args(["-P", &backend.child.id().to_string(), "sleep"])
+        .status()
+        .expect("pkill should run");
+    assert!(reaped.success(), "the sleep worker should be reaped");
 }
 
 fn assert_takeover_refused(store_path: &Path, socket_path: &Path) {
