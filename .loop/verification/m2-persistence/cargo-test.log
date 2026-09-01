@@ -1,0 +1,40 @@
+test secrets_are_redacted_from_streamed_output ... ok
+test pty_run_times_out_like_pipe_runs ... ok
+test capacity_exhausted_input_keeps_the_control_connection_usable ... ok
+test send_input_and_close_stdin_drive_a_cat_run_to_natural_exit ... ok
+test spawn_failure_emits_no_metadata_frame ... ok
+test sigint_kills_active_run_groups ... ok
+test sigterm_kills_active_run_groups_and_removes_socket ... ok
+test slow_reader_does_not_lose_frames ... ok
+test input_wait_backpressure_does_not_wedge_cancel ... ok
+test input_wait_does_not_fire_for_busy_silent_run ... ok
+test u64_max_timeout_allows_a_completed_process ... ok
+test input_wait_absent_field_emits_no_waiting_frames ... ok
+test timed_out_runs_release_all_process_capacity ... ok
+test timeout_kills_the_direct_child_emits_one_terminal_last_and_releases_capacity ... ok
+test input_wait_suppressed_while_paused ... ok
+test concurrent_worktree_runs_get_distinct_branches ... ok
+Preparing worktree (new branch 'capture-delegate/run-startup-orphan-3')
+HEAD is now at 7a36111 initial
+Preparing worktree (new branch 'capture-delegate/run-startup-live-3')
+HEAD is now at 7a36111 initial
+Deleted branch capture-delegate/run-startup-live-3 (was 7a36111).
+test startup_removes_dead_owner_worktrees_without_touching_live_owners ... ok
+test worktree_cancel_still_cleans_up ... ok
+test worktree_failure_emits_structured_terminal_frame ... ok
+test streaming_write_survives_backpressure_longer_than_the_request_timeout ... ok
+test worktree_request_validation ... ok
+test worktree_run_executes_in_an_isolated_worktree_and_cleans_up ... ok
+test worktree_spawn_failure_still_cleans_up ... ok
+test worktree_timeout_still_cleans_up ... ok
+test timeout_kills_descendant_processes ... ok
+test paused_run_still_times_out_and_kills_its_process_group ... ok
+
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.48s
+
+   Doc-tests capture_delegate_backend
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

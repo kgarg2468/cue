@@ -1,0 +1,36 @@
+# M2 persistence slice 1 — verification summary (cycle 19, 2026-08-31/09-01)
+
+Slice: SQLite store bootstrap + durable Session records over the versioned socket
+protocol (`create_session` / `list_sessions`), bounded list responses, store/CLI
+plumbing, Swift client surface, and test isolation for the default store path.
+
+## TDD evidence
+- red-evidence.log — the 5 new protocol tests in backend/tests/persistence.rs fail
+  0/5 against pristine origin/main 5983c33 (run in a detached worktree), and the
+  bounded-list test failed against the pre-fix implementation before the
+  LIMIT/truncation change was written.
+- cargo-test.log — full green: 29 lib + 13 health_socket + 6 persistence +
+  58 process_lifecycle (106 Rust).
+- verify-m0-parity.log — scripts/verify-m0.sh exit 0: traceability check, release
+  builds, cargo fmt/clippy, swift format lint --strict, 28 Swift tests.
+- runtime-demo.log — real release binary: two sessions created over the socket,
+  empty title rejected with invalid_create_session, backend SIGTERMed, restarted
+  on the same --store, list_sessions returns both sessions newest-first with
+  truncated:false; store file 0600 inside 0700 directory.
+
+## Security invariants checked
+- Store file 0600, parent directory 0700 (asserted in tests and shown in demo).
+- No secret values in the store (sessions hold id/title/timestamps only).
+- Socket permissions and existing message types untouched; protocol change additive.
+- list_sessions frames byte-bounded (<8 KiB) with explicit truncated flag; count
+  cap 50 (LIST_SESSIONS_LIMIT), fetch of limit+1 makes truncation observable.
+- Opening a store with a newer user_version fails without touching data.
+- Existing test suites now pass --store, so `cargo test`/`swift test` no longer
+  create ~/Library/Application Support/CaptureDelegate on developer machines
+  (pre-existing user store verified untouched: mtime 2026-07-19 before and after).
+
+## Known bounds carried forward (deferred, recorded for the M2 ledger)
+- Pagination (cursor past the first 50) is a follow-up M2 slice; truncated:true
+  tells clients more exist.
+- Session schema is intentionally minimal (id/title/timestamps); session types,
+  sources, and rich fields arrive with later M2 slices per S05-001/S05-002.

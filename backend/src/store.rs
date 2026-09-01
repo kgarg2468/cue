@@ -1,0 +1,326 @@
+use rusqlite::{Connection, params};
+use serde::Serialize;
+use std::fs;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Forward-only schema steps; a step's index plus one is the `user_version` it installs.
+const MIGRATIONS: &[&str] = &["CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+    )"];
+
+/// How long a write waits for another process holding the store's write lock.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+
+static SESSION_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Session {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+}
+
+/// Durable state shared by every connection thread; SQLite serializes writes behind the mutex.
+#[derive(Clone, Debug)]
+pub(crate) struct Store {
+    connection: Arc<Mutex<Connection>>,
+}
+
+impl Store {
+    pub(crate) fn create_session(&self, title: &str) -> io::Result<Session> {
+        let created_at_ms = now_milliseconds();
+        let session = Session {
+            id: session_id(),
+            title: title.to_owned(),
+            created_at_ms,
+            updated_at_ms: created_at_ms,
+        };
+        self.connection()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    session.id,
+                    session.title,
+                    session.created_at_ms,
+                    session.updated_at_ms
+                ],
+            )
+            .map_err(io::Error::other)?;
+        Ok(session)
+    }
+
+    pub(crate) fn list_sessions(&self, limit: usize) -> io::Result<Vec<Session>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, title, created_at_ms, updated_at_ms FROM sessions
+                 ORDER BY created_at_ms DESC, id DESC LIMIT ?1",
+            )
+            .map_err(io::Error::other)?;
+        let sessions = statement
+            .query_map([limit as i64], |row| {
+                Ok(Session {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                    updated_at_ms: row.get(3)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<Session>>>()
+            .map_err(io::Error::other)?;
+        Ok(sessions)
+    }
+
+    fn connection(&self) -> MutexGuard<'_, Connection> {
+        self.connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+pub(crate) fn open_store(path: &Path) -> io::Result<Store> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+
+    let connection = Connection::open(path).map_err(io::Error::other)?;
+    // Tighten the freshly created database before WAL sidecars inherit its mode.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(io::Error::other)?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(io::Error::other)?;
+    enable_write_ahead_logging(&connection)?;
+    migrate(&connection)?;
+
+    Ok(Store {
+        connection: Arc::new(Mutex::new(connection)),
+    })
+}
+
+/// Switching journal modes needs a brief exclusive lock that SQLite reports as busy instead of
+/// honoring the busy timeout, so first-open races between processes are retried here.
+fn enable_write_ahead_logging(connection: &Connection) -> io::Result<()> {
+    let deadline = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        let attempt = connection
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+            .map_err(io::Error::other);
+        let expired = Instant::now() >= deadline;
+        match attempt {
+            Ok(journal_mode) if journal_mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(journal_mode) if expired => {
+                return Err(io::Error::other(format!(
+                    "store journal mode must be WAL, got {journal_mode}"
+                )));
+            }
+            Err(error) if expired => return Err(error),
+            _ => thread::sleep(BUSY_RETRY_INTERVAL),
+        }
+    }
+}
+
+/// Migrated store that never touches the filesystem, for tests that only need the protocol surface.
+#[cfg(test)]
+pub(crate) fn in_memory_store() -> io::Result<Store> {
+    let connection = Connection::open_in_memory().map_err(io::Error::other)?;
+    migrate(&connection)?;
+    Ok(Store {
+        connection: Arc::new(Mutex::new(connection)),
+    })
+}
+
+fn migrate(connection: &Connection) -> io::Result<()> {
+    // The schema check runs inside the write transaction so that two processes opening the same
+    // store concurrently cannot both decide to apply the same migration.
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(io::Error::other)?;
+    match apply_migrations(connection) {
+        Ok(()) => connection
+            .execute_batch("COMMIT")
+            .map_err(io::Error::other)
+            .inspect_err(|_| {
+                let _ = connection.execute_batch("ROLLBACK");
+            }),
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn apply_migrations(connection: &Connection) -> io::Result<()> {
+    let user_version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(io::Error::other)?;
+    let Ok(applied) = usize::try_from(user_version) else {
+        return Err(io::Error::other(format!(
+            "store schema version {user_version} is not a known version"
+        )));
+    };
+    if applied > MIGRATIONS.len() {
+        return Err(io::Error::other(format!(
+            "store schema version {applied} is newer than the supported version {}; \
+             refusing to modify it",
+            MIGRATIONS.len()
+        )));
+    }
+
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
+        let next_version = index + 1;
+        connection
+            .execute_batch(&format!(
+                "{migration}; PRAGMA user_version = {next_version};"
+            ))
+            .map_err(io::Error::other)?;
+    }
+
+    Ok(())
+}
+
+fn session_id() -> String {
+    let nanoseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let sequence = SESSION_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "session-{:x}-{nanoseconds:x}-{sequence:x}",
+        std::process::id()
+    )
+}
+
+fn now_milliseconds() -> i64 {
+    let milliseconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    i64::try_from(milliseconds).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MIGRATIONS, open_store};
+    use rusqlite::Connection;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STORE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct StoreFixture {
+        directory: PathBuf,
+    }
+
+    impl Drop for StoreFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    impl StoreFixture {
+        fn new() -> Self {
+            let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("backend should be inside repository")
+                .join("target")
+                .join(format!(
+                    "cs-{}-{}",
+                    std::process::id(),
+                    STORE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+            fs::create_dir_all(&directory).expect("store fixture directory should be created");
+            Self { directory }
+        }
+
+        fn store_path(&self) -> PathBuf {
+            self.directory.join("store.sqlite")
+        }
+    }
+
+    fn user_version(path: &std::path::Path) -> i64 {
+        Connection::open(path)
+            .expect("store should open")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version should be readable")
+    }
+
+    #[test]
+    fn opening_a_new_store_applies_every_migration() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+
+        assert_eq!(user_version(&fixture.store_path()), MIGRATIONS.len() as i64);
+        assert!(
+            store
+                .list_sessions(1)
+                .expect("sessions should list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reopening_a_store_does_not_re_run_migrations() {
+        let fixture = StoreFixture::new();
+        let session = open_store(&fixture.store_path())
+            .expect("store should open")
+            .create_session("Existing session")
+            .expect("session should be created");
+
+        let reopened = open_store(&fixture.store_path()).expect("store should reopen");
+
+        assert_eq!(user_version(&fixture.store_path()), MIGRATIONS.len() as i64);
+        assert_eq!(
+            reopened.list_sessions(2).expect("sessions should list"),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn opening_a_newer_store_fails_without_touching_the_data() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        open_store(&store_path)
+            .expect("store should open")
+            .create_session("Future session")
+            .expect("session should be created");
+        let future_version = MIGRATIONS.len() as i64 + 1;
+        Connection::open(&store_path)
+            .expect("store should open")
+            .pragma_update(None, "user_version", future_version)
+            .expect("user_version should be writable");
+
+        let error = open_store(&store_path).expect_err("newer store should not open");
+
+        assert!(
+            error.to_string().contains("newer"),
+            "error should explain the version mismatch, got {error}"
+        );
+        assert_eq!(user_version(&store_path), future_version);
+        let sessions: i64 = Connection::open(&store_path)
+            .expect("store should open")
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .expect("sessions should be counted");
+        assert_eq!(sessions, 1);
+    }
+}

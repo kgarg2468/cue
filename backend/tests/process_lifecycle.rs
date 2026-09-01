@@ -24,7 +24,7 @@ impl Drop for BackendProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.socket_path);
-        let _ = fs::remove_dir(&self.directory);
+        let _ = fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -43,10 +43,13 @@ fn start_backend() -> BackendProcess {
         std::process::id(),
         TEMP_SOCKET_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
+    let store_path = directory.join("store.sqlite");
     let mut child = Command::new(env!("CARGO_BIN_EXE_capture-delegate-backend"))
         .args([
             "--socket",
             socket_path.to_str().expect("socket path is UTF-8"),
+            "--store",
+            store_path.to_str().expect("store path is UTF-8"),
         ])
         .spawn()
         .expect("backend should start");

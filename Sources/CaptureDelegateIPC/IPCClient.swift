@@ -5,6 +5,36 @@ import Foundation
 public enum IPCClientError: Error, Equatable {
     case responseTooLarge
     case invalidProcessEvent
+    case invalidSessionResponse
+}
+
+public struct Session: Equatable {
+    public let id: String
+    public let title: String
+    public let createdAtMilliseconds: Int
+    public let updatedAtMilliseconds: Int
+
+    public init(
+        id: String,
+        title: String,
+        createdAtMilliseconds: Int,
+        updatedAtMilliseconds: Int
+    ) {
+        self.id = id
+        self.title = title
+        self.createdAtMilliseconds = createdAtMilliseconds
+        self.updatedAtMilliseconds = updatedAtMilliseconds
+    }
+}
+
+public struct SessionListPage: Equatable {
+    public let sessions: [Session]
+    public let truncated: Bool
+
+    public init(sessions: [Session], truncated: Bool) {
+        self.sessions = sessions
+        self.truncated = truncated
+    }
 }
 
 public enum ProcessOutputStream: String, Equatable {
@@ -67,6 +97,22 @@ public enum IPCClient {
         try writeHealthRequest(to: descriptor)
         let response = try readBoundedResponseLine(from: descriptor)
         return try validateHealthResponse(response)
+    }
+
+    public static func createSession(socketPath: String, title: String) throws -> Session {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeCreateSessionRequest(title: title, to: descriptor)
+        return try decodeCreateSessionResponse(readBoundedResponseLine(from: descriptor))
+    }
+
+    public static func listSessions(socketPath: String) throws -> SessionListPage {
+        let descriptor = try connect(to: socketPath)
+        defer { _ = Darwin.close(descriptor) }
+
+        try writeListSessionsRequest(to: descriptor)
+        return try decodeListSessionsResponse(readBoundedResponseLine(from: descriptor))
     }
 
     public static func cancelProcess(socketPath: String, runID: String) throws
@@ -192,6 +238,12 @@ public enum IPCClient {
             + "\(inputWaitDetectField)\(worktreeRepositoryField)}\n"
     }
 
+    public static let listSessionsRequest = "{\"version\":1,\"type\":\"list_sessions\"}\n"
+
+    public static func createSessionRequest(title: String) -> String {
+        "{\"version\":1,\"type\":\"create_session\",\"title\":\(jsonString(title))}\n"
+    }
+
     public static func cancelProcessRequest(runID: String) -> String {
         "{\"version\":1,\"type\":\"cancel_process\",\"run_id\":\(jsonString(runID))}\n"
     }
@@ -292,6 +344,16 @@ public enum IPCClient {
                     worktreeRepository: worktreeRepository
                 ).utf8
             ), to: descriptor)
+    }
+
+    static func writeCreateSessionRequest(title: String, to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(createSessionRequest(title: title).utf8), to: descriptor)
+    }
+
+    static func writeListSessionsRequest(to descriptor: Int32) throws {
+        try suppressSIGPIPE(on: descriptor)
+        try write(Array(listSessionsRequest.utf8), to: descriptor)
     }
 
     static func writeCancelProcessRequest(runID: String, to descriptor: Int32) throws {
@@ -484,6 +546,56 @@ public enum IPCClient {
         default:
             throw IPCClientError.invalidProcessEvent
         }
+    }
+
+    static func decodeCreateSessionResponse(_ response: String) throws -> Session {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "create_session_response"
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return try decodeSession(json["session"])
+    }
+
+    static func decodeListSessionsResponse(_ response: String) throws -> SessionListPage {
+        guard
+            let data = response.data(using: .utf8),
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            json["version"] as? Int == 1,
+            json["type"] as? String == "list_sessions_response",
+            let sessions = json["sessions"] as? [Any],
+            let truncated = json["truncated"] as? Bool
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return SessionListPage(
+            sessions: try sessions.map { try decodeSession($0) },
+            truncated: truncated
+        )
+    }
+
+    private static func decodeSession(_ value: Any?) throws -> Session {
+        guard
+            let json = value as? [String: Any],
+            let id = json["id"] as? String, !id.isEmpty,
+            let title = json["title"] as? String,
+            let createdAtMilliseconds = json["created_at_ms"] as? Int,
+            let updatedAtMilliseconds = json["updated_at_ms"] as? Int
+        else {
+            throw IPCClientError.invalidSessionResponse
+        }
+
+        return Session(
+            id: id,
+            title: title,
+            createdAtMilliseconds: createdAtMilliseconds,
+            updatedAtMilliseconds: updatedAtMilliseconds
+        )
     }
 
     static func decodeCancelProcessResponse(

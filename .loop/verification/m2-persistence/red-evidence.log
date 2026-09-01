@@ -1,0 +1,28 @@
+
+thread 'store_and_its_parent_directory_are_private' (23355704) panicked at backend/tests/persistence.rs:77:37:
+backend exited before binding the socket: exit status: 2
+
+---- created_sessions_are_listed_newest_first stdout ----
+
+thread 'created_sessions_are_listed_newest_first' (23355700) panicked at backend/tests/persistence.rs:77:37:
+backend exited before binding the socket: exit status: 2
+
+
+failures:
+    created_sessions_are_listed_newest_first
+    invalid_session_titles_are_rejected_with_an_error_frame
+    missing_store_argument_uses_the_default_application_support_path
+    sessions_survive_a_backend_restart
+    store_and_its_parent_directory_are_private
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `--test persistence`
+
+
+failures:
+    list_sessions_responses_are_bounded_with_truncation_reported
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.50s
+
+error: test failed, to rerun pass `--test persistence`

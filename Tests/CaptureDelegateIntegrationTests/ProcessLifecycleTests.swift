@@ -400,7 +400,9 @@ private final class IntegrationEventCollector: @unchecked Sendable {
 private func startBackend(binary: String, socket: URL) throws -> Process {
     let backend = Process()
     backend.executableURL = URL(filePath: binary)
-    backend.arguments = ["--socket", socket.path()]
+    // The store lives beside the socket so each test's directory cleanup removes it.
+    let store = socket.deletingLastPathComponent().appending(path: "store.sqlite")
+    backend.arguments = ["--socket", socket.path(), "--store", store.path()]
     backend.standardOutput = FileHandle.nullDevice
     backend.standardError = FileHandle.nullDevice
     try backend.run()
