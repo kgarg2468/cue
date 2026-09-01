@@ -974,6 +974,136 @@ func listActionsRequestAndResponse() throws {
     }
 }
 
+@Test("create project request JSON is typed and its response decodes a project")
+func createProjectRequestAndResponse() throws {
+    let request = IPCClient.createProjectRequest(name: "Hackathon Brief")
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "create_project")
+    #expect(json["name"] as? String == "Hackathon Brief")
+
+    let project = try IPCClient.decodeCreateProjectResponse(
+        "{\"version\":1,\"type\":\"create_project_response\",\"project\":"
+            + "{\"id\":\"project-1\",\"name\":\"Hackathon Brief\","
+            + "\"created_at_ms\":10,\"updated_at_ms\":10}}\n"
+    )
+    #expect(
+        project
+            == Project(
+                id: "project-1",
+                name: "Hackathon Brief",
+                createdAtMilliseconds: 10,
+                updatedAtMilliseconds: 10
+            )
+    )
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateProjectResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"invalid_create_project\"}\n"
+        )
+    }
+    // A blank name is not a project the backend can have admitted.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeCreateProjectResponse(
+            "{\"version\":1,\"type\":\"create_project_response\",\"project\":"
+                + "{\"id\":\"project-2\",\"name\":\"\",\"created_at_ms\":10,"
+                + "\"updated_at_ms\":10}}\n"
+        )
+    }
+}
+
+@Test("link session project request JSON names both sides and its response echoes them")
+func linkSessionProjectRequestAndResponse() throws {
+    let request = IPCClient.linkSessionProjectRequest(
+        sessionID: "session-1", projectID: "project-1")
+    #expect(request.hasSuffix("\n"))
+    let data = try #require(request.dropLast().data(using: .utf8))
+    let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(json["version"] as? Int == 1)
+    #expect(json["type"] as? String == "link_session_project")
+    #expect(json["session_id"] as? String == "session-1")
+    #expect(json["project_id"] as? String == "project-1")
+
+    let link = try IPCClient.decodeLinkSessionProjectResponse(
+        "{\"version\":1,\"type\":\"link_session_project_response\","
+            + "\"session_id\":\"session-1\",\"project_id\":\"project-1\"}\n"
+    )
+    #expect(link == SessionProjectLink(sessionID: "session-1", projectID: "project-1"))
+
+    // Relinking an existing pair is an error frame, not a membership.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeLinkSessionProjectResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"duplicate_project_link\"}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeLinkSessionProjectResponse(
+            "{\"version\":1,\"type\":\"link_session_project_response\","
+                + "\"session_id\":\"session-1\"}\n"
+        )
+    }
+}
+
+@Test("list session projects request is typed and its response decodes a link-ordered page")
+func listSessionProjectsRequestAndResponse() throws {
+    let request = IPCClient.listSessionProjectsRequest(sessionID: "session-1")
+    #expect(
+        request == "{\"version\":1,\"type\":\"list_session_projects\","
+            + "\"session_id\":\"session-1\"}\n"
+    )
+
+    let page = try IPCClient.decodeListSessionProjectsResponse(
+        "{\"version\":1,\"type\":\"list_session_projects_response\",\"projects\":["
+            + "{\"id\":\"project-2\",\"name\":\"Capture Tool\","
+            + "\"created_at_ms\":20,\"updated_at_ms\":20},"
+            + "{\"id\":\"project-1\",\"name\":\"Hackathon Brief\","
+            + "\"created_at_ms\":10,\"updated_at_ms\":10}],"
+            + "\"truncated\":false}\n"
+    )
+    #expect(
+        page
+            == ProjectPage(
+                projects: [
+                    Project(
+                        id: "project-2", name: "Capture Tool",
+                        createdAtMilliseconds: 20, updatedAtMilliseconds: 20),
+                    Project(
+                        id: "project-1", name: "Hackathon Brief",
+                        createdAtMilliseconds: 10, updatedAtMilliseconds: 10),
+                ],
+                truncated: false
+            )
+    )
+
+    let truncatedPage = try IPCClient.decodeListSessionProjectsResponse(
+        "{\"version\":1,\"type\":\"list_session_projects_response\",\"projects\":[],"
+            + "\"truncated\":true}\n"
+    )
+    #expect(truncatedPage.projects.isEmpty)
+    #expect(truncatedPage.truncated)
+
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSessionProjectsResponse(
+            "{\"version\":1,\"type\":\"list_session_projects_response\",\"projects\":[]}\n"
+        )
+    }
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSessionProjectsResponse(
+            "{\"version\":1,\"type\":\"error\",\"code\":\"unknown_session\"}\n"
+        )
+    }
+    // A stamp the backend always states cannot arrive as a string.
+    #expect(throws: IPCClientError.invalidSessionResponse) {
+        try IPCClient.decodeListSessionProjectsResponse(
+            "{\"version\":1,\"type\":\"list_session_projects_response\",\"projects\":["
+                + "{\"id\":\"project-3\",\"name\":\"Late\",\"created_at_ms\":\"10\","
+                + "\"updated_at_ms\":10}],\"truncated\":false}\n"
+        )
+    }
+}
+
 @Test("an interrupted run decodes with its error code and without an exit code")
 func interruptedRunDecodes() throws {
     let page = try IPCClient.decodeListRunsResponse(

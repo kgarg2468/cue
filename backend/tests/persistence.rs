@@ -2357,3 +2357,212 @@ fn every_accepted_action_is_singly_listable() {
     assert!(accepted > 0, "the sweep must include admittable sizes");
     assert!(rejected > 0, "the sweep must cross the admission boundary");
 }
+
+fn create_project(socket_path: &Path, name: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "create_project", "name": name}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(
+        response["type"], "create_project_response",
+        "project should be accepted, got {response}"
+    );
+    response["project"].clone()
+}
+
+fn link_session_project(
+    socket_path: &Path,
+    session_id: &str,
+    project_id: &str,
+) -> serde_json::Value {
+    exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": session_id, "project_id": project_id}),
+    )
+}
+
+fn list_session_projects(socket_path: &Path, session_id: &str) -> serde_json::Value {
+    let response = exchange(
+        socket_path,
+        serde_json::json!({"version": 1, "type": "list_session_projects",
+            "session_id": session_id}),
+    );
+    assert_eq!(response["version"], 1);
+    assert_eq!(response["type"], "list_session_projects_response");
+    response
+}
+
+#[test]
+fn projects_and_session_links_persist_and_survive_a_restart() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("projects.sock");
+    let store_path = fixture.path("store.sqlite");
+
+    let (session_id, other_id, brief, tool) = {
+        let mut backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+        let session = create_session(&backend.socket_path, "Kickoff");
+        let session_id = session["id"].as_str().expect("session id").to_owned();
+        let other = create_session(&backend.socket_path, "Unrelated");
+        let other_id = other["id"].as_str().expect("session id").to_owned();
+
+        let brief = create_project(&backend.socket_path, "Hackathon Brief");
+        assert_eq!(brief["name"], "Hackathon Brief");
+        assert!(
+            brief["created_at_ms"].as_i64().unwrap_or_default() > 0,
+            "creation should be stamped"
+        );
+        let tool = create_project(&backend.socket_path, "Capture Tool");
+
+        // Link order, not project creation order, drives a session's list.
+        let linked = link_session_project(
+            &backend.socket_path,
+            &session_id,
+            tool["id"].as_str().expect("project id"),
+        );
+        assert_eq!(
+            linked["type"], "link_session_project_response",
+            "link should be accepted, got {linked}"
+        );
+        link_session_project(
+            &backend.socket_path,
+            &session_id,
+            brief["id"].as_str().expect("project id"),
+        );
+        link_session_project(
+            &backend.socket_path,
+            &other_id,
+            brief["id"].as_str().expect("project id"),
+        );
+        // Relinking an existing pair is not how membership is stated twice.
+        let duplicate = link_session_project(
+            &backend.socket_path,
+            &session_id,
+            tool["id"].as_str().expect("project id"),
+        );
+        assert_eq!(duplicate["type"], "error");
+        assert_eq!(duplicate["code"], "duplicate_project_link");
+        backend.stop();
+        (session_id, other_id, brief, tool)
+    };
+
+    let restarted = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let page = list_session_projects(&restarted.socket_path, &session_id);
+    assert_eq!(page["truncated"], false);
+    assert_eq!(
+        page["projects"].as_array().expect("projects array"),
+        &vec![tool.clone(), brief.clone()],
+        "a session's projects should list in link order"
+    );
+    let other_page = list_session_projects(&restarted.socket_path, &other_id);
+    assert_eq!(
+        other_page["projects"].as_array().expect("projects array"),
+        &vec![brief.clone()],
+        "links should stay scoped to their session"
+    );
+}
+
+#[test]
+fn invalid_projects_and_links_are_rejected_before_persisting() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("badprojects.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+    let session = create_session(&backend.socket_path, "Strict projects");
+    let session_id = session["id"].as_str().expect("session id");
+    let project = create_project(&backend.socket_path, "Real project");
+    let project_id = project["id"].as_str().expect("project id");
+
+    for case in [
+        serde_json::json!({"version": 1, "type": "create_project"}),
+        serde_json::json!({"version": 1, "type": "create_project", "name": null}),
+        serde_json::json!({"version": 1, "type": "create_project", "name": "   "}),
+        serde_json::json!({"version": 1, "type": "create_project", "name": "x".repeat(4097)}),
+    ] {
+        let response = exchange(&backend.socket_path, case.clone());
+        assert_eq!(response["type"], "error", "case should be rejected: {case}");
+        assert_eq!(response["code"], "invalid_create_project");
+    }
+    for case in [
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "project_id": project_id}),
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": session_id}),
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": null, "project_id": project_id}),
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": session_id, "project_id": null}),
+    ] {
+        let response = exchange(&backend.socket_path, case.clone());
+        assert_eq!(response["type"], "error", "case should be rejected: {case}");
+        assert_eq!(response["code"], "invalid_link_session_project");
+    }
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": "ses_missing", "project_id": project_id}),
+    );
+    assert_eq!(response["code"], "unknown_session");
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "link_session_project",
+            "session_id": session_id, "project_id": "prj_missing"}),
+    );
+    assert_eq!(response["code"], "unknown_project");
+    let response = exchange(
+        &backend.socket_path,
+        serde_json::json!({"version": 1, "type": "list_session_projects",
+            "session_id": "ses_missing"}),
+    );
+    assert_eq!(response["code"], "unknown_session");
+
+    let page = list_session_projects(&backend.socket_path, session_id);
+    assert_eq!(
+        page["projects"].as_array().expect("projects array").len(),
+        0,
+        "no rejected link may persist"
+    );
+}
+
+#[test]
+fn every_accepted_project_is_listable_alone_and_through_its_session() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("prjbound.sock");
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        // A fresh store per probe keeps the just-created project alone.
+        let probe_store = fixture.path(&format!("store-{nulls}.sqlite"));
+        let backend = BackendProcess::start(&socket_path, Some(&probe_store), None);
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_project",
+                "name": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_create_project");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let project_id = response["project"]["id"].as_str().expect("project id");
+        // The session-scoped envelope is the larger frame, so an admitted
+        // project must stay listable through BOTH read paths.
+        let session = create_session(&backend.socket_path, "s");
+        let session_id = session["id"].as_str().expect("session id");
+        let linked = link_session_project(&backend.socket_path, session_id, project_id);
+        assert_eq!(
+            linked["type"], "link_session_project_response",
+            "an admitted project must be linkable, nulls={nulls}"
+        );
+        let page = list_session_projects(&backend.socket_path, session_id);
+        assert_eq!(
+            page["projects"].as_array().expect("projects array").len(),
+            1,
+            "an admitted project must be listable through its session, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}

@@ -1,7 +1,7 @@
 mod store;
 
 use crate::store::{
-    ActionRecord, Marker, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment,
+    ActionRecord, Marker, Project, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -84,6 +84,8 @@ const ACTION_KINDS: [&str; 12] = [
 ];
 const MAX_ACTION_TITLE_BYTES: usize = 4096;
 const LIST_ACTIONS_LIMIT: usize = 50;
+const MAX_PROJECT_NAME_BYTES: usize = 4096;
+const LIST_SESSION_PROJECTS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -149,6 +151,14 @@ struct Request {
     // unusable queries, and they are rejected together.
     #[serde(default, deserialize_with = "deserialize_present")]
     record_id: Option<Option<String>>,
+    // Double option as with `kind`: a project always states its name, so an omitted and an
+    // explicitly null name are the same missing field.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    name: Option<Option<String>>,
+    // Double option as with `kind`: a membership names both of its sides, so an omitted and an
+    // explicitly null project id are rejected together.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    project_id: Option<Option<String>>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -283,6 +293,32 @@ struct ListActionsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     actions: &'a [ActionRecord],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct CreateProjectResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    project: &'a Project,
+}
+
+#[derive(Serialize)]
+struct LinkSessionProjectResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    session_id: &'a str,
+    project_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct ListSessionProjectsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    projects: &'a [Project],
     truncated: bool,
 }
 
@@ -1852,6 +1888,140 @@ fn handle_connection(
                         // newest drafts.
                         Err(_) if !actions.is_empty() => {
                             actions.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "create_project" => {
+                // A project always states the work it stands for, so an omitted, an explicitly
+                // null, and a blank name are all the same missing field.
+                let Some(name) = request
+                    .name
+                    .flatten()
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty() && name.len() <= MAX_PROJECT_NAME_BYTES)
+                else {
+                    return write_protocol_error(&mut stream, "invalid_create_project");
+                };
+                let project = Project::draft(&name);
+                let response = CreateProjectResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "create_project_response",
+                    project: &project,
+                };
+                // Escape-heavy names can pass the raw byte check yet serialize past the frame
+                // bound; reject those before anything is persisted. Admission is checked
+                // against the single-item session-scoped LIST envelope, the larger of the two
+                // read frames, so an accepted project can never persist yet be unlistable
+                // through a session it belongs to.
+                let list_probe = ListSessionProjectsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_session_projects_response",
+                    projects: std::slice::from_ref(&project),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_create_project");
+                }
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_create_project");
+                };
+                if let Err(error) = store.insert_project(&project) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "link_session_project" => {
+                // A membership names both of its sides, so an omitted and an explicitly null
+                // id are the same missing field on either side.
+                let (Some(session_id), Some(project_id)) =
+                    (request.session_id.flatten(), request.project_id.flatten())
+                else {
+                    return write_protocol_error(&mut stream, "invalid_link_session_project");
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                match store.project_exists(&project_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_project"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                let response = LinkSessionProjectResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "link_session_project_response",
+                    session_id: &session_id,
+                    project_id: &project_id,
+                };
+                // No admission probe stands behind this frame the way it does behind a
+                // creation: the reply carries no client text at all, only two ids the store
+                // has just confirmed it already admitted under their own bounded frames.
+                let frame = serialize_json_frame(&response)?;
+                match store.insert_session_project_link(&session_id, &project_id) {
+                    Ok(true) => {}
+                    // Relinking a pair is not how membership is stated twice; the session
+                    // already belongs to this project.
+                    Ok(false) => {
+                        return write_protocol_error(&mut stream, "duplicate_project_link");
+                    }
+                    Err(error) => {
+                        eprintln!("store write error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_session_projects" => {
+                // A page can only be scoped to a session that exists, so a missing and an
+                // unknown session_id are the same answer, and so is an explicitly null one.
+                let Some(session_id) = request.session_id.flatten() else {
+                    return write_protocol_error(&mut stream, "unknown_session");
+                };
+                match store.session_exists(&session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_session"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut projects = match store
+                    .list_session_projects(&session_id, LIST_SESSION_PROJECTS_LIMIT + 1)
+                {
+                    Ok(projects) => projects,
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                };
+                let mut truncated = projects.len() > LIST_SESSION_PROJECTS_LIMIT;
+                projects.truncate(LIST_SESSION_PROJECTS_LIMIT);
+                let frame = loop {
+                    let response = ListSessionProjectsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_session_projects_response",
+                        projects: &projects,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the earliest memberships, which are the
+                        // start of the link-ordered page.
+                        Err(_) if !projects.is_empty() => {
+                            projects.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),

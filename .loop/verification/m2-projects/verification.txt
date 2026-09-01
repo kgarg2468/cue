@@ -1,0 +1,46 @@
+# M2 slice 11 — durable projects + session links (S05-002 "related projects",
+# S02-INC-08, spec §12; roadmap M2 exit criteria "project links survive restart")
+
+## Contract
+- Migration 10: projects (id, name <= 4096B trimmed non-blank, stamps) +
+  session_projects link table (composite PK, linked_at_ms) + link-order index.
+- create_project admission probe uses the single-item list_session_projects
+  envelope — the LARGER of the read frames (its response_type is 8 bytes
+  longer) — so an admitted project stays listable alone AND through a session.
+- link_session_project: both ids required (double-Option), unknown_session /
+  unknown_project splits, INSERT OR IGNORE + changes()==0 duplicate detection
+  (race-free) -> duplicate_project_link. Reply frame serialized BEFORE the
+  write so nothing persists behind an unwritable reply. No probe needed: the
+  frame carries no client text (commented).
+- list_session_projects: link order = ORDER BY linked_at_ms ASC, rowid ASC.
+  Deliberate deviation from my dispatch (project_id tie-break): back-to-back
+  links land in the same millisecond, and project ids are creation-ordered, so
+  a project_id tie-break would reintroduce creation order — exactly what the
+  red test pins against. rowid is the link row's own insertion order.
+- Deliberately NO global list_projects arm this slice.
+- Swift Project/ProjectPage/SessionProjectLink + three methods.
+
+## Red-first
+- 3 contract tests red vs origin/main f593142 (red-evidence.log).
+
+## Gates
+- 158 Rust tests (46 unit + 13 health_socket + 41 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; 56 Swift tests).
+- Runtime demo (runtime-demo.log): hand-built v9 store, user_version 9 -> 10,
+  project linked to the pre-migration session, duplicate_project_link and
+  unknown_project and blank-name rejections, link surviving restart, 0600.
+
+## Routing
+- 1 opus-high implementation worker (native subagent), first-pass green within
+  its 4-file allowlist; diff-gated at 932 lines. Fable red contract tests +
+  demo.
+
+## Worker-flagged bounds (recorded)
+- session-scoped read arms return unknown_session for omitted/null/blank
+  session_id (mirrors list_sources); malformed vs nonexistent are
+  indistinguishable to clients — batched for the protocol-hardening slice.
+- SessionProjectLink added as a third Swift type so the decode test has an
+  Equatable value.
+- The link index carries project_id while the ORDER BY uses rowid; SQLite
+  post-sorts <= 51 rows. Cosmetic.
