@@ -1,0 +1,132 @@
+# M2 slice 12 — durable task packets (spec §8; roadmap M2 "TaskPacket model")
+
+## Contract
+- task_packets table (migration 11): id PK, action_id REFERENCES actions,
+  packet_version, body TEXT (canonical JSON), created_at_ms; chronological
+  index. The §8 packet is a versioned DOCUMENT: the domain layer stores its
+  canonical form (value-identical round-trip; duplicate members collapse
+  last-wins, numbers take their shortest round-trip spelling — narrowed in
+  Sol round 1) and extracts only task_packet_version, which
+  must equal integer 1 exactly. Schema enforcement of packet internals lands
+  with the packet-building milestones (M6/M13).
+- create_task_packet validation: action_id double-Option; body must be a JSON
+  object; version pinned; content-byte cap 4096 (strings measured as the raw
+  bytes they hold, NOT their JSON escapes — the analog of .len() on flat text
+  fields); unknown_action split; single-item list-envelope probe as the
+  BINDING frame guard (mutant-proven: forcing the probe to pass fails the
+  sweep). list_task_packets chronological with limit-51 truncation probe and
+  end-popping byte budget; ordering tie-break by rowid (ids embed the minting
+  pid, so id order could reorder same-millisecond history across processes).
+
+## Remediation history (this slice had two worker rounds — both recorded)
+1. Worker 1 (full slice) correctly identified that my red sweep window
+   (1250..1302) was mis-derived: a raw serialized cap rejects every
+   escape-heavy body in it. It shipped a two-measure design whose second
+   measure (a 512-byte "envelope reserve" on the escaped document) was tuned
+   to my window and made the probe dead code. I rejected the reserve: the
+   uniform design keeps the probe binding, and admission's sensitivity to
+   id length is an accepted recorded bound (sources-slice precedent). I
+   removed the reserve (+const) and fixed my window to 1300..1338, straddling
+   the probe's true boundary (~1322 nulls) while keeping requests under the
+   8 KiB cap with id-length margin.
+2. MY ERROR: I verified the mutant with `git checkout backend/src/lib.rs`,
+   which discarded worker 1's entire uncommitted lib.rs diff. Store/Swift
+   files were unaffected. A focused worker 2 re-implemented the lib.rs arms
+   against the pinned red tests; all gates green. Lesson recorded: mutants on
+   uncommitted trees restore from a copy, never via git checkout.
+
+## Red-first
+- 3 contract tests red vs origin/main b33638c (red-evidence.log).
+
+## Gates
+- 163 Rust tests (48 unit + 13 health_socket + 44 persistence + 58
+  process_lifecycle), cargo fmt, clippy -D warnings, verify-m0.sh exit 0
+  (verify-m0.log; 59 Swift tests).
+- Mutant proof: probe forced to pass -> sweep fails; restored -> green.
+- Runtime demo (runtime-demo.log): hand-built v10 store, user_version
+  10 -> 11, §8-shaped packet round-trip on a real binary, version-2 /
+  non-object / unknown-action rejections, chronological listing after
+  restart, 0600 mode.
+
+## Routing
+- 2 opus-high implementation workers (full slice + lib.rs restore after my
+  git-checkout error), Fable red contract tests + remediation + mutant +
+  demo. Diff-gated at 899 lines total.
+
+## Worker-flagged bounds (recorded)
+- unknown_action is a new protocol error code (first action-scoped read).
+- Swift TaskPacket.body is [String: Any] with NSDictionary equality; request
+  bodies serialize with .sortedKeys so one document makes one frame.
+- IPCClientError.invalidSessionResponse reused on a request-encoding path
+  (name reads oddly; widening the enum deferred to protocol hardening).
+
+## Sol round 1 (FAIL: 1 MAJOR, 3 MINOR) — dispositions
+
+MAJOR, number round-trip fidelity — CONFIRMED, fixed.
+Claim: serde_json built without float_roundtrip means the stored canonical
+text can reload as a different value and a different length; near the frame
+bound a length-growing reload pops an admitted packet from its own
+single-item page; a valid 1e400 closes the connection with no protocol error.
+Verified before touching code: a scratch sweep of 2M f64 bit patterns showed
+~30% fail serialize→parse→serialize under the default parser and ~9% grow in
+length on reload. Red tests then reproduced both defects on the real backend
+(sol-round1-red-evidence.log):
+- task_packet_numbers_list_as_the_values_they_were_admitted_as — the listed
+  number differs from the admitted one after restart.
+- every_accepted_task_packet_stays_listable_after_its_text_reloads — with 80
+  drift-prone floats plus NUL padding, nulls=1013 produced an admitted packet
+  whose own page listed empty: the accepted-implies-listable violation.
+Fix: serde_json float_roundtrip (correctly-rounded parsing makes the stored
+canonical text a serialization fixed point), plus a defense-in-depth
+admission guard in create_task_packet that re-parses the would-be stored
+text and rejects a body whose reload differs (never fires with the feature;
+stands so the invariant survives a parser regression rather than trusting
+one). The pre-fix red run is the feature's mutant evidence: removing the
+feature turns both tests red.
+1e400 pinned as a documented bound
+(packet_numbers_outside_the_f64_range_close_the_connection_unanswered):
+valid JSON text outside this build's number model fails request
+deserialization and closes the connection — the same path every
+syntactically malformed request takes — and the backend stays healthy for
+the next client. Integers beyond u64 canonicalize through f64 once at
+admission, visibly in the create response, then stay fixed.
+
+MINOR, duplicate keys collapse last-wins — CONFIRMED, contract narrowed.
+"Verbatim" overstated the storage contract. Comments across store.rs and
+IPCClient.swift now state the canonical-form contract (duplicate members
+collapse last-wins; numbers take their shortest round-trip spelling);
+duplicate_packet_keys_collapse_to_the_last_member pins it with raw wire text.
+
+MINOR, NSNumber(true) == NSNumber(1) masks boolean corruption — CONFIRMED,
+bounded and pinned. The packet Equatable keeps NSDictionary comparison (the
+document is untyped JSON); the bound is now stated at the == impl, and
+taskPacketBooleanFidelity pins boolean type fidelity through serialized
+text, which distinguishes what NSNumber equality cannot.
+
+MINOR, v10 migration fixture derives from MIGRATIONS[..10] — REFUTED as a
+deviation, recorded. All ten in-crate migration tests use the same
+MIGRATIONS-prefix style deliberately: they pin the forward-only chain
+property. Fixture independence is supplied by the runtime demo, whose v10
+store is hand-built SQL executed by sqlite3 against the real release binary
+(runtime-demo-round1-script.py, runtime-demo-round1.log). No change.
+
+Gates re-run after the fixes: full Rust suite green (48 persistence tests
+including the 4 new), fmt, clippy -D warnings, verify-m0.sh exit 0 (59
+Swift tests including boolean fidelity; verify-m0-round1.log), runtime demo
+green with raw wire-text fidelity assertions — the create response and the
+post-restart list both carry the exact admitted float literal, which a
+pre-fix binary cannot do, so the demo doubles as feature-presence evidence.
+
+## Sol round 2 (PASS, 2 MINOR) — dispositions
+Sol confirmed the number remediation sufficient: float_roundtrip resolves,
+the admission guard has no production bypass, finite floats including -0.0
+and subnormals stay fixed points, and removing the feature would fail both
+new regression tests. Two MINORs, both fixed:
+- A leftover "exactly as it arrived" claim on the TaskPacket struct doc
+  (store.rs) and a "verbatim" line in this file's Contract section — both
+  now state the canonical-form contract.
+- The runtime demo's v10 fixture was built by an untracked shell heredoc,
+  so the independence claim was not reproducible from the repository. The
+  archived demo script now embeds the hand-built v10 SQL and constructs its
+  own store, so the independent migration check reruns from the repo alone
+  (runtime-demo-round1-script.py; rerun green in runtime-demo-round1.log).

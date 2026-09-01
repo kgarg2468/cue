@@ -1,0 +1,76 @@
+pre-migration user_version: 10
+post-migration user_version: 11
+--- packet created
+{
+ "version": 1,
+ "type": "create_task_packet_response",
+ "packet": {
+  "id": "task-packet-4df9-18d129b655774c90-1",
+  "action_id": "action-4df9-18d129b655710ee8-0",
+  "packet_version": 1,
+  "body": {
+   "action": {
+    "objective": "Check token refresh",
+    "type": "review_pull_request"
+   },
+   "execution": {
+    "capability": "read",
+    "preferred_agent": "codex"
+   },
+   "origin": {
+    "session_id": "ses_legacy01"
+   },
+   "task_packet_version": 1
+  },
+  "created_at_ms": 1788256390137
+ }
+}
+--- version 2 rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_create_task_packet"
+}
+--- non-object body rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_create_task_packet"
+}
+--- unknown action rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "unknown_action"
+}
+--- packets after restart
+{
+ "version": 1,
+ "type": "list_task_packets_response",
+ "packets": [
+  {
+   "id": "task-packet-4df9-18d129b655774c90-1",
+   "action_id": "action-4df9-18d129b655710ee8-0",
+   "packet_version": 1,
+   "body": {
+    "action": {
+     "objective": "Check token refresh",
+     "type": "review_pull_request"
+    },
+    "execution": {
+     "capability": "read",
+     "preferred_agent": "codex"
+    },
+    "origin": {
+     "session_id": "ses_legacy01"
+    },
+    "task_packet_version": 1
+   },
+   "created_at_ms": 1788256390137
+  }
+ ],
+ "truncated": false
+}
+float fidelity across restart: OK 3.0700532959020438e+87
+store mode: 0o600
+DEMO OK

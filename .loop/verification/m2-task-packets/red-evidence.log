@@ -1,0 +1,8 @@
+test invalid_task_packets_are_rejected_before_persisting ... FAILED
+test task_packets_persist_chronologically_and_survive_a_restart ... FAILED
+test every_accepted_task_packet_is_singly_listable ... FAILED
+thread 'invalid_task_packets_are_rejected_before_persisting' (25472123) panicked at backend/tests/persistence.rs:2715:9:
+thread 'task_packets_persist_chronologically_and_survive_a_restart' (25472124) panicked at backend/tests/persistence.rs:2581:5:
+thread 'every_accepted_task_packet_is_singly_listable' (25472122) panicked at backend/tests/persistence.rs:2761:13:
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.26s
+reds vs b33638c Record merged M2 projects slice (cycle 29 closeout) (#54)

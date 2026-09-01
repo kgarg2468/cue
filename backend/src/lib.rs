@@ -1,7 +1,8 @@
 mod store;
 
 use crate::store::{
-    ActionRecord, Marker, Project, RunEvent, RunRecord, Session, Source, Store, TranscriptSegment,
+    ActionRecord, Marker, Project, RunEvent, RunRecord, Session, Source, Store, TaskPacket,
+    TranscriptSegment,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,13 @@ const MAX_ACTION_TITLE_BYTES: usize = 4096;
 const LIST_ACTIONS_LIMIT: usize = 50;
 const MAX_PROJECT_NAME_BYTES: usize = 4096;
 const LIST_SESSION_PROJECTS_LIMIT: usize = 50;
+/// The one task packet version this protocol knows how to read. A document that declares any
+/// other version was shaped for a build this one is not, so it is refused rather than guessed at.
+const TASK_PACKET_VERSION: i64 = 1;
+/// How much document one packet may carry, measured as the content it holds rather than the
+/// text it serializes to.
+const MAX_TASK_PACKET_BYTES: usize = 4096;
+const LIST_TASK_PACKETS_LIMIT: usize = 50;
 
 static SHUTDOWN_PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 static WORKTREE_NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -159,6 +167,14 @@ struct Request {
     // explicitly null project id are rejected together.
     #[serde(default, deserialize_with = "deserialize_present")]
     project_id: Option<Option<String>>,
+    // Double option as with `kind`: a packet is always delegated for one action, so an omitted
+    // and an explicitly null action id are rejected together.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    action_id: Option<Option<String>>,
+    // Untyped so any shape reaches the arm as an error frame instead of a dropped connection;
+    // a plain option is enough because an explicit null body is as invalid as an omitted one.
+    #[serde(default)]
+    body: Option<serde_json::Value>,
 }
 
 fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -319,6 +335,23 @@ struct ListSessionProjectsResponse<'a> {
     #[serde(rename = "type")]
     response_type: &'static str,
     projects: &'a [Project],
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct CreateTaskPacketResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    packet: &'a TaskPacket,
+}
+
+#[derive(Serialize)]
+struct ListTaskPacketsResponse<'a> {
+    version: u32,
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    packets: &'a [TaskPacket],
     truncated: bool,
 }
 
@@ -2022,6 +2055,130 @@ fn handle_connection(
                         // start of the link-ordered page.
                         Err(_) if !projects.is_empty() => {
                             projects.pop();
+                            truncated = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "create_task_packet" => {
+                // A packet is always the document one action is delegated with, so an omitted
+                // and an explicitly null action id are the same missing field.
+                let Some(action_id) = request.action_id.flatten() else {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                };
+                // The document itself is the packet; anything that is not a JSON object — an
+                // omitted body, an explicit null, an array, a string, a number — is not one.
+                let Some(body) = request
+                    .body
+                    .filter(|body| matches!(body, serde_json::Value::Object(_)))
+                else {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                };
+                // The one key the domain layer reads: a document must declare the packet
+                // version it was shaped for, and it must be the version this build knows.
+                // A stringly "1", a future 2, a null, and a missing key are all refused.
+                if body
+                    .get("task_packet_version")
+                    .and_then(|version| version.as_i64())
+                    != Some(TASK_PACKET_VERSION)
+                {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                }
+                // Bounded by the content the document holds rather than by the text it
+                // serializes to, so a packet is measured by what it says and not by how
+                // expensive its characters happen to be to escape.
+                if task_packet_content_bytes(&body) > MAX_TASK_PACKET_BYTES {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                }
+                match store.action_exists(&action_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_action"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Every read of this document goes through its stored canonical text, so
+                // that text must parse back to exactly the value being admitted — otherwise
+                // the packet would list as a different document than it was accepted as, and
+                // the frame probe below would be measuring the wrong serialization. With
+                // correctly-rounded float parsing this is a fixed point; the check stands so
+                // the invariant survives a parser regression rather than trusting one.
+                let stable = serde_json::to_string(&body)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|reloaded| reloaded == body);
+                if !stable {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                }
+                let packet = TaskPacket::draft(&action_id, TASK_PACKET_VERSION, body);
+                let response = CreateTaskPacketResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "create_task_packet_response",
+                    packet: &packet,
+                };
+                // Escape-heavy content can pass the content bound and still serialize to many
+                // times its size; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two frames,
+                // so an accepted packet can never persist yet be unlistable — exactly as on
+                // every other client-text add path.
+                let list_probe = ListTaskPacketsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_task_packets_response",
+                    packets: std::slice::from_ref(&packet),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                }
+                let Ok(frame) = serialize_json_frame(&response) else {
+                    return write_protocol_error(&mut stream, "invalid_create_task_packet");
+                };
+                if let Err(error) = store.insert_task_packet(&packet) {
+                    eprintln!("store write error: {error}");
+                    return write_protocol_error(&mut stream, "store_unavailable");
+                }
+                write_serialized_frame(&mut stream, &frame)?;
+            }
+            "list_task_packets" => {
+                // A page can only be scoped to an action that exists, so a missing and an
+                // unknown action_id are the same answer, and so is an explicitly null one.
+                let Some(action_id) = request.action_id.flatten() else {
+                    return write_protocol_error(&mut stream, "unknown_action");
+                };
+                match store.action_exists(&action_id) {
+                    Ok(true) => {}
+                    Ok(false) => return write_protocol_error(&mut stream, "unknown_action"),
+                    Err(error) => {
+                        eprintln!("store read error: {error}");
+                        return write_protocol_error(&mut stream, "store_unavailable");
+                    }
+                }
+                // Fetch one past the page cap so truncation is observable without a count query.
+                let mut packets =
+                    match store.list_task_packets(&action_id, LIST_TASK_PACKETS_LIMIT + 1) {
+                        Ok(packets) => packets,
+                        Err(error) => {
+                            eprintln!("store read error: {error}");
+                            return write_protocol_error(&mut stream, "store_unavailable");
+                        }
+                    };
+                let mut truncated = packets.len() > LIST_TASK_PACKETS_LIMIT;
+                packets.truncate(LIST_TASK_PACKETS_LIMIT);
+                let frame = loop {
+                    let response = ListTaskPacketsResponse {
+                        version: PROTOCOL_VERSION,
+                        response_type: "list_task_packets_response",
+                        packets: &packets,
+                        truncated,
+                    };
+                    match serialize_json_frame(&response) {
+                        Ok(frame) => break frame,
+                        // Dropping from the end keeps the start of the delegation history.
+                        Err(_) if !packets.is_empty() => {
+                            packets.pop();
                             truncated = true;
                         }
                         Err(error) => return Err(error),
@@ -3842,6 +3999,38 @@ fn decode_output_chunk(utf8_carry: &mut Vec<u8>, bytes: &[u8]) -> String {
 /// A timeline offset in whole non-negative milliseconds, or `None` for anything else.
 fn milliseconds_field(value: &serde_json::Value) -> Option<i64> {
     value.as_u64().and_then(|value| i64::try_from(value).ok())
+}
+
+/// How much document a task packet holds, counting every string as the bytes it actually
+/// carries rather than as the text those bytes escape to. A packet is bounded by what it says,
+/// so a document full of characters that happen to be expensive to escape is not a larger
+/// packet than the same document spelled in plain ASCII; the frame bound behind it is what
+/// keeps an escape-heavy document from being admitted into a page it could never fit in.
+fn task_packet_content_bytes(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => "null".len(),
+        serde_json::Value::Bool(true) => "true".len(),
+        serde_json::Value::Bool(false) => "false".len(),
+        serde_json::Value::Number(number) => number.to_string().len(),
+        // The two quotes a string is written between, plus the bytes it holds.
+        serde_json::Value::String(text) => text.len() + 2,
+        serde_json::Value::Array(items) => {
+            // The brackets, the commas between items, and the items themselves.
+            items.len().saturating_sub(1)
+                + 2
+                + items.iter().map(task_packet_content_bytes).sum::<usize>()
+        }
+        serde_json::Value::Object(entries) => {
+            // The braces, the commas between entries, and each entry's quoted key, its colon,
+            // and its value.
+            entries.len().saturating_sub(1)
+                + 2
+                + entries
+                    .iter()
+                    .map(|(key, value)| key.len() + 3 + task_packet_content_bytes(value))
+                    .sum::<usize>()
+        }
+    }
 }
 
 fn serialize_json_frame<T: Serialize>(response: &T) -> io::Result<Vec<u8>> {
