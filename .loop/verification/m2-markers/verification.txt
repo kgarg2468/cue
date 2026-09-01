@@ -39,3 +39,22 @@ add_marker/list_markers protocol, Swift Marker/MarkerListPage.
   (batch with the client-hardening slice).
 - Marker update/delete and voice/UI wiring are out of scope for this slice
   (§6.3 capture UX lands with the frontend milestones).
+
+## Review round 1 (Sol gpt-5.6-sol xhigh): FAIL, 1 MAJOR + 2 MINOR
+- MAJOR (confirmed, fixed red-first): admission bound-checked the add/create
+  response envelope, but a single-item list envelope is ~20 bytes larger, so a
+  boundary-sized escape-heavy record could persist yet be permanently
+  unlistable (the byte budget pops even a lone record). The same latent gap
+  existed in the merged sources and sessions paths. Fix: admission now probes
+  the single-item LIST envelope for markers, sources, AND sessions —
+  accepted implies listable alone. Three boundary-sweep tests pin the
+  invariant (red output in red-evidence.log; sweeps capped below the 8 KiB
+  request bound, which drops oversized request connections by design).
+- MINOR (recorded, deferred as in cycle 21): typed envelope fields mean a
+  previously-ignored junk field like "note": 7 now fails deserialization on
+  any message; inherent to the shared-envelope design, batched with the
+  protocol-hardening slice.
+- MINOR (recorded, deferred as in cycle 21): Swift decoders are permissive
+  (accept unknown kinds / negative at_ms); client-hardening slice.
+- 130 Rust tests after remediation (35 unit + 13 health_socket + 24
+  persistence + 58 process_lifecycle); verify-m0-r2.log exit 0.

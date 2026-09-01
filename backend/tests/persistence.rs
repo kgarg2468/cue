@@ -1424,3 +1424,112 @@ fn list_markers_responses_are_bounded_with_truncation_reported() {
         "byte truncation must keep the chronological beginning"
     );
 }
+
+// The admission frame check must account for the single-item LIST envelope, which is
+// larger than the add/create response envelope: a record accepted against the smaller
+// frame could persist yet be permanently unreadable, because the list byte budget
+// would pop even a lone record from the page. These sweeps cross the escape-heavy
+// admission boundary and pin: accepted implies listable alone.
+
+#[test]
+fn every_accepted_marker_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("mrkbound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        let session = create_session(&backend.socket_path, &format!("Boundary {nulls}"));
+        let session_id = session["id"].as_str().expect("session id");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "add_marker", "session_id": session_id,
+                "at_ms": 0, "kind": "important", "note": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_add_marker");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_markers(&backend.socket_path, session_id);
+        assert_eq!(
+            page["markers"].as_array().expect("markers array").len(),
+            1,
+            "an admitted marker must be listable alone, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
+
+#[test]
+fn every_accepted_source_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("srcbound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        let session = create_session(&backend.socket_path, &format!("Boundary {nulls}"));
+        let session_id = session["id"].as_str().expect("session id");
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "add_source", "session_id": session_id,
+                "start_ms": 0, "end_ms": 1, "text": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_add_source");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let page = list_sources(&backend.socket_path, session_id);
+        assert_eq!(
+            page["sources"].as_array().expect("sources array").len(),
+            1,
+            "an admitted source must be listable alone, nulls={nulls}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}
+
+#[test]
+fn every_accepted_session_is_singly_listable() {
+    let fixture = Fixture::new();
+    let socket_path = fixture.path("sesbound.sock");
+    let store_path = fixture.path("store.sqlite");
+    let backend = BackendProcess::start(&socket_path, Some(&store_path), None);
+
+    let (mut accepted, mut rejected) = (0, 0);
+    for nulls in 1290..1342 {
+        let response = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "create_session",
+                "title": "\u{0}".repeat(nulls)}),
+        );
+        if response["type"] == "error" {
+            assert_eq!(response["code"], "invalid_create_session");
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        let created_id = response["session"]["id"].as_str().expect("session id");
+        // Sessions list newest-first and the byte budget pops from the end, so the
+        // just-created session must survive as the head of a non-empty page.
+        let page = exchange(
+            &backend.socket_path,
+            serde_json::json!({"version": 1, "type": "list_sessions"}),
+        );
+        let sessions = page["sessions"].as_array().expect("sessions array");
+        assert!(
+            sessions.first().is_some_and(|s| s["id"] == created_id),
+            "an admitted session must head its own list page, nulls={nulls}, got {page}"
+        );
+    }
+    assert!(accepted > 0, "the sweep must include admittable sizes");
+    assert!(rejected > 0, "the sweep must cross the admission boundary");
+}

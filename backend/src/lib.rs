@@ -1137,7 +1137,18 @@ fn handle_connection(
                     session: &session,
                 };
                 // Escape-heavy titles can pass the raw byte check yet serialize past the
-                // frame bound; reject those before anything is persisted.
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted session can never persist yet be unlistable.
+                let list_probe = ListSessionsResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_sessions_response",
+                    sessions: std::slice::from_ref(&session),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_create_session");
+                }
                 let Ok(frame) = serialize_json_frame(&response) else {
                     return write_protocol_error(&mut stream, "invalid_create_session");
                 };
@@ -1227,7 +1238,18 @@ fn handle_connection(
                     source: &source,
                 };
                 // Escape-heavy text can pass the raw byte check yet serialize past the
-                // frame bound; reject those before anything is persisted.
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted source can never persist yet be unlistable.
+                let list_probe = ListSourcesResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_sources_response",
+                    sources: std::slice::from_ref(&source),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_add_source");
+                }
                 let Ok(frame) = serialize_json_frame(&response) else {
                     return write_protocol_error(&mut stream, "invalid_add_source");
                 };
@@ -1325,7 +1347,18 @@ fn handle_connection(
                     marker: &marker,
                 };
                 // Escape-heavy notes can pass the raw byte check yet serialize past the
-                // frame bound; reject those before anything is persisted.
+                // frame bound; reject those before anything is persisted. Admission is
+                // checked against the single-item LIST envelope, the larger of the two
+                // frames, so an accepted marker can never persist yet be unlistable.
+                let list_probe = ListMarkersResponse {
+                    version: PROTOCOL_VERSION,
+                    response_type: "list_markers_response",
+                    markers: std::slice::from_ref(&marker),
+                    truncated: false,
+                };
+                if serialize_json_frame(&list_probe).is_err() {
+                    return write_protocol_error(&mut stream, "invalid_add_marker");
+                }
                 let Ok(frame) = serialize_json_frame(&response) else {
                     return write_protocol_error(&mut stream, "invalid_add_marker");
                 };
