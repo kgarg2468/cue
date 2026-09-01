@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 19,
-  "active_milestone": "M2 Domain/persistence (slice 1 merged: durable SQLite session store)",
+  "cycle": 20,
+  "active_milestone": "M2 Domain/persistence (slices 1-2 merged: session store + typed kinds)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 19: user explicitly resumed the loop after the M1 checkpoint; took over dead cycle-18's lock (pid 58547, per ADR-006 evidence bar plus explicit user instruction) and delivered M2 slice 1 through PR #33, squash-merged as 763d62d. Durable SQLite session store (rusqlite 0.40.2 bundled, WAL, forward-only user_version migrations, 0600 file in 0700-when-created dir) with create_session/list_sessions over the versioned socket protocol, byte- and count-bounded list responses with an explicit truncated flag, --store CLI plumbing with a HOME default, Swift SessionListPage client surface, and restart-survival E2E. Three Sol review rounds: round 1 (BLOCKER newer-store mutation before rejection; MAJOR oversized create response; MAJOR verify-m0 polluting the real user store) and round 2 (BLOCKER version-check/WAL-conversion TOCTOU; MAJOR pre-existing parent chmod; MINOR zsh cleanup glob) all confirmed, fixed red-first, and re-verified; round 3 PASS. Store opens are now serialized by an advisory flock on a 0600 sidecar held across the whole open sequence (flocking the store file itself collides with SQLite's POSIX locks on macOS). Gates at merge: 109 Rust + 28 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0, user store untouched. Next: continue M2 (session types per S05-001, source references per S05-003, or run persistence per S05-008).",
-  "updated_at": "2026-09-01T02:55:00+00:00",
+  "last_cycle_summary": "Cycle 20: delivered M2 slice 2 through PR #35, squash-merged as 3690564. Optional typed session kinds: migration 2 adds a nullable kind column (first real forward migration, proven on a hand-built v1 store by unit test and real-binary demo); create_session validates an optional kind against the spec \u00a75 set with absence meaning uncategorized per \u00a718.4; responses carry kind only when set; Swift Session.kind optional. Sol round 1 found one MAJOR (explicit \"kind\": null bypassed validation via Option<String> collapse) \u2014 fixed red-first with a double-Option deserializer; round 2 PASS. Gates at merge: 112 Rust + 31 Swift tests, fmt, clippy -D warnings, verify-m0.sh exit 0 \u00d72, user store untouched. S05-001 is now verified. Next: source references (S05-003) or run persistence (S05-008).",
+  "updated_at": "2026-09-01T03:11:24+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
