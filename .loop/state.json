@@ -1,7 +1,7 @@
 {
   "status": "active",
-  "cycle": 29,
-  "active_milestone": "M2 Domain/persistence (slices 1-11 merged: + projects/session links)",
+  "cycle": 30,
+  "active_milestone": "M2 Domain/persistence (slices 1-12 merged: + task packets)",
   "branch": null,
   "active_pr": null,
   "job_id": "fa669dd2",
@@ -23,7 +23,7 @@
   },
   "blockers": [],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 29: delivered M2 slice 11 through PR #53, squash-merged as 5ca9e25. Projects + session links (spec \u00a712/\u00a75): migration 10 projects + session_projects; create_project probes the larger session-scoped envelope; race-free duplicate_project_link; link order preserved via rowid tie-break (worker's correct deviation \u2014 project_id ties would reintroduce creation order). Sol round 1 PASS zero findings (fourth consecutive); caveat recorded re rowid persistence if a future unlink/VACUUM path lands. Gates: 158 Rust + 56 Swift, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v9\u2192v10 demo. Next: task-packet model (spec \u00a78), sized after a spec read.",
-  "updated_at": "2026-09-01T08:38:21+00:00",
+  "last_cycle_summary": "Cycle 30: delivered M2 slice 12 through PR #55, squash-merged as 3587510. Task packets (spec \u00a78): migration 11 task_packets stores the versioned delegation document in canonical JSON with the list-envelope probe binding. Two-worker remediation (window fix + my git-checkout data loss + recovery worker; lessons recorded). Sol round 1 FAIL: CONFIRMED MAJOR \u2014 default serde_json float parsing broke accepted-implies-listable at the frame boundary (reproduced red at nulls=1013); fixed with float_roundtrip + admission fixed-point guard; verbatim contract narrowed to canonical form. Sol round 2 PASS; both MINORs fixed (comment narrowing, self-contained demo fixture). Gates: 167 Rust + 59 Swift, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v10\u219211 demo with wire-text float fidelity. Next: M2 exit-criteria audit (Note/Artifact models, store completeness).",
+  "updated_at": "2026-09-01T09:55:00+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }
