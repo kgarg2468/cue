@@ -1,0 +1,24 @@
+Recurring loop job prompt (job fa669dd2, cadence 3-53/10 * * * *, created
+2026-08-31, cancelled 2026-09-02 after the user sent two "stop" messages).
+To resume the loop, recreate with: /loop 10m <the prompt below>.
+
+---
+
+Continue autonomously building the complete Capture → Delegate product in /Users/krishgarg/conductor/workspaces/cue/moroni. The authoritative end-state specification is .context/attachments/2UKdwq/capture_delegate_macos_product_ux_spec.md. This is NOT an MVP: every normative requirement in sections 1–21, including cloud, evals, plugins, accessibility, failure behavior, security, and all canonical journeys, must remain in scope.
+
+Architecture: native SwiftUI/AppKit macOS frontend plus a separate Rust backend communicating over a versioned Unix-domain-socket protocol. Delivery: one single-lane milestone PR at a time.
+
+For this firing, perform exactly one bounded cycle:
+1. Acquire .loop/LOCK with a heartbeat; if a heartbeat is under 90 minutes old, record busy and stop. Always release the lock on normal or blocked exit.
+2. If .loop state is absent, initialize Cycle 0: create state.json, roadmap.md, traceability.md with one row for every normative spec requirement, progress.md, decisions.md, verification directories, and scaffold M0. Otherwise resume the persisted active milestone/PR.
+3. If this durable recurring job expires within 24 hours and status is not done, use /loop to create its durable replacement with this exact prompt, persist the new job ID/expiry, then cancel the superseded job.
+4. If a PR is active, work only on its failed gates or confirmed review findings. Otherwise pick the earliest dependency-ready roadmap milestone and create loop/<milestone> from current origin/main.
+5. Implement one small vertical slice using TDD. Delegate bounded implementation to Codex workers with explicit model effort, exact file allowlists, non-goals, stop conditions, and the scope-fence sentence required by CLAUDE.md. Do not perform unrelated refactors or adjacent fixes.
+6. Reject worker diffs outside their allowlists or far beyond expected size. Keep one active PR only; split oversized milestones rather than creating giant diffs.
+7. Verify builds, tests, formatting/linting, security invariants, and the actual changed behavior in the real macOS app. Save evidence under .loop/verification/<milestone>/.
+8. Commit, push, and create/update the milestone PR with spec references, traceability rows, and verification evidence. Request an independent review and resolve every confirmed blocker.
+9. Squash-merge and delete the branch only when local and CI builds/tests/lints are green, runtime verification exists, independent review is clear, scope is bounded, and mapped traceability rows contain evidence. Never bypass hooks, branch protection, permissions, or required checks; never merge red CI.
+10. Update state, roadmap, traceability, decisions, and progress before exit. Persist precise blockers and ask the user only when credentials, external approvals, entitlements, or an irreducibly human decision prevent progress.
+11. Declare done only after an independent M14 audit confirms every traceability row is implemented+verified+reviewed+merged and all five section-19 journeys pass end-to-end from a clean checkout. Then cancel the recurring job and provide the final report.
+
+The user authorizes code edits, commands, tests, commits, pushes, PR creation, and merges that satisfy these gates. Do not weaken any gate to make progress appear complete.

@@ -70,3 +70,33 @@
 - 1 opus-high implementation worker (native Task subagent, first-pass
   green, diff-gated at 683 lines across the 4-file allowlist), Fable red
   contract tests + default-store fix + mutant + demo.
+
+## Independent review (Sol round 1) — PASS
+gpt-5.6-sol at xhigh, read-only sandbox, full report archived at
+sol-round1-report.md in this directory. Verdict: PASS, zero blockers,
+zero majors. Sol independently verified by inspection: envelope-size
+bound of the accepted-implies-listable probe (single-item list frame is
+20 bytes larger than the create reply, i64::MAX stamps bound stored
+values), the NUL sweep genuinely crossing the admission boundary under
+8 KiB with failing mutant evidence, migration 12 vs the hand-built v11
+runtime demo, and that only the deliberate HOME-redirected test omits
+--store. Two MINOR test-coverage findings, both accepted as follow-ups
+(no code defect claimed, no fix applied this cycle):
+- MINOR 1: no concurrent-append regression test for insert_audit_event.
+  Current code is safe (one MutexGuard spans transaction + MAX(seq)+1 +
+  insert + commit; independently re-verified by Fable this cycle); the
+  ask is a tripwire against a future pool/lock-scope refactor.
+- MINOR 2: list_audit_events persistence coverage stops at 11 events and
+  singleton pages; the 50-limit truncation flag, end-popping byte budget,
+  and omitted/null/blank record_id rejections are exercised for run
+  events but not pinned for audit events. Follow-up: extend the
+  persistence suite when this milestone is next touched.
+
+## Merge gate status at pause
+verify-m0-merge-gate.log in this directory: fresh full run, exit 0,
+172 Rust + 62 Swift tests green, "backend ok". All ADR-007 merge
+conditions are satisfied (green gate log + independent PASS review, no
+confirmed blockers). PR #57 was intentionally NOT merged: the user sent
+two literal "stop" messages during this window, so the loop paused
+before the merge/closeout step. Resume = squash-merge PR #57, then the
+standard cycle-31 closeout.
