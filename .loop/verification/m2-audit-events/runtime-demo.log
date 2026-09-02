@@ -1,0 +1,53 @@
+pre-migration user_version: 11
+post-migration user_version: 12
+--- legacy run's empty trail
+{
+ "version": 1,
+ "type": "list_audit_events_response",
+ "events": [],
+ "truncated": false
+}
+run exit_code: 0
+forged seq/at_ms ignored: OK
+--- unknown kind rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_record_audit_event"
+}
+--- unknown run rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "unknown_run"
+}
+--- blank detail rejected
+{
+ "version": 1,
+ "type": "error",
+ "code": "invalid_record_audit_event"
+}
+--- trail after restart (head)
+{
+ "count": 11,
+ "first": {
+  "id": "audit-event-10a76-18d12ad0688a3610-4",
+  "record_id": "run-10a76-18d12ad06792f148-1",
+  "seq": 0,
+  "at_ms": 1788257601638,
+  "kind": "authorizer",
+  "detail": "demo authorizer"
+ },
+ "last": {
+  "id": "audit-event-10a76-18d12ad068b5be98-e",
+  "record_id": "run-10a76-18d12ad06792f148-1",
+  "seq": 10,
+  "at_ms": 1788257601641,
+  "kind": "user_response",
+  "detail": "approved"
+ },
+ "truncated": false
+}
+legacy trail after restart: OK
+store mode: 0o600
+DEMO OK

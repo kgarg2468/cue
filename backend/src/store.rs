@@ -127,6 +127,19 @@ const MIGRATIONS: &[&str] = &[
         created_at_ms INTEGER NOT NULL
     );
     CREATE INDEX task_packets_by_action ON task_packets (action_id, created_at_ms, id)",
+    // An audit event is one recorded fact in a run's §14 accountability trail. Its sequence
+    // number orders the trail independently of the clock, so a stepped wall clock cannot
+    // reorder what a run is accountable for; the index serves the only read path, which walks
+    // one record in order.
+    "CREATE TABLE audit_events (
+        id TEXT PRIMARY KEY,
+        record_id TEXT NOT NULL REFERENCES runs(id),
+        seq INTEGER NOT NULL,
+        at_ms INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        detail TEXT NOT NULL
+    );
+    CREATE INDEX audit_events_by_record_and_seq ON audit_events (record_id, seq)",
 ];
 
 /// How long a write waits for another process holding the store's write lock.
@@ -216,6 +229,19 @@ pub(crate) struct RunEvent {
     pub(crate) seq: i64,
     pub(crate) at_ms: i64,
     pub(crate) kind: String,
+}
+
+/// One recorded fact in a run record's §14 accountability trail. The fact itself is the caller's
+/// — a kind from the closed taxonomy and the detail it states — while the sequence and the stamp
+/// are the store's, assigned when the event is appended.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct AuditEvent {
+    pub(crate) id: String,
+    pub(crate) record_id: String,
+    pub(crate) seq: i64,
+    pub(crate) at_ms: i64,
+    pub(crate) kind: String,
+    pub(crate) detail: String,
 }
 
 /// One unit of delegable work, drafted before anything runs it and durable across restarts so a
@@ -371,6 +397,24 @@ impl RunEvent {
             seq,
             at_ms,
             kind: kind.to_owned(),
+        }
+    }
+}
+
+impl AuditEvent {
+    /// A fully formed event that has not been persisted yet, so callers can bound-check the
+    /// response frame before anything durable happens. The sequence and the stamp are left at
+    /// zero because they are not the caller's to state: `insert_audit_event` assigns both and
+    /// answers with the event it actually wrote.
+    pub(crate) fn draft(record_id: &str, kind: &str, detail: &str) -> AuditEvent {
+        AuditEvent {
+            // Module-qualified because the record id parameter shadows the id minter here.
+            id: self::record_id("audit-event"),
+            record_id: record_id.to_owned(),
+            seq: 0,
+            at_ms: 0,
+            kind: kind.to_owned(),
+            detail: detail.to_owned(),
         }
     }
 }
@@ -808,6 +852,74 @@ impl Store {
             })
             .map_err(io::Error::other)?
             .collect::<rusqlite::Result<Vec<RunEvent>>>()
+            .map_err(io::Error::other)?;
+        Ok(events)
+    }
+
+    /// Appends one fact to a run record's accountability trail and answers with the event as it
+    /// was written. The sequence is the trail's next number and the stamp is the moment of the
+    /// write: both are read and written under one acquisition of the store's connection, so two
+    /// callers appending to the same trail cannot mint the same sequence.
+    pub(crate) fn insert_audit_event(&self, event: &AuditEvent) -> io::Result<AuditEvent> {
+        let mut connection = self.connection();
+        let transaction = connection.transaction().map_err(io::Error::other)?;
+        let seq = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM audit_events WHERE record_id = ?1",
+                params![event.record_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(io::Error::other)?;
+        let stored = AuditEvent {
+            seq,
+            at_ms: now_milliseconds(),
+            ..event.clone()
+        };
+        transaction
+            .execute(
+                "INSERT INTO audit_events (id, record_id, seq, at_ms, kind, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    stored.id,
+                    stored.record_id,
+                    stored.seq,
+                    stored.at_ms,
+                    stored.kind,
+                    stored.detail
+                ],
+            )
+            .map_err(io::Error::other)?;
+        transaction.commit().map_err(io::Error::other)?;
+        Ok(stored)
+    }
+
+    /// One run record's accountability trail, oldest first. A record's sequence numbers are
+    /// unique by construction, so the sequence alone settles the order.
+    pub(crate) fn list_audit_events(
+        &self,
+        record_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<AuditEvent>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT id, record_id, seq, at_ms, kind, detail FROM audit_events
+                 WHERE record_id = ?1 ORDER BY seq ASC LIMIT ?2",
+            )
+            .map_err(io::Error::other)?;
+        let events = statement
+            .query_map(params![record_id, limit as i64], |row| {
+                Ok(AuditEvent {
+                    id: row.get(0)?,
+                    record_id: row.get(1)?,
+                    seq: row.get(2)?,
+                    at_ms: row.get(3)?,
+                    kind: row.get(4)?,
+                    detail: row.get(5)?,
+                })
+            })
+            .map_err(io::Error::other)?
+            .collect::<rusqlite::Result<Vec<AuditEvent>>>()
             .map_err(io::Error::other)?;
         Ok(events)
     }
@@ -2211,6 +2323,124 @@ mod tests {
                 .expect("packets should list"),
             vec![packet],
             "a packet written after the upgrade must round-trip"
+        );
+    }
+
+    #[test]
+    fn audit_events_sequence_densely_and_stay_on_their_own_record() {
+        let fixture = StoreFixture::new();
+        let store = open_store(&fixture.store_path()).expect("store should open");
+        let run = super::RunRecord::draft("audited", None, "/usr/bin/true");
+        store.insert_run(&run).expect("run should insert");
+        let other = super::RunRecord::draft("unrelated", None, "/usr/bin/true");
+        store.insert_run(&other).expect("run should insert");
+
+        // Nothing a caller states decides the sequence: every draft carries zero, and the trail
+        // numbers itself as each event is appended.
+        let mut appended = Vec::new();
+        for kind in ["authorizer", "source", "final_status"] {
+            appended.push(
+                store
+                    .insert_audit_event(&super::AuditEvent::draft(&run.id, kind, "stated"))
+                    .expect("event should insert"),
+            );
+        }
+        let unrelated = store
+            .insert_audit_event(&super::AuditEvent::draft(
+                &other.id,
+                "artifact",
+                "elsewhere",
+            ))
+            .expect("event should insert");
+
+        assert_eq!(
+            appended.iter().map(|event| event.seq).collect::<Vec<i64>>(),
+            vec![0, 1, 2],
+            "a trail numbers itself densely from zero"
+        );
+        assert!(
+            appended.iter().all(|event| event.at_ms > 0),
+            "the store stamps every event it writes"
+        );
+        assert_eq!(
+            store
+                .list_audit_events(&run.id, 10)
+                .expect("events should list"),
+            appended,
+            "a record's trail lists in sequence order, exactly as it was written"
+        );
+        assert_eq!(
+            store
+                .list_audit_events(&run.id, 2)
+                .expect("events should list")
+                .len(),
+            2,
+            "the limit bounds the page"
+        );
+        assert_eq!(
+            store
+                .list_audit_events(&other.id, 10)
+                .expect("events should list"),
+            vec![unrelated],
+            "a trail carries only its own record's events"
+        );
+    }
+
+    #[test]
+    fn opening_a_version_eleven_store_adds_audit_events_without_disturbing_its_rows() {
+        let fixture = StoreFixture::new();
+        let store_path = fixture.store_path();
+        {
+            // A store written before audit events existed.
+            let connection = Connection::open(&store_path).expect("store should open");
+            for migration in &MIGRATIONS[..11] {
+                connection
+                    .execute_batch(migration)
+                    .expect("schema should apply");
+            }
+            connection
+                .execute_batch(
+                    "INSERT INTO runs (id, run_id, executable, status, started_at_ms, ended_at_ms)
+                     VALUES ('run-legacy', 'before-audit', '/usr/bin/true', 'exited', 7, 9);",
+                )
+                .expect("legacy run should be inserted");
+            connection
+                .pragma_update(None, "user_version", 11)
+                .expect("user_version should be writable");
+        }
+
+        let store = open_store(&store_path).expect("store should open");
+
+        assert_eq!(user_version(&store_path), MIGRATIONS.len() as i64);
+        assert_eq!(
+            store
+                .list_runs(2)
+                .expect("runs should list")
+                .first()
+                .map(|run| run.run_id.clone()),
+            Some("before-audit".to_owned()),
+            "a run written before audit events existed must survive untouched"
+        );
+        assert!(
+            store
+                .list_audit_events("run-legacy", 1)
+                .expect("events should list")
+                .is_empty(),
+            "a run written before audit events existed must survive with no trail"
+        );
+        let event = store
+            .insert_audit_event(&super::AuditEvent::draft(
+                "run-legacy",
+                "authorizer",
+                "the user",
+            ))
+            .expect("event should insert");
+        assert_eq!(
+            store
+                .list_audit_events("run-legacy", 2)
+                .expect("events should list"),
+            vec![event],
+            "an event written after the upgrade must round-trip"
         );
     }
 

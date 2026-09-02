@@ -1,29 +1,31 @@
 {
-  "status": "active",
-  "cycle": 30,
-  "active_milestone": "M2 Domain/persistence (slices 1-12 merged: + task packets)",
-  "branch": null,
-  "active_pr": null,
-  "job_id": "fa669dd2",
-  "cadence": "every 10 minutes (cron 3-53/10 * * * *)",
+  "status": "paused_by_user",
+  "cycle": 31,
+  "active_milestone": "M2 Domain/persistence (slices 1-12 merged; slice 13 audit events complete on open PR #57)",
+  "branch": "loop/m2-audit-events",
+  "active_pr": 57,
+  "job_id": null,
+  "cadence": null,
   "created_date": "2026-08-31",
-  "expiry_date": "2026-09-07",
-  "renew_at": "2026-09-06",
+  "expiry_date": null,
+  "renew_at": null,
   "successor_job_id": null,
-  "renewal_status": "scheduled",
-  "renewal_failure_transition": "If replacement creation fails by expiry, transition status to blocked_expired and record the failure in blockers; do not continue cycles under the expired job.",
+  "renewal_status": "n/a (job cancelled)",
+  "renewal_failure_transition": "n/a while paused; reinstate on resume.",
   "recurring_job": {
-    "id": "fa669dd2",
+    "id": "fa669dd2 (CANCELLED 2026-09-02)",
     "cadence_minutes": 10,
     "created_date": "2026-08-31",
     "expires_date": "2026-09-07",
     "auto_expires": true,
-    "paused": false,
-    "pause_reason": null
+    "paused": true,
+    "pause_reason": "User sent two literal 'stop' messages on 2026-09-01/02 amid queued firings. Loop halted mid-cycle 31 before the merge step; recurring job fa669dd2 cancelled so no further firings occur. Exact recreation prompt preserved in .loop/loop-job-prompt.txt."
   },
-  "blockers": [],
+  "blockers": [
+    "Awaiting user direction after 'stop'. PR #57 (loop/m2-audit-events, HEAD 0b6c37a + evidence commit) satisfies every ADR-007 merge condition: fresh verify-m0 exit 0 (172 Rust + 62 Swift, log verify-m0-merge-gate.log), independent Sol xhigh review PASS with zero blockers (sol-round1-report.md; two MINOR test-coverage follow-ups recorded in verification.txt), runtime v11->v12 demo green, mutant evidence saved. Intentionally NOT merged. Resume = squash-merge PR #57, delete branch, run standard cycle-31 closeout (state/progress/traceability S14-005, closeout PR), then recreate the recurring job from .loop/loop-job-prompt.txt if the loop should continue."
+  ],
   "history_rewrite_note": "2026-08-31: repo made public; git-filter-repo purged a desktop screenshot blob, so every commit SHA recorded by cycles 0-17 refers to the pre-rewrite history and no longer resolves. PR numbers remain valid. Current main lineage starts at the rewritten history (README PR #32, redaction commit 5983c33).",
-  "last_cycle_summary": "Cycle 30: delivered M2 slice 12 through PR #55, squash-merged as 3587510. Task packets (spec \u00a78): migration 11 task_packets stores the versioned delegation document in canonical JSON with the list-envelope probe binding. Two-worker remediation (window fix + my git-checkout data loss + recovery worker; lessons recorded). Sol round 1 FAIL: CONFIRMED MAJOR \u2014 default serde_json float parsing broke accepted-implies-listable at the frame boundary (reproduced red at nulls=1013); fixed with float_roundtrip + admission fixed-point guard; verbatim contract narrowed to canonical form. Sol round 2 PASS; both MINORs fixed (comment narrowing, self-contained demo fixture). Gates: 167 Rust + 59 Swift, fmt, clippy -D warnings, verify-m0.sh exit 0, real-binary v10\u219211 demo with wire-text float fidelity. Next: M2 exit-criteria audit (Note/Artifact models, store completeness).",
-  "updated_at": "2026-09-01T09:55:00+00:00",
+  "last_cycle_summary": "Cycle 31 (paused before merge): M2 slice 13, durable audit events (spec §14) on PR #57. Migration 12 audit_events with dense backend-stamped per-record seq (COALESCE(MAX(seq)+1,0) inside one transaction under one connection guard), closed case-sensitive 10-kind taxonomy, detail trimmed non-blank <=4096 bytes, forged client seq/at_ms ignored, record/list protocol arms with mutant-proven accepted-implies-listable probe, Swift IPC client + 3 tests. Red contract bce899a; opus-high worker first-pass green (683-line diff, 4-file allowlist); Fable fixed a worker-flagged default-store hazard (4 tests were opening the real user store; user-data residue inventoried in verification.txt, not deleted). Gates all green: 172 Rust + 62 Swift, fmt, clippy -D warnings, verify-m0 exit 0 twice (one capacity_exhausted flake under parallel load, 3/3 green isolated, recorded), self-contained v11->v12 runtime demo. Sol round 1 PASS, zero blockers, two MINOR test-coverage follow-ups accepted. Merge withheld: user sent 'stop' twice; job fa669dd2 cancelled; lock released.",
+  "updated_at": "2026-09-02T06:30:00+00:00",
   "merge_gate": "ADR-007 (user directive 2026-07-18): GitHub Actions retired permanently (no billing). Merge gate = fresh local scripts/verify-m0.sh run with log saved as evidence + independent Codex gpt-5.6-sol review with all confirmed blockers resolved. Repo is now public; no branch protection."
 }

@@ -1,0 +1,102 @@
+# M2 slice 13 — durable audit events (spec §14 audit log; S14-005; roadmap M2 "audit store")
+
+## Contract
+- audit_events table (migration 12): id PK, record_id REFERENCES runs,
+  seq, at_ms, kind, detail; index (record_id, seq). An event is one recorded
+  fact in a run's §14 accountability trail; seq is backend-stamped, dense
+  from zero per record, and orders the trail independently of the clock.
+- Closed case-sensitive 10-kind taxonomy, one kind per §14 bullet:
+  authorizer, source, packet_version, permission_granted, file_accessed,
+  service_accessed, permission_requested, user_response, artifact,
+  final_status. The producers of these facts (authorization flow, dispatch,
+  connectors) land in M6/M9; M2 owns the durable store and protocol.
+- record_audit_event: record_id double-Option; kind closed; detail trimmed
+  non-blank ≤4096 raw bytes; seq/at_ms are NOT request fields (backend
+  stamps both; forged values ignored — pinned by test and demo);
+  unknown_run split; single-item list-envelope probe with seq and at_ms at
+  i64::MAX (serialized ceilings) BEFORE insert; response serializes the
+  stored event the insert returned, not the draft.
+- list_audit_events: seq ASC, limit-51 truncation probe, end-popping byte
+  budget (keeps the start of the accountability trail).
+
+## TDD evidence
+- red-evidence.log — all three contract tests fail against merged main
+  5c82fab with unknown_request_type.
+- mutant-evidence.log — probe forced to pass (if false &&) -> sweep fails;
+  restored from a cp backup (never git checkout on an uncommitted tree).
+- verify-m0.log — exit 0: 172 Rust tests (50 unit + 13 health_socket + 51
+  persistence + 58 process_lifecycle), 62 Swift tests, fmt, clippy -D
+  warnings, swift format lint.
+- runtime-demo.log + runtime-demo-script.py — real release binary,
+  self-contained hand-built v11 fixture: migration 11 -> 12; a legacy
+  pre-migration run row gains a trail after the upgrade; all ten kinds
+  recorded against a real /usr/bin/true run; forged seq/at_ms ignored;
+  unknown-kind/unknown-run/blank-detail rejections; full trail and legacy
+  trail survive restart in sequence order; 0600.
+
+## Security invariants fixed this slice (found via worker flag)
+- Four persistence tests (two from the cycle-30 packet slice, two of my new
+  red tests) started backends with store_path None, which (a) raced on the
+  real default store's exclusive owner flock under parallel test runs and
+  (b) WROTE TEST DATA INTO THE USER'S REAL STORE — violating the "user
+  store untouched" invariant claimed by every slice. All four now use
+  fixture stores; the deliberate default-store test (HOME-redirected)
+  is unchanged. RESIDUE NOTE for the user: the real store at
+  ~/Library/Application Support/CaptureDelegate/store.sqlite contains test
+  residue from cycles 25-31 (159 runs, 22 actions, 12 task packets, 0
+  sessions as of 2026-09-01). Not deleted — the adjacent sessions/
+  directory predates the loop and the store is the user's data dir; left
+  to the user's judgment.
+
+## Worker-flagged bounds and deviations (recorded, kept)
+- Swift field is `sequence` (matches RunEvent in the same file), wire key
+  `seq`.
+- AuditEvent::draft takes (record_id, kind, detail) and leaves seq/at_ms
+  zero — the store assigns them, unlike RunEvent whose callers do.
+- The reply frame serializes after the insert; safe because the probed
+  single-item list envelope is the larger frame measured at ceiling
+  stamps. The post-insert check stands rather than an unwrap.
+- record_audit_event does not blank-filter record_id (blank falls to
+  unknown_run); list_audit_events blank-filters, mirroring list_run_events.
+- insert_run_event is #[cfg(test)]-gated for external callers while
+  insert_audit_event is production: run events are backend-authored only,
+  audit events arrive over the protocol.
+- Flake observed once during verify-m0 under full parallel load:
+  capacity_exhausted_input_keeps_the_control_connection_usable
+  (M1 backpressure timing); 3/3 green in isolation and green on the gate
+  rerun. Recorded, not masked; revisit if it recurs.
+
+## Routing
+- 1 opus-high implementation worker (native Task subagent, first-pass
+  green, diff-gated at 683 lines across the 4-file allowlist), Fable red
+  contract tests + default-store fix + mutant + demo.
+
+## Independent review (Sol round 1) — PASS
+gpt-5.6-sol at xhigh, read-only sandbox, full report archived at
+sol-round1-report.md in this directory. Verdict: PASS, zero blockers,
+zero majors. Sol independently verified by inspection: envelope-size
+bound of the accepted-implies-listable probe (single-item list frame is
+20 bytes larger than the create reply, i64::MAX stamps bound stored
+values), the NUL sweep genuinely crossing the admission boundary under
+8 KiB with failing mutant evidence, migration 12 vs the hand-built v11
+runtime demo, and that only the deliberate HOME-redirected test omits
+--store. Two MINOR test-coverage findings, both accepted as follow-ups
+(no code defect claimed, no fix applied this cycle):
+- MINOR 1: no concurrent-append regression test for insert_audit_event.
+  Current code is safe (one MutexGuard spans transaction + MAX(seq)+1 +
+  insert + commit; independently re-verified by Fable this cycle); the
+  ask is a tripwire against a future pool/lock-scope refactor.
+- MINOR 2: list_audit_events persistence coverage stops at 11 events and
+  singleton pages; the 50-limit truncation flag, end-popping byte budget,
+  and omitted/null/blank record_id rejections are exercised for run
+  events but not pinned for audit events. Follow-up: extend the
+  persistence suite when this milestone is next touched.
+
+## Merge gate status at pause
+verify-m0-merge-gate.log in this directory: fresh full run, exit 0,
+172 Rust + 62 Swift tests green, "backend ok". All ADR-007 merge
+conditions are satisfied (green gate log + independent PASS review, no
+confirmed blockers). PR #57 was intentionally NOT merged: the user sent
+two literal "stop" messages during this window, so the loop paused
+before the merge/closeout step. Resume = squash-merge PR #57, then the
+standard cycle-31 closeout.

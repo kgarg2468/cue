@@ -1,0 +1,41 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/persistence.rs (target/debug/deps/persistence-97b5eb15225cf825)
+
+running 3 tests
+test invalid_audit_events_are_rejected_before_persisting ... FAILED
+test audit_events_persist_in_sequence_and_survive_a_restart ... FAILED
+test every_accepted_audit_event_is_singly_listable ... FAILED
+
+failures:
+
+---- invalid_audit_events_are_rejected_before_persisting stdout ----
+
+thread 'invalid_audit_events_are_rejected_before_persisting' (25865896) panicked at backend/tests/persistence.rs:2994:5:
+assertion `left == right` failed: event should be accepted, got {"code":"unknown_request_type","type":"error","version":1}
+  left: String("error")
+ right: "record_audit_event_response"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- audit_events_persist_in_sequence_and_survive_a_restart stdout ----
+
+thread 'audit_events_persist_in_sequence_and_survive_a_restart' (25865894) panicked at backend/tests/persistence.rs:2994:5:
+assertion `left == right` failed: event should be accepted, got {"code":"unknown_request_type","type":"error","version":1}
+  left: String("error")
+ right: "record_audit_event_response"
+
+---- every_accepted_audit_event_is_singly_listable stdout ----
+
+thread 'every_accepted_audit_event_is_singly_listable' (25865895) panicked at backend/tests/persistence.rs:3162:13:
+assertion `left == right` failed
+  left: String("unknown_request_type")
+ right: "invalid_record_audit_event"
+
+
+failures:
+    audit_events_persist_in_sequence_and_survive_a_restart
+    every_accepted_audit_event_is_singly_listable
+    invalid_audit_events_are_rejected_before_persisting
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.29s
+
+error: test failed, to rerun pass `--test persistence`

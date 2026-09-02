@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/persistence.rs (target/debug/deps/persistence-97b5eb15225cf825)
+
+running 1 test
+test every_accepted_audit_event_is_singly_listable ... FAILED
+
+failures:
+
+---- every_accepted_audit_event_is_singly_listable stdout ----
+
+thread 'every_accepted_audit_event_is_singly_listable' (25943342) panicked at backend/tests/persistence.rs:3173:9:
+assertion `left == right` failed: an admitted audit event must be listable alone, nulls=1328
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_accepted_audit_event_is_singly_listable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.93s
+
+error: test failed, to rerun pass `--test persistence`
